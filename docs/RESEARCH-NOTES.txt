@@ -1,0 +1,86 @@
+What's Needed
+One more serious AI Engineering or MLOps project to replace both CineMatch and Haggis on my AI Eng CV.
+
+Recommendation: Fine-tuning / LLM Project
+Fine-tuning a small open-source model via LoRA/QLoRA is the highest-impact addition to the AI/ML CV for the roles you're targeting. The reasons:
+  * LoRA/QLoRA fine-tuning is directly mentioned in 2026 AI Engineering job descriptions and most candidates don't have a production-grade example
+  * Evaluation framework design (ROUGE, BERTScore, golden set, human eval) is the most differentiating part of this project — it's what separates AI Engineers from people who just call the OpenAI API; invest disproportionate effort here
+  * The MLOps wrapper (MLflow experiment tracking, model registry with champion aliases, served endpoint) mirrors what LAAD does but for a generative model — a distinct and increasingly relevant paradigm
+  * For Platform Engineering specifically, the serving infrastructure (quantised endpoint, latency benchmarking, fallback chain) is more relevant than the fine-tuning itself — and you build it anyway
+
+Target Model
+Choose at build time — the landscape moves fast. Selection criteria: small enough to fine-tune at 4-bit quantisation on reasonable costing to free GPU compute; released recently enough to be credible on a 2026 CV; strong on instruction-following benchmarks for the chosen domain; HuggingFace PEFT-compatible with documented LoRA/QLoRA examples.
+  * Currently leaning mostly towards Qwen2.5-Coder-7B-Instruct but still not locked in
+
+Compute
+  * Kaggle: 30h/week free T4 GPU — sufficient for small model QLoRA
+  * Google Colab free tier: works for small models at 4-bit quantisation
+  * HuggingFace AutoTrain: wraps the PEFT loop to minimise setup time
+
+Domain Recommendation
+Code/bug-fix Q&A — fine-tune on real closed GitHub issues paired with their actual accepted fix pull requests. Reasons:
+  1. Zero domain collision — LAAD is log diagnostics, StockLens is financial, W3C ETL is web logs; this shares no thematic ground with any of them. DevSync touches GitHub but as workflow/PM tooling, not code understanding, which reads as different enough
+  2. Strongest evaluation rigor of anything in the whole plan — ground truth is a real, human-verified accepted fix, not an LLM-generated scenario like the log-diagnostics or RAGAS golden sets were
+  3. Methodology mirrors SWE-bench (Jimenez et al., ICLR 2024) — a well-known academic benchmark built on exactly this pattern: issue → merged PR that resolves it, filtered via execution-based "fail-to-pass" test verification. SWE-bench itself released a fine-tuned model (SWE-Llama) trained the same way. Being able to say the evaluation methodology mirrors a published benchmark is a strong, verifiable signal in an interview
+  4. Hottest 2026 AI Engineering use case — coding assistants are the dominant commercial LLM application category right now
+
+Full Project Spec
+  * Repo selection: 2–3 well-maintained, permissively-licensed (MIT/Apache) Python repos with fast, simple-to-install test suites — narrow scope keeps execution-based verification (below) tractable
+  * Two-tier dataset, mirroring SWE-bench's own training/Verified split:
+      * Training set (~1,500–2,500 examples): closed issues + their merged fix PR, attribute-filtered (PR is merged, resolves a linked issue, touches the relevant source files); Q&A-framed via LLM assistance from the raw issue text and PR diff/description
+      * Verified golden eval subset (~40–80 examples): further filtered via execution-based verification — PR touches test files and includes at least one test that fails before the fix and passes after (a "fail-to-pass" test, in SWE-bench's terms)
+  * LoRA/QLoRA fine-tune on a small open-source model (code/bug-fix domain)
+  * Evaluation: 3-way comparison — prompted base vs. fine-tuned vs. fine-tuned + 4-bit quantised — across ROUGE, BERTScore, and the verified golden subset; delta over prompted base is the hero metric
+  * Functional correctness layer (if time allows — first to cut under the hard cutoff): for the verified golden subset, actually apply each generated fix and run the repo's real test suite; report fail-to-pass rate, the same headline metric SWE-bench itself uses. Materially stronger signal than text similarity alone, and the whole reason this domain was chosen
+  * Pre-build metric targets (set from baseline run before starting fine-tuning loop): minimum ROUGE-L delta over prompted base — target set from the baseline run rather than carried over from a different domain; P95 inference latency budget from base model benchmark; quantisation quality gate of <5% degradation vs unquantised fine-tuned
+  * 3-way latency benchmark: base / fine-tuned / fine-tuned + 4-bit quantised across P50/P95 latency and throughput
+  * Prompt versioning in Weights & Biases: both dataset-curation prompts (Q&A framing from raw issue/PR pairs) and eval-time prompts (prompted-base system prompt) logged as tagged config/artifacts per experiment run for reproducibility
+  * Weights & Biases experiment tracking with Model Registry champion aliases — chosen over MLflow specifically because W&B is the dominant tracker in the LoRA/QLoRA/HuggingFace ecosystem, versus MLflow's more classical-ML fit already used on LAAD
+  * SageMaker Serverless Inference endpoint via HuggingFace DLC (serves 4-bit quantised merged model; zero idle cost)
+  * Lightweight model card published to HuggingFace Hub: training config, eval results, limitations
+
+Cloud Deployment (AWS)
+Architecture
+Kaggle T4 (free)
+  └─ QLoRA fine-tune → LoRA adapter weights
+       │
+       ├────────────────────────┐
+       ▼                        ▼
+AWS S3 (artifact store)   Weights & Biases (hosted — no self-managed infra needed)
+  └─ LoRA adapter weights   └─ Experiment runs: prompted base / fine-tuned / quantised
+  └─ Merged model            └─ Prompt versioning (curation + eval-time prompts)
+  └─ Eval results             └─ Model Registry champion alias → best checkpoint
+  └─ Golden set outputs
+       │
+       ▼
+HuggingFace Hub (free)
+  └─ Merged model + lightweight model card
+       │
+       ▼
+SageMaker Serverless Inference
+  └─ HuggingFace DLC
+  └─ 4-bit quantised merged model loaded from S3
+  └─ Zero idle cost — pay per invocation
+       │
+       ▼
+GitHub Actions (OIDC → AWS)
+  └─ Evaluation gate on every PR
+  └─ Champion alias (from W&B) → terraform apply -target=aws_sagemaker_endpoint
+
+CV differentiation from LAAD LAAD: real-time endpoint (XGBoost, discriminative, always-on, ml.t2.medium) Fine-tuning: serverless endpoint (LLM, generative, invocation-based, HuggingFace DLC) Different endpoint type, different model paradigm, same MLOps discipline.
+Terraform — 3 modules, ~20–30 resources (simplified from 4 modules/~30–40 — no compute module needed now W&B is hosted, not self-managed)
+
+terraform/
+  modules/
+    storage/    # S3 bucket, bucket policies
+    iam/        # SageMaker execution role, OIDC provider, GitHub Actions role
+    sagemaker/  # Model, endpoint config, serverless endpoint, CloudWatch log group
+Two-stage apply: Stage 1 (upfront) — storage, IAM. Stage 2 (post-training) — sagemaker module, triggered by GitHub Actions once quantised model is uploaded to S3 at a fixed artifact path.
+
+Cost and profile
+Component	Cost
+Kaggle training	- Free
+S3	- Negligible
+SageMaker Serverless - ~£0 idle, pay per invocation
+HuggingFace Hub -	Free
+Weights & Biases - Free — personal tier comfortably covers this scale
