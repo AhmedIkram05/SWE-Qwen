@@ -192,7 +192,7 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 
 ### ADR-010 — Model Deployment Architecture & Serving Stack
 
-- **Decision:** Deploy candidate models as a serverless, high-throughput **Inference API** utilizing **vLLM** hosted on a serverless GPU platform (e.g., **Modal** or **Baseten**).
+- **Decision:** Deploy candidate models as a serverless, high-throughput **Inference API** utilizing **vLLM** hosted on a serverless GPU platform, **Modal**.
 - **Rationale:** `vLLM` provides industry-standard PagedAttention and high token throughput. Serverless GPU orchestration provides automatic scale-to-zero capabilities ($0 cost when idle), eliminates AWS GPU quota approval friction, and demonstrates modern AI engineering architecture.
 
 ---
@@ -206,7 +206,13 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 
 ---
 
+### ADR-012 — Vertical Slice Delivery
 
+- **Decision:** The platform will be implemented as a sequence of independently functional vertical slices. Each phase must produce a working, testable increment rather than partially completing multiple workstreams.
+
+- **Rationale:** This reduces integration risk, enables continuous validation, and ensures the repository remains deployable throughout development.
+
+---
 
 # 6. Target High-Level Platform Architecture
 
@@ -243,7 +249,7 @@ The project will use a **hybrid strategy**: training data curated from real GitH
           [ Terraform / Cloud IaC ] ──► (Storage, Secrets, IAM)
                     │
                     ▼
-       [ Serverless GPU Deployment ] (vLLM / Modal / Baseten)
+       [ Serverless GPU Deployment ] (vLLM / Modal)
                     │
                     ▼
        [ Scale-to-Zero Inference API ]
