@@ -1,7 +1,6 @@
 # Project Vision & Architectural Foundations Document
 
-**Document Title:** Architectural Decision Record (ADR) & Platform Vision  
-**Status:** Accepted  
+**Title:** Architectural Decision Record (ADR) & Platform Vision  
 **Purpose:** This document defines the authoritative project vision, architectural principles, and foundational decisions governing the implementation of the LLMOps / AI Engineering platform. All downstream implementation planning (Master Plan, Phase Plans, Technical Specifications, and Code) must conform to the decisions defined here.
 
 ---
