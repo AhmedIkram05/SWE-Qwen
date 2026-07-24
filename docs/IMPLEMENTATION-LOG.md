@@ -1,6 +1,11 @@
 # Implementation Log Tracker
 
-**Purpose:** Single source of truth for all deviations, decisions, blockers, and technical details discovered during phase implementation. Updated in real-time during each phase. Master Plan remains the *intent*; this log captures *reality*.
+**Purpose:** Single source of truth for **major/medium deviations** from the Master Plan during phase implementation. Updated in real-time. Do not log routine task completions — only changes that alter scope, architecture, timeline, or introduce risk.
+
+**Threshold for Logging:**
+- **Major:** Scope change, architecture change, timeline slip >1 day, new dependency, blocker requiring workaround
+- **Medium:** Config/parameter changes, tool/library swap, partial task completion with follow-up needed
+- **Do NOT log:** Task completed as planned, bug fixes, minor typo fixes, formatting, routine test passes
 
 ---
 
