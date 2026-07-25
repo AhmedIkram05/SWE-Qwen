@@ -29,9 +29,9 @@ base_image = (
         "libgl1-mesa-glx",
     )
     .pip_install(
-        "torch>=2.13.0",
-        "torchvision>=0.20.0",
-        "torchaudio>=2.13.0",
+        "torch==2.11.0",
+        "torchvision==0.16.0",
+        "torchaudio==2.11.0",
         index_url="https://download.pytorch.org/whl/cu126",
     )
     .pip_install(

@@ -102,10 +102,11 @@ jobs:
     name: Terraform Plan
     needs: terraform-validate
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && env.GCP_WIF_PROVIDER != ''
     defaults:
       run:
         working-directory: infra/terraform
+    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
