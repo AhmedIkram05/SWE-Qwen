@@ -7,9 +7,13 @@ on:
     branches: [main, develop]
   workflow_dispatch:
 
+permissions:
+  id-token: write
+  contents: read
+
 env:
   PYTHON_VERSION: "3.11"
-  NODE_VERSION: "20"
+  NODE_VERSION: "24"
 
 jobs:
   lint-and-typecheck:
