@@ -6,10 +6,11 @@ This script initializes a Weights & Biases project with proper
 artifact tracking, run configuration, and team settings.
 """
 
-import os
 import argparse
+import os
+import sys
+
 import wandb
-from pathlib import Path
 
 
 def init_wandb_project(
@@ -21,7 +22,7 @@ def init_wandb_project(
 ):
     """
     Initialize W&B project with standard configuration.
-    
+
     Args:
         project_name: W&B project name
         entity: W&B entity (username or team name)
@@ -39,7 +40,7 @@ def init_wandb_project(
 
     try:
         wandb.login(key=api_key)
-        print(f"Logged in to W&B successfully")
+        print("Logged in to W&B successfully")
     except Exception as e:
         print(f"ERROR: Failed to login to W&B: {e}")
         return False
@@ -60,12 +61,14 @@ def init_wandb_project(
         run.notes = description
 
     # Log project metadata
-    run.config.update({
-        "project": project_name,
-        "framework": "pytorch",
-        "model_family": "qwen",
-        "task": "code-generation",
-    })
+    run.config.update(
+        {
+            "project": project_name,
+            "framework": "pytorch",
+            "model_family": "qwen",
+            "task": "code-generation",
+        }
+    )
 
     # Create default artifacts collection
     artifact = wandb.Artifact(
@@ -100,7 +103,7 @@ def create_sweep_config(project_name: str, entity: str = None):
             "learning_rate": {
                 "distribution": "log_uniform",
                 "min": -10.819,  # 2e-5
-                "max": -8.517,   # 2e-4
+                "max": -8.517,  # 2e-4
             },
             "lora_rank": {
                 "values": [32, 64, 128],
@@ -144,19 +147,19 @@ def create_sweep_config(project_name: str, entity: str = None):
 def setup_artifact_registries(project_name: str, entity: str = None):
     """Set up model and dataset artifact registries."""
     api = wandb.Api()
-    
+
     # Create model registry
     try:
-        model_registry = api.artifact_type("model", project=project_name, entity=entity)
+        api.artifact_type("model", project=project_name, entity=entity)
         print(f"Model registry ready: {project_name}")
-    except:
+    except Exception:
         print("Model registry will be created on first model upload")
 
     # Create dataset registry
     try:
-        dataset_registry = api.artifact_type("dataset", project=project_name, entity=entity)
+        api.artifact_type("dataset", project=project_name, entity=entity)
         print(f"Dataset registry ready: {project_name}")
-    except:
+    except Exception:
         print("Dataset registry will be created on first dataset upload")
 
 
@@ -183,8 +186,13 @@ def main():
         "method": "LoRA",
         "quantization": "4-bit",
         "target_modules": [
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
         ],
     }
 
@@ -209,4 +217,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())

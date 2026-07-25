@@ -5,7 +5,7 @@ Tests for project scaffold structure and configuration.
 
 import os
 import subprocess
-import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -61,8 +61,12 @@ class TestProjectStructure:
     def test_storage_module_exists(self):
         assert (PROJECT_ROOT / "infra" / "terraform" / "modules" / "storage").is_dir()
         assert (PROJECT_ROOT / "infra" / "terraform" / "modules" / "storage" / "main.tf").exists()
-        assert (PROJECT_ROOT / "infra" / "terraform" / "modules" / "storage" / "variables.tf").exists()
-        assert (PROJECT_ROOT / "infra" / "terraform" / "modules" / "storage" / "outputs.tf").exists()
+        assert (
+            PROJECT_ROOT / "infra" / "terraform" / "modules" / "storage" / "variables.tf"
+        ).exists()
+        assert (
+            PROJECT_ROOT / "infra" / "terraform" / "modules" / "storage" / "outputs.tf"
+        ).exists()
 
     def test_iam_module_exists(self):
         assert (PROJECT_ROOT / "infra" / "terraform" / "modules" / "iam").is_dir()
@@ -78,14 +82,10 @@ class TestPyProjectToml:
     """Test pyproject.toml configuration."""
 
     def test_pyproject_toml_valid_toml(self):
-        import tomllib
-        with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
-            config = tomllib.load(f)
+        tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
 
     def test_project_metadata(self):
-        import tomllib
-        with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
-            config = tomllib.load(f)
+        config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
 
         project = config.get("project", {})
         assert project.get("name") == "swe-qwen"
@@ -96,10 +96,7 @@ class TestPyProjectToml:
         assert "requires-python" in project
 
     def test_dependencies_defined(self):
-        import tomllib
-        with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
-            config = tomllib.load(f)
-
+        config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
         project = config.get("project", {})
         deps = project.get("dependencies", [])
         required_deps = [
@@ -118,10 +115,7 @@ class TestPyProjectToml:
             assert any(dep in d for d in deps), f"Missing dependency: {dep}"
 
     def test_dev_dependencies_defined(self):
-        import tomllib
-        with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
-            config = tomllib.load(f)
-
+        config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
         optional_deps = config.get("project", {}).get("optional-dependencies", {})
         dev_deps = optional_deps.get("dev", [])
         required_dev = ["pytest", "ruff", "mypy", "pre-commit"]
@@ -129,10 +123,7 @@ class TestPyProjectToml:
             assert any(dep in d for d in dev_deps), f"Missing dev dependency: {dep}"
 
     def test_tool_configurations(self):
-        import tomllib
-        with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
-            config = tomllib.load(f)
-
+        config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
         tools = config.get("tool", {})
         assert "ruff" in tools
         assert "mypy" in tools
@@ -168,7 +159,7 @@ class TestModalApp:
         """Test that modal_app.py can be parsed."""
         content = (PROJECT_ROOT / "src" / "swe_qwen" / "modal_app.py").read_text()
         assert "import modal" in content
-        assert "app = modal.App" in content or 'modal.App(' in content
+        assert "app = modal.App" in content or "modal.App(" in content
 
     def test_modal_app_has_functions(self):
         content = (PROJECT_ROOT / "src" / "swe_qwen" / "modal_app.py").read_text()
@@ -178,7 +169,9 @@ class TestModalApp:
             "serve_swe_qwen",
         ]
         for func in required_functions:
-            assert f"def {func}" in content or f"@app.function" in content, f"Missing function: {func}"
+            assert f"def {func}" in content or "@app.function" in content, (
+                f"Missing function: {func}"
+            )
 
 
 class TestInitWandbScript:
@@ -205,6 +198,7 @@ class TestTerraformFiles:
             cwd=terraform_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0, f"terraform init failed: {result.stderr}"
 
@@ -216,6 +210,7 @@ class TestTerraformFiles:
             cwd=terraform_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0, f"terraform validate failed: {result.stderr}"
 

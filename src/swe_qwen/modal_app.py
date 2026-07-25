@@ -56,16 +56,12 @@ base_image = (
 )
 
 # GPU image for training (larger, with more ML libs)
-gpu_image = (
-    base_image
-    .pip_install(
-        "xformers>=0.0.27",
-        index_url="https://download.pytorch.org/whl/cu121",
-    )
-    .pip_install(
-        "auto-gptq>=0.7.1",
-        "optimum>=1.21.0",
-    )
+gpu_image = base_image.pip_install(
+    "xformers>=0.0.27",
+    index_url="https://download.pytorch.org/whl/cu121",
+).pip_install(
+    "auto-gptq>=0.7.1",
+    "optimum>=1.21.0",
 )
 
 # CPU image for lightweight tasks
@@ -84,6 +80,7 @@ cpu_image = base_image
 def hello_modal():
     """Simple test function to verify Modal setup."""
     import os
+
     return {
         "status": "ok",
         "message": "Modal is configured correctly!",
@@ -111,7 +108,7 @@ def hello_modal():
         initial_delay=60.0,
     ),
 )
-def train_swe_qwen(
+def train_swe_qwen(  # noqa: PLR0913
     model_name: str = "Qwen/Qwen3-30B-A3B",  # fallback: Qwen/Qwen3-14B
     dataset_path: str = "/data/train",
     output_dir: str = "/models/swe-qwen-finetuned",
@@ -131,13 +128,13 @@ def train_swe_qwen(
     save_steps: int = 500,
     eval_steps: int = 500,
     wandb_project: str = "swe-qwen",
-    wandb_run_name: str = None,
+    wandb_run_name: str | None = None,
     push_to_hub: bool = False,
-    hub_model_id: str = None,
+    hub_model_id: str | None = None,
 ):
     """
     Fine-tune SWE-Qwen model using LoRA on Modal GPUs.
-    
+
     Args:
         model_name: Base model to fine-tune
         dataset_path: Path to training dataset
@@ -163,18 +160,18 @@ def train_swe_qwen(
         hub_model_id: Hub model ID
     """
     import os
-    import json
-    import torch
     from datetime import datetime
+
+    import torch
+    from datasets import load_from_disk
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from transformers import (
         AutoModelForCausalLM,
         AutoTokenizer,
         TrainingArguments,
-        TrainerCallback,
     )
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from trl import SFTTrainer
-    from datasets import load_from_disk
+
     import wandb
 
     # Set up W&B
@@ -195,6 +192,7 @@ def train_swe_qwen(
     # Quantization config
     if use_4bit:
         from transformers import BitsAndBytesConfig
+
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -226,8 +224,13 @@ def train_swe_qwen(
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
         ],
     )
 
@@ -250,7 +253,7 @@ def train_swe_qwen(
         eval_steps=eval_steps,
         evaluation_strategy="steps" if eval_dataset else "no",
         save_strategy="steps",
-        load_best_model_at_end=True if eval_dataset else False,
+        load_best_model_at_end=bool(eval_dataset),
         metric_for_best_model="eval_loss" if eval_dataset else None,
         greater_is_better=False,
         bf16=True,
@@ -312,7 +315,7 @@ def train_swe_qwen(
     concurrency_limit=4,
     scaledown_window=300,
 )
-async def serve_swe_qwen(
+async def serve_swe_qwen(  # noqa: PLR0913
     model_path: str = "/models/swe-qwen-finetuned",
     host: str = "0.0.0.0",
     port: int = 8000,
@@ -322,7 +325,7 @@ async def serve_swe_qwen(
 ):
     """
     Serve SWE-Qwen model using vLLM for fast inference.
-    
+
     Args:
         model_path: Path to the fine-tuned model
         host: Host to bind to
@@ -331,13 +334,10 @@ async def serve_swe_qwen(
         tensor_parallel_size: Number of GPUs for tensor parallelism
         gpu_memory_utilization: GPU memory utilization fraction
     """
-    import os
-    from vllm import AsyncLLMEngine, AsyncEngineArgs
-    from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-    from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+    import uvicorn
     from fastapi import FastAPI
     from fastapi.responses import StreamingResponse
-    import uvicorn
+    from vllm import AsyncEngineArgs, AsyncLLMEngine
 
     # Initialize vLLM engine
     engine_args = AsyncEngineArgs(
@@ -360,6 +360,7 @@ async def serve_swe_qwen(
     @app.post("/v1/completions")
     async def completions(request: dict):
         from vllm.entrypoints.openai.protocol import CompletionRequest
+
         req = CompletionRequest(**request)
         generator = engine.generate(
             prompt=req.prompt,
@@ -371,6 +372,7 @@ async def serve_swe_qwen(
     @app.post("/v1/chat/completions")
     async def chat_completions(request: dict):
         from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+
         req = ChatCompletionRequest(**request)
         generator = engine.chat(
             messages=req.messages,

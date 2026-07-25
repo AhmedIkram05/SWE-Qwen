@@ -8,16 +8,18 @@ and that the infrastructure graph is correctly configured.
 import json
 import os
 import subprocess
-from typing import Optional
-import pytest
 from pathlib import Path
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).parent.parent
 TERRAFORM_DIR = PROJECT_ROOT / "infra" / "terraform"
 
 # These tests need real GCP credentials because terraform output/plan/graph
 # require the GCS backend to be initialized
-HAS_GCP_CREDS = bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("GCP_SA_KEY"))
+HAS_GCP_CREDS = bool(
+    os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("GCP_SA_KEY")
+)
 
 
 def run_terraform_init(terraform_dir: Path) -> subprocess.CompletedProcess:
@@ -27,18 +29,19 @@ def run_terraform_init(terraform_dir: Path) -> subprocess.CompletedProcess:
         cwd=terraform_dir,
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
-def get_terraform_outputs(variables: Optional[dict] = None) -> dict:
+def get_terraform_outputs(variables: dict | None = None) -> dict:
     """Get all terraform outputs as a dictionary."""
     terraform_dir = TERRAFORM_DIR
-    
+
     # First ensure terraform is initialized
     init_result = run_terraform_init(terraform_dir)
     if init_result.returncode != 0:
         raise RuntimeError(f"terraform init failed: {init_result.stderr}")
-    
+
     cmd = ["terraform", "output", "-json"]
     env = {}
     if variables:
@@ -55,6 +58,7 @@ def get_terraform_outputs(variables: Optional[dict] = None) -> dict:
         capture_output=True,
         text=True,
         env={**os.environ, **env},
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(f"terraform output failed: {result.stderr}")
@@ -69,6 +73,7 @@ def terraform_initialized():
         cwd=TERRAFORM_DIR,
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, f"terraform init failed: {result.stderr}"
     return True
@@ -88,6 +93,7 @@ class TestTerraformInit:
             cwd=TERRAFORM_DIR,
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0, f"terraform validate failed: {result.stderr}"
 
@@ -98,6 +104,7 @@ class TestTerraformInit:
             cwd=TERRAFORM_DIR,
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0, f"terraform fmt check failed: {result.stdout}"
 
@@ -250,6 +257,7 @@ class TestInfrastructureGraph:
                 "TF_VAR_repository_owner": "test-owner",
                 "TF_VAR_enable_workload_identity": "true",
             },
+            check=False,
         )
         assert result.returncode == 0, f"terraform graph failed: {result.stderr}"
 
@@ -274,6 +282,7 @@ class TestInfrastructureGraph:
                 "TF_VAR_repository_owner": "test-owner",
                 "TF_VAR_enable_workload_identity": "true",
             },
+            check=False,
         )
         assert result.returncode == 0
 
@@ -304,7 +313,8 @@ class TestTerraformPlan:
         """Terraform plan should execute without errors (dry run)."""
         result = subprocess.run(
             [
-                "terraform", "plan",
+                "terraform",
+                "plan",
                 "-var=gcp_project_id=test-project",
                 "-var=gcp_region=us-central1",
                 "-var=environment=dev",
@@ -316,6 +326,7 @@ class TestTerraformPlan:
             cwd=TERRAFORM_DIR,
             capture_output=True,
             text=True,
+            check=False,
         )
         # Exit code 0 = no changes, 2 = changes pending, both are valid
         # Exit code 1 = error

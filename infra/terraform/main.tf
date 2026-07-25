@@ -1,5 +1,5 @@
 # Main Terraform Configuration for SWE-Qwen Platform
-# 
+#
 # This configuration provisions:
 # - GCS buckets for datasets and model checkpoints
 # - IAM roles and Workload Identity Federation for GitHub Actions

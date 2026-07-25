@@ -168,8 +168,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -214,8 +214,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -264,8 +264,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -314,8 +314,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -362,8 +362,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -409,8 +409,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -457,8 +457,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -502,8 +502,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -550,8 +550,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -597,8 +597,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -645,8 +645,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -692,8 +692,8 @@ Each Phase follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 

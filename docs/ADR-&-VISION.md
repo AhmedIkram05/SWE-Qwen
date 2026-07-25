@@ -1,6 +1,6 @@
 # Project Vision & Architectural Foundations Document for SWE-Qwen LLM Fine Tuning Project
 
-**Title:** Architectural Decision Record (ADR) & Platform Vision  
+**Title:** Architectural Decision Record (ADR) & Platform Vision
 **Purpose:** This document defines the authoritative project vision, architectural principles, and foundational decisions governing the implementation of the LLMOps / AI Engineering platform. All downstream implementation planning (Master Plan, Phase Plans, Technical Specifications, and Code) must conform to the decisions defined here. The goal of this document is to define what is being built and why, not how each component will be implemented.
 
 ---
@@ -130,8 +130,8 @@ Every architectural decision must maximize:
 
 ### ADR-004 — Dataset Engineering & Strategy
 
-- **Decision:** Datasets are treated as production software assets subject to a strict lifecycle:  
-`Ingestion` --> `Validation` --> `Cleaning` --> `Versioning` --> `Splitting` --> `Archiving`.  
+- **Decision:** Datasets are treated as production software assets subject to a strict lifecycle:
+`Ingestion` --> `Validation` --> `Cleaning` --> `Versioning` --> `Splitting` --> `Archiving`.
 The project will use a **hybrid strategy**: training data curated from real GitHub issue-PR pairs, with evaluation grounded in SWE-bench principles (including the official SWE-bench Verified subset where appropriate).
 - **Rationale:** Data quality directly dictates model utility. Establishing a versioned, schema-validated data pipeline guarantees reproducibility.
 

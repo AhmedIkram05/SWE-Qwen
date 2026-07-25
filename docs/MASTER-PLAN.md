@@ -1,8 +1,8 @@
 # Master Implementation Plan — SWE-Qwen LLM Fine-Tuning Platform
 
-**Document Type:** Technical Master Plan (Level 3 in project hierarchy)  
-**Status:** Draft v1.0  
-**Parent Document:** `docs/ADR-&-VISION.md` — all decisions, principles, and ADRs referenced herein are authoritative. This document translates them into an implementation roadmap.  
+**Document Type:** Technical Master Plan (Level 3 in project hierarchy)
+**Status:** Draft v1.0
+**Parent Document:** `docs/ADR-&-VISION.md` — all decisions, principles, and ADRs referenced herein are authoritative. This document translates them into an implementation roadmap.
 **Hierarchy Position:**
 
 ```

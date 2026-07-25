@@ -14,7 +14,7 @@ repos:
         additional_dependencies:
           - "types-requests"
           - "types-pyyaml"
-        args: [--ignore-missing-imports]
+        args: [--ignore-missing-imports, src]
         pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
