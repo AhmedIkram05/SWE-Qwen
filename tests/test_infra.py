@@ -7,6 +7,7 @@ and that the infrastructure graph is correctly configured.
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -79,6 +80,10 @@ def terraform_initialized():
     return True
 
 
+@pytest.mark.skipif(
+    shutil.which("terraform") is None,
+    reason="terraform binary not available on this runner",
+)
 class TestTerraformInit:
     """Test Terraform initialization and validation."""
 

@@ -3,9 +3,19 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
     branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   id-token: write
@@ -16,8 +26,8 @@ env:
   NODE_VERSION: "24"
 
 jobs:
-  lint-and-typecheck:
-    name: Lint & Typecheck
+  lint-and-test:
+    name: Lint & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -42,24 +52,6 @@ jobs:
 
       - name: Run MyPy
         run: mypy src/
-
-  test:
-    name: Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
 
       - name: Run pytest with coverage
         run: pytest tests/ -v --tb=short -x --cov=src --cov-report=xml
@@ -89,6 +81,12 @@ jobs:
         with:
           terraform_version: 1.9.0
 
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: infra/terraform/.terraform
+          key: terraform-${{ hashFiles('infra/terraform/**/*.tf', 'infra/terraform/**/*.tfvars') }}
+
       - name: Terraform Init
         run: terraform init -backend=false
 
@@ -112,7 +110,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
@@ -122,15 +120,37 @@ jobs:
         with:
           terraform_version: 1.9.0
 
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: infra/terraform/.terraform
+          key: terraform-${{ hashFiles('infra/terraform/**/*.tf', 'infra/terraform/**/*.tfvars') }}
+
       - name: Terraform Init
         run: terraform init
 
       - name: Terraform Plan
-        run: terraform plan -lock=false -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" -var="gcp_region=${{ secrets.GCP_REGION }}" -var="environment=dev" -var="repository_name=${{ github.repository }}" -var="repository_owner=${{ github.repository_owner }}"
+        id: plan
+        run: |
+          terraform plan -lock=false -no-color \
+            -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            -var="gcp_region=${{ secrets.GCP_REGION }}" \
+            -var="environment=dev" \
+            -var="repository_name=${{ github.repository }}" \
+            -var="repository_owner=${{ github.repository_owner }}" \
+            2>&1 | tee plan.txt
+
+      - name: Publish Plan to CI Summary
+        if: always()
+        run: |
+          echo '## Terraform Plan' >> $GITHUB_STEP_SUMMARY
+          echo '```terraform' >> $GITHUB_STEP_SUMMARY
+          cat plan.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
   modal-deploy:
     name: Modal Deploy
-    needs: [lint-and-typecheck, test]
+    needs: [lint-and-test]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
@@ -154,7 +174,7 @@ jobs:
 
   docker-build:
     name: Docker Build
-    needs: [lint-and-typecheck, test]
+    needs: [lint-and-test]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
@@ -165,7 +185,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
@@ -184,7 +204,7 @@ jobs:
 
   notify:
     name: Notify
-    needs: [lint-and-typecheck, test, terraform-validate, modal-deploy, docker-build]
+    needs: [lint-and-test, terraform-validate, modal-deploy, docker-build]
     runs-on: ubuntu-latest
     if: always()
     steps:

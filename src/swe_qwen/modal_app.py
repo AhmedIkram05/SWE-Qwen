@@ -108,7 +108,7 @@ def hello_modal():
         initial_delay=60.0,
     ),
 )
-def train_swe_qwen(  # noqa: PLR0913
+def train_swe_qwen(  # noqa: PLR0913,PLR0917
     model_name: str = "Qwen/Qwen3-30B-A3B",  # fallback: Qwen/Qwen3-14B
     dataset_path: str = "/data/train",
     output_dir: str = "/models/swe-qwen-finetuned",
@@ -315,7 +315,7 @@ def train_swe_qwen(  # noqa: PLR0913
     concurrency_limit=4,
     scaledown_window=300,
 )
-async def serve_swe_qwen(  # noqa: PLR0913
+async def serve_swe_qwen(  # noqa: PLR0913,PLR0917
     model_path: str = "/models/swe-qwen-finetuned",
     host: str = "0.0.0.0",
     port: int = 8000,
