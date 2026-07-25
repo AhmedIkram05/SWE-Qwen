@@ -76,7 +76,7 @@ resource "google_storage_bucket" "model" {
   name                        = var.model_bucket != "" ? var.model_bucket : "${var.project_id}-${var.environment}-models-${random_string.model_suffix.result}"
   project                     = var.project_id
   location                    = var.region
-  force_destroy               = var.environment == "prod" ? false : true
+  force_destroy               = var.environment != "prod"
   uniform_bucket_level_access = true
 
   versioning {

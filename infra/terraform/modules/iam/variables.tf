@@ -62,12 +62,6 @@ variable "storage_admin_emails" {
   default     = []
 }
 
-variable "modal_runner_email" {
-  description = "Service account email for Modal runner (if pre-existing)"
-  type        = string
-  default     = ""
-}
-
 variable "dataset_bucket_name" {
   description = "Name of the dataset GCS bucket"
   type        = string

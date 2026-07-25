@@ -24,7 +24,7 @@ variable "repository_name" {
 variable "repository_owner" {
   description = "GitHub repository owner/organization"
   type        = string
-  default     = "ahmedikram"
+  default     = "AhmedIkram05"
 }
 
 variable "dataset_bucket_name" {

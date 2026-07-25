@@ -68,7 +68,7 @@ resource "google_iam_workload_identity_pool_provider" "github_provider" {
     "attribute.workflow"         = "assertion.workflow"
   }
 
-  attribute_condition = "assertion.repository_owner == '${var.repository_owner}' && assertion.repository == '${var.repository_name}'"
+  attribute_condition = "assertion.repository_owner == '${var.repository_owner}' && assertion.repository == '${var.repository_owner}/${var.repository_name}'"
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -126,7 +126,10 @@ resource "google_secret_manager_secret" "github_token" {
   })
 }
 
-# Secret versions (placeholders - actual values should be set via Secret Manager UI or CI/CD)
+# Secret versions (placeholders - actual values should be set via Secret Manager)
+# For dev/staging: placeholder values are created so terraform apply succeeds.
+# Replace with real secrets before using: gcloud secrets versions add <secret-id> --data-file=-
+# For prod: empty string is used; real values must be added manually via Secret Manager
 resource "google_secret_manager_secret_version" "modal_token" {
   secret      = google_secret_manager_secret.modal_token.id
   secret_data = var.environment == "prod" ? "" : "dev-modal-token-placeholder"
