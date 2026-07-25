@@ -29,29 +29,29 @@ base_image = (
         "libgl1-mesa-glx",
     )
     .pip_install(
-        "torch==2.13.0",
-        "torchvision==0.20.0",
-        "torchaudio==2.13.0",
+        "torch>=2.13.0",
+        "torchvision>=0.20.0",
+        "torchaudio>=2.13.0",
         index_url="https://download.pytorch.org/whl/cu126",
     )
     .pip_install(
-        "transformers==5.14.0",
-        "accelerate==1.14.0",
-        "peft==0.19.0",
-        "bitsandbytes==0.49.0",
-        "trl==1.9.0",
-        "datasets==5.0.0",
-        "wandb==0.28.0",
-        "vllm==0.26.0",
-        "flash-attn==2.7.0",
-        "deepspeed==0.16.0",
-        "sentencepiece==0.2.0",
-        "protobuf==5.28.0",
-        "numpy==1.26.0",
-        "pandas==2.2.0",
-        "pyyaml==6.0.1",
-        "tqdm==4.66.0",
-        "rich==13.7.0",
+        "transformers>=5.14.0",
+        "accelerate>=1.14.0",
+        "peft>=0.19.0",
+        "bitsandbytes>=0.49.0",
+        "trl>=1.9.0",
+        "datasets>=5.0.0",
+        "wandb>=0.28.0",
+        "vllm>=0.26.0",
+        "flash-attn>=2.7.0",
+        "deepspeed>=0.16.0",
+        "sentencepiece>=0.2.0",
+        "protobuf>=5.28.0",
+        "numpy>=1.26.0",
+        "pandas>=2.2.0",
+        "pyyaml>=6.0.1",
+        "tqdm>=4.66.0",
+        "rich>=13.7.0",
     )
 )
 
@@ -59,12 +59,12 @@ base_image = (
 gpu_image = (
     base_image
     .pip_install(
-        "xformers==0.0.27",
+        "xformers>=0.0.27",
         index_url="https://download.pytorch.org/whl/cu121",
     )
     .pip_install(
-        "auto-gptq==0.7.1",
-        "optimum==1.21.0",
+        "auto-gptq>=0.7.1",
+        "optimum>=1.21.0",
     )
 )
 

@@ -95,8 +95,8 @@ requires = ["setuptools>=70.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["data_engineering*", "training*", "evaluation*", "inference*", "promotion*", "observability*", "swe_qwen*"]
+where = ["src"]
+include = ["swe_qwen*"]
 
 [tool.ruff]
 line-length = 100
@@ -150,7 +150,7 @@ skip-magic-trailing-comma = false
 line-ending = "lf"
 
 [tool.ruff.lint.isort]
-known-first-party = ["data_engineering", "training", "evaluation", "inference", "promotion", "observability", "swe_qwen"]
+known-first-party = ["swe_qwen"]
 import-strategy = "use-from-import"
 
 [tool.mypy]
@@ -193,7 +193,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["data_engineering", "training", "evaluation", "inference", "promotion", "observability", "swe_qwen"]
+source = ["swe_qwen"]
 omit = ["tests/*", "*/__pycache__/*", "*/conftest.py"]
 branch = true
 

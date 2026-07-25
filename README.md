@@ -147,17 +147,17 @@ python scripts/init_wandb.py \
 ### Deploy Modal App
 
 ```bash
-modal deploy modal_app.py
+modal deploy src/swe_qwen/modal_app.py
 ```
 
 ### Run Training
 
 ```bash
 # Local test
-modal run modal_app.py::hello_modal
+modal run src/swe_qwen/modal_app.py::hello_modal
 
 # Full training on Modal GPUs
-modal run modal_app.py::train_swe_qwen \
+modal run src/swe_qwen/modal_app.py::train_swe_qwen \
   --model_name Qwen/Qwen3-30B-A3B \  # or Qwen/Qwen3-14B
   --num_epochs 3 \
   --batch_size 4 \
@@ -168,7 +168,7 @@ modal run modal_app.py::train_swe_qwen \
 
 ```bash
 # Deploy inference server
-modal deploy modal_app.py::serve_swe_qwen \
+modal deploy src/swe_qwen/modal_app.py::serve_swe_qwen \
   --model_path /models/swe-qwen-finetuned
 ```
 
@@ -198,7 +198,9 @@ SWE-Qwen/
 ├── scripts/
 │   └── init_wandb.py          # W&B project initialization
 ├── src/
-│   └── swe_qwen/              # Main package (to be implemented)
+│   └── swe_qwen/              # Main package
+│       ├── __init__.py
+│       └── modal_app.py       # Modal application (moved from root)
 ├── tests/
 │   ├── test_infra.py          # Terraform output tests
 │   └── test_scaffold.py       # Project scaffold tests
@@ -232,7 +234,7 @@ SWE-Qwen/
 
 ## Training Configuration
 
-Default hyperparameters in `modal_app.py::train_swe_qwen`:
+Default hyperparameters in `src/swe_qwen/modal_app.py::train_swe_qwen`:
 
 ```python
 model_name = "Qwen/Qwen3-30B-A3B"  # fallback: Qwen/Qwen3-14B

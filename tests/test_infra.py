@@ -61,20 +61,27 @@ def get_terraform_outputs(variables: Optional[dict] = None) -> dict:
     return json.loads(result.stdout)
 
 
+@pytest.fixture(scope="session")
+def terraform_initialized():
+    """Initialize Terraform once per test session."""
+    result = subprocess.run(
+        ["terraform", "init", "-backend=false"],
+        cwd=TERRAFORM_DIR,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"terraform init failed: {result.stderr}"
+    return True
+
+
 class TestTerraformInit:
     """Test Terraform initialization and validation."""
 
-    def test_terraform_init(self):
+    def test_terraform_init(self, terraform_initialized):
         """Terraform should initialize without errors."""
-        result = subprocess.run(
-            ["terraform", "init", "-backend=false"],
-            cwd=TERRAFORM_DIR,
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, f"terraform init failed: {result.stderr}"
+        assert terraform_initialized
 
-    def test_terraform_validate(self):
+    def test_terraform_validate(self, terraform_initialized):
         """Terraform configuration should be valid."""
         result = subprocess.run(
             ["terraform", "validate"],

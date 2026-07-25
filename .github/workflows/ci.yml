@@ -142,7 +142,7 @@ jobs:
         run: pip install modal
 
       - name: Deploy Modal App
-        run: modal deploy modal_app.py
+        run: modal deploy src/swe_qwen/modal_app.py
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}

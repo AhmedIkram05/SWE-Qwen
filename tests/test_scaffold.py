@@ -26,7 +26,10 @@ class TestProjectStructure:
         assert (PROJECT_ROOT / "README.md").exists()
 
     def test_modal_app_exists(self):
-        assert (PROJECT_ROOT / "modal_app.py").exists()
+        assert (PROJECT_ROOT / "src" / "swe_qwen" / "modal_app.py").exists()
+
+    def test_swe_qwen_package_exists(self):
+        assert (PROJECT_ROOT / "src" / "swe_qwen" / "__init__.py").exists()
 
     def test_scripts_directory_exists(self):
         assert (PROJECT_ROOT / "scripts").is_dir()
@@ -51,6 +54,9 @@ class TestProjectStructure:
 
     def test_terraform_providers_exists(self):
         assert (PROJECT_ROOT / "infra" / "terraform" / "providers.tf").exists()
+
+    def test_terraform_outputs_exists(self):
+        assert (PROJECT_ROOT / "infra" / "terraform" / "outputs.tf").exists()
 
     def test_storage_module_exists(self):
         assert (PROJECT_ROOT / "infra" / "terraform" / "modules" / "storage").is_dir()
@@ -160,12 +166,12 @@ class TestModalApp:
 
     def test_modal_app_imports(self):
         """Test that modal_app.py can be parsed."""
-        content = (PROJECT_ROOT / "modal_app.py").read_text()
+        content = (PROJECT_ROOT / "src" / "swe_qwen" / "modal_app.py").read_text()
         assert "import modal" in content
         assert "app = modal.App" in content or 'modal.App(' in content
 
     def test_modal_app_has_functions(self):
-        content = (PROJECT_ROOT / "modal_app.py").read_text()
+        content = (PROJECT_ROOT / "src" / "swe_qwen" / "modal_app.py").read_text()
         required_functions = [
             "hello_modal",
             "train_swe_qwen",
