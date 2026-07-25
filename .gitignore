@@ -247,6 +247,8 @@ wandb/
 *.tfplan
 .terraform/
 .terraform.lock.hcl
+*.tfvars
+!terraform.tfvars.example
 
 # IDE
 .idea/
