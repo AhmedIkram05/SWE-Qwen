@@ -1,6 +1,6 @@
 # Project Vision & Architectural Foundations Document for SWE-Qwen LLM Fine Tuning Project
 
-**Title:** Architectural Decision Record (ADR) & Platform Vision  
+**Title:** Architectural Decision Record (ADR) & Platform Vision
 **Purpose:** This document defines the authoritative project vision, architectural principles, and foundational decisions governing the implementation of the LLMOps / AI Engineering platform. All downstream implementation planning (Master Plan, Phase Plans, Technical Specifications, and Code) must conform to the decisions defined here. The goal of this document is to define what is being built and why, not how each component will be implemented.
 
 ---
@@ -113,7 +113,7 @@ Every architectural decision must maximize:
 ### ADR-002 — Platform & Model Independence Philosophy
 
 - **Decision:** The platform architecture must remain strictly model-agnostic and cloud-portable. Compute and serving layers must be fully decoupled from storage and state layers.
-- **Rationale:** Open-weight foundation models and GPU hosting providers evolve rapidly. Decoupling storage (AWS/GCP) from GPU inference (vLLM / Serverless) ensures the system remains flexible and resilient to vendor changes.
+- **Rationale:** Open-weight foundation models and GPU hosting providers evolve rapidly. Decoupling storage (GCS) from GPU inference (vLLM / Serverless) ensures the system remains flexible and resilient to vendor changes.
 
 ---
 
@@ -130,8 +130,8 @@ Every architectural decision must maximize:
 
 ### ADR-004 — Dataset Engineering & Strategy
 
-- **Decision:** Datasets are treated as production software assets subject to a strict lifecycle:  
-`Ingestion` --> `Validation` --> `Cleaning` --> `Versioning` --> `Splitting` --> `Archiving`.  
+- **Decision:** Datasets are treated as production software assets subject to a strict lifecycle:
+`Ingestion` --> `Validation` --> `Cleaning` --> `Versioning` --> `Splitting` --> `Archiving`.
 The project will use a **hybrid strategy**: training data curated from real GitHub issue-PR pairs, with evaluation grounded in SWE-bench principles (including the official SWE-bench Verified subset where appropriate).
 - **Rationale:** Data quality directly dictates model utility. Establishing a versioned, schema-validated data pipeline guarantees reproducibility.
 
@@ -174,7 +174,7 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 
 ### ADR-008 — Infrastructure as Code (IaC) & Cloud Foundation
 
-- **Decision:** Provision all cloud storage (S3/GCS), IAM policies, OIDC keyless authentication, and environment secrets using **Terraform**. Manual cloud console creation is prohibited.
+- **Decision:** Provision all cloud storage (GCS), IAM policies, OIDC keyless authentication, and environment secrets using **Terraform**. Manual cloud console creation is prohibited.
 - **Rationale:** Ensures complete infrastructure reproducibility, version-controlled cloud configuration, and secure keyless authentication via GitHub Actions.
 
 ---
@@ -193,7 +193,7 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 ### ADR-010 — Model Deployment Architecture & Serving Stack
 
 - **Decision:** Deploy candidate models as a serverless, high-throughput **Inference API** utilizing **vLLM** hosted on a serverless GPU platform, **Modal**.
-- **Rationale:** `vLLM` provides industry-standard PagedAttention and high token throughput. Serverless GPU orchestration provides automatic scale-to-zero capabilities ($0 cost when idle), eliminates AWS GPU quota approval friction, and demonstrates modern AI engineering architecture.
+- **Rationale:** `vLLM` provides industry-standard PagedAttention and high token throughput. Serverless GPU orchestration provides automatic scale-to-zero capabilities ($0 cost when idle), eliminates GCP GPU quota approval friction, and demonstrates modern AI engineering architecture.
 
 ---
 

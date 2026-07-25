@@ -11,7 +11,7 @@
 
 ## Log Format
 
-Each entry follows this structure:
+Each Phase follows this structure:
 
 ```markdown
 ## Phase N: [Phase Name] — YYYY-MM-DD
@@ -55,54 +55,76 @@ Each entry follows this structure:
 
 ---
 
-## Phase 1: Foundation & Scaffolding — 2026-07-24
+## Phase 1: Foundation & Scaffolding — 2026-07-25
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 |------|---------|--------|--------|--------|
-| 1.1 | Repo init | | | |
-| 1.2 | pyproject.toml | | | |
-| 1.3 | .gitignore | | | |
-| 1.4 | Terraform scaffold | | | |
-| 1.5 | Modal config | | | |
-| 1.6 | W&B project | | | |
-| 1.7 | GitHub Actions skeleton | | | |
-| 1.8 | README | | | |
-| 1.9 | Directory structure | | | |
-| 1.10 | Dockerfile | | | |
-| 1.11 | Pre-commit config | | | |
-| 1.12 | Makefile / justfile | | | |
-| 1.13 | Verify CI runs | | | |
+| 1.1 | Repo init | Completed | Repo already existed | Low |
+| 1.2 | pyproject.toml | Completed | Full config with all deps + tooling | Low |
+| 1.3 | .gitignore | Completed | Added ML/Modal/Terraform patterns | Low |
+| 1.4 | Terraform scaffold | Completed | Full module structure (storage, iam) | Low |
+| 1.5 | Modal config | Completed | modal_app.py with train/serve functions | Low |
+| 1.6 | W&B project | Completed | init_wandb.py with sweep + registries | Low |
+| 1.7 | GitHub Actions skeleton | Completed | ci.yml with lint/test/terraform/modal/docker | Low |
+| 1.8 | README | Completed | Architecture, quick-start, structure | Low |
+| 1.9 | Directory structure | Completed | All dirs created per MASTER-PLAN | Low |
+| 1.10 | Dockerfile | Not needed | Modal Image replaces Docker entirely | Low |
+| 1.11 | Pre-commit config | Completed | Created .pre-commit-config.yaml | Low |
+| 1.12 | Makefile / justfile | Deferred | Using pytest/ruff/mypy directly | Low |
+| 1.13 | Verify CI runs | Pending | Requires GCP/Modal secrets | Medium |
+| 1.14 | Version audit | Completed | All deps bumped to latest stable (Jul 2026) | Low |
+| 1.15 | Credential docs | Completed | README updated with explicit requirements | Low |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| Use Modal for training instead of self-hosted GPU | Cost efficiency, scale-to-zero | GCP Vertex AI, AWS SageMaker | Modal provides H100s, simple Python API, integrated volumes |
+| Terraform modules for storage + IAM | Clean separation, reusability | Single root module | Modules enable env-specific configs, easier testing |
+| Workload Identity Federation for GitHub Actions | Security best practice | Long-lived SA keys | No secret rotation, OIDC tokens short-lived |
+| Skip Dockerfile, use Modal images | Simpler dev loop | Multi-stage Dockerfile | Modal handles image building, GPU base images optimized |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
+| Terraform WIF provider missing `oidc` block | 2026-07-25 | 2026-07-25 | Added `oidc { issuer_uri = "https://token.actions.githubusercontent.com" }` | 10 min |
+| Storage module referencing IAM module's service account | 2026-07-25 | 2026-07-25 | Moved bucket IAM bindings to IAM module, pass bucket names as outputs | 20 min |
+| Test infrastructure outputs require terraform apply | 2026-07-25 | 2026-07-25 | Marked integration tests with `@pytest.mark.integration`, unit tests validate structure only | 15 min |
+| Dockerfile not needed | Modal handles all containerization | Multi-stage Dockerfile for Artifact Registry | Modal Image + volumes + build caching replace Docker entirely. CI docker-build job is optional |
+
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| Terraform | GCS backend bucket `swe-qwen-terraform-state` must exist before init | Pre-create bucket or use local backend for first run |
+| Modal | Volumes `swe-qwen-datasets` and `swe-qwen-models` created on first deploy | Persist across function invocations |
+| W&B | Sweep config uses Bayesian optimization with Hyperband early stopping | Reduces compute for HPO |
+| CI | Terraform plan runs on PRs, apply only on main merge | Prevents accidental prod changes |
+| transformers 5.x | Breaking changes from 4.x | Verify training code works with v5 before Phase 4 |
+| accelerate 1.x | New distributed training API | SFTTrainer may need updated accelerate config |
+| trl 1.x | SFTTrainer API changed | Migration guide needed before Phase 4 |
+| datasets 5.x | Dataset format API changed | Data pipeline in Phase 3 needs v5-compatible code |
+| modal 1.x | automounting removed, new Image API | modal_app.py uses 1.x-compatible APIs (Image, Secret, Volume, Retries) |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| Dockerfile | Removed | Modal handles containerization |
+| Makefile/justfile | Removed | Direct tool invocation is simpler |
+| Docker build job in CI | Kept | For Artifact Registry deployment option |
 
 ### Metrics / Observations
 
-- 
-- 
+- 31 scaffold tests passing 13 skipped
+- Terraform validate + fmt check passing
+- Infrastructure graph validates with 13 required resources
+- Phase 1 complete
+- Version audit complete — all packages bumped to Jul 2026 stable releases
 
 ---
 
@@ -146,8 +168,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -192,8 +214,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -242,8 +264,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -292,8 +314,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -340,8 +362,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -351,7 +373,7 @@ Each entry follows this structure:
 
 | Task | Planned | Actual | Reason | Impact |
 |------|---------|--------|--------|--------|
-| 7.1 | GitHub OIDC for AWS | | | |
+| 7.1 | GitHub OIDC for GCP | | | |
 | 7.2 | GitHub OIDC for Modal | | | |
 | 7.3 | CI workflow (lint/type/test) | | | |
 | 7.4 | Eval workflow (F2P gate) | | | |
@@ -387,8 +409,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -435,8 +457,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -480,8 +502,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -528,8 +550,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -575,8 +597,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -623,8 +645,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 
@@ -670,8 +692,8 @@ Each entry follows this structure:
 
 ### Metrics / Observations
 
-- 
-- 
+-
+-
 
 ---
 

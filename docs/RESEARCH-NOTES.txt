@@ -10,7 +10,8 @@ Fine-tuning a small open-source model via LoRA/QLoRA is the highest-impact addit
 
 Target Model
 Choose at build time — the landscape moves fast. Selection criteria: small enough to fine-tune at 4-bit quantisation on reasonable costing to free GPU compute; released recently enough to be credible on a 2026 CV; strong on instruction-following benchmarks for the chosen domain; HuggingFace PEFT-compatible with documented LoRA/QLoRA examples.
-  * Currently leaning mostly towards Qwen2.5-Coder-7B-Instruct but still not locked in
+   * FOUNDATION MODEL FINAL: Qwen3-30B-A3B (MoE, 30B total / 3B active per token) with Qwen3-14B as fallback
+   * Chosen for: latest Qwen3 generation, MoE efficiency (cheap inference), fits Modal 24-40GB with QLoRA 4-bit
 
 Compute
   * Kaggle: 30h/week free T4 GPU — sufficient for small model QLoRA

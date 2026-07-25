@@ -1,8 +1,8 @@
 # Master Implementation Plan — SWE-Qwen LLM Fine-Tuning Platform
 
-**Document Type:** Technical Master Plan (Level 3 in project hierarchy)  
-**Status:** Draft v1.0  
-**Parent Document:** `docs/ADR-&-VISION.md` — all decisions, principles, and ADRs referenced herein are authoritative. This document translates them into an implementation roadmap.  
+**Document Type:** Technical Master Plan (Level 3 in project hierarchy)
+**Status:** Draft v1.0
+**Parent Document:** `docs/ADR-&-VISION.md` — all decisions, principles, and ADRs referenced herein are authoritative. This document translates them into an implementation roadmap.
 **Hierarchy Position:**
 
 ```
@@ -55,14 +55,14 @@ The platform demonstrates the complete lifecycle of developing, evaluating, depl
 
 | Decision | Value | Source |
 |----------|-------|--------|
-| Foundation model | Qwen 3.6-27B (Modal 24GB), fallback Gemma 4 | Conversation decision |
+| Foundation model | Qwen3-30B-A3B (MoE, 3B active), fallback Qwen3-14B | Conversation decision |
 | GPU platform | Modal (standardized, Baseten removed) | Conversation decision |
 | Training platform | Modal | Conversation decision |
-| Cloud provider | AWS only | Conversation decision |
+| Cloud provider | GCP only | Conversation decision |
 | API compatibility | OpenAI-compatible | Conversation decision |
 | Dataset size | 8–12k validated examples | Conversation decision |
 | Repository count | ~10 Python repositories | Conversation decision |
-| Monitoring (V1) | W&B only | Conversation decision |
+| Monitoring (V1) | W&B + Langfuse | Conversation decision |
 | Monitoring (v2) | OpenTelemetry + Prometheus/Grafana | ADR-011 intent |
 | Execution feedback conditioning | Deferred to v2 | Conversation decision |
 | Deployment pattern | Serverless vLLM on Modal | ADR-010 (updated) |
@@ -98,7 +98,7 @@ The project is successful when **all** of the following are true:
 | Workstream | Primary Metric | Gate |
 |------------|---------------|------|
 | Data Pipeline | Schema validation pass rate ≥ 95% | All examples pass validation before training |
-| Fine-Tuning | QLoRA convergence without OOM | Training completes within Modal 24GB budget |
+| Fine-Tuning | QLoRA convergence without OOM | Training completes within Modal GPU budget (A100 40GB for 30B MoE) |
 | Evaluation | F2P rate measured on golden set | Golden set results logged to W&B per run |
 | Inference | OpenAI-compatible API responds to chat completions | Integration test passes against running endpoint |
 | Infrastructure | Terraform plan applies cleanly | Zero manual interventions required |
@@ -184,7 +184,7 @@ The ADR architecture diagram decomposes into the following workstreams. Each wor
 | WS-3 | Inference API | OpenAI-compatible, serverless vLLM endpoint on Modal | Python package `inference/`, Modal app, W&B serving metrics |
 | WS-4 | Evaluation Harness | Execution-based F2P evaluation against real test suites | Python package `evaluation/`, golden set, eval reports |
 | WS-5 | Champion/Challenger Promotion | Automated quality gate and model promotion pipeline | Promotion logic, W&B registry integration, deployment trigger |
-| WS-6 | Infrastructure (IaC) | Terraform modules for AWS S3, IAM, secrets | Terraform configs, CI deployment workflows |
+| WS-6 | Infrastructure (IaC) | Terraform modules for GCS, IAM, secrets | Terraform configs, CI deployment workflows |
 | WS-7 | Observability | Structured telemetry for training and serving | W&B dashboards, JSON logging, metrics emission |
 | WS-8 | CI/CD Pipelines | GitHub Actions for lint, test, eval, gate, deploy | `.github/workflows/` configs, OIDC auth setup |
 
@@ -349,7 +349,7 @@ swe-qwen/
 │   ├── 3.5.2 Golden eval subset: only examples with test-verified fixes
 │   └── 3.5.3 Version the splits via W&B
 ├── 3.6 Build dataset archiving module
-│   ├── 3.6.1 Upload final dataset to S3 via Terraform-managed bucket
+│   ├── 3.6.1 Upload final dataset to GCS via Terraform-managed bucket
 │   ├── 3.6.2 Log dataset artifact to W&B with full lineage
 │   └── 3.6.3 Generate dataset card (size, schema, source repos, quality stats)
 └── 3.7 Write tests for all data pipeline modules
@@ -365,12 +365,12 @@ swe-qwen/
 
 ### Phase 1: Foundation & Infrastructure Setup
 
-**Objective:** Establish the project scaffolding, repository structure, Terraform AWS foundation, Modal account configuration, and W&B project. This phase produces a working, empty infrastructure that subsequent phases populate.
+**Objective:** Establish the project scaffolding, repository structure, Terraform GCP foundation, Modal account configuration, and W&B project. This phase produces a working, empty infrastructure that subsequent phases populate.
 
 **Why it exists:** Every other phase depends on having infrastructure, IAM, storage, and compute platform configured. This is the first vertical slice — a working, empty platform that proves the deployment path works.
 
 **Inputs:**
-- AWS account with programmatic access
+- GCP project with programmatic access
 - GitHub repository (this repo)
 - Modal account with API key
 - W&B account with API key
@@ -378,7 +378,7 @@ swe-qwen/
 
 **Outputs:**
 - Initialized Git repository with branch strategy
-- Terraform scaffold creating S3 bucket, IAM roles, secrets
+- Terraform scaffold creating GCS bucket, IAM roles, secrets
 - Modal project configuration (`modal config`, `modal serve` skeleton)
 - W&B project created and documented
 - GitHub Actions scaffold (empty workflows)
@@ -392,7 +392,7 @@ swe-qwen/
 | 1.2 | Create `pyproject.toml` with project metadata, dependencies, tooling config | `pyproject.toml` with Ruff, pytest, mypy config |
 | 1.3 | Write `.gitignore` excluding model checkpoints, W&B artifacts, `.env` files | `.gitignore` |
 | 1.4 | Scaffold Terraform: `infra/terraform/` directory with `main.tf`, `variables.tf`, `outputs.tf`, `providers.tf` | Terraform scaffold |
-| 1.5 | Implement Terraform S3 module: bucket for dataset artifacts and model checkpoints | `infra/terraform/modules/storage/` |
+| 1.5 | Implement Terraform GCS module: bucket for dataset artifacts and model checkpoints | `infra/terraform/modules/storage/` |
 | 1.6 | Implement Terraform IAM module: execution roles, OIDC provider for GitHub Actions, secret management | `infra/terraform/modules/iam/` |
 | 1.7 | Write `terraform plan` and validate the infrastructure graph | `terraform plan` output, no errors |
 | 1.8 | Configure Modal: API key setup, `modal init`, create skeleton `modal serve` app | Modal project initialized |
@@ -406,7 +406,7 @@ swe-qwen/
 
 **Risks:**
 - Modal API key configuration issues → Mitigation: Document key setup steps in README, test with Modal ping before proceeding
-- Terraform AWS provider version conflicts → Mitigation: Pin provider versions in `required_providers` block
+- Terraform GCP provider version conflicts → Mitigation: Pin provider versions in `required_providers` block
 
 **Definition of Done:**
 - [ ] `terraform plan` succeeds without errors
@@ -478,20 +478,20 @@ swe-qwen/
 
 ### Phase 3: Data Pipeline Engine
 
-**Objective:** Build a production-grade data engineering pipeline that ingests issue-PR pairs from GitHub, validates them against a schema, cleans and deduplicates them, splits into train/val/test, and versions the dataset in W&B and S3.
+**Objective:** Build a production-grade data engineering pipeline that ingests issue-PR pairs from GitHub, validates them against a schema, cleans and deduplicates them, splits into train/val/test, and versions the dataset in W&B and GCS.
 
 **Why it exists:** Data quality directly determines model quality (ADR-004). This phase produces the first working vertical slice: a pipeline that takes GitHub repos and produces a validated, versioned dataset ready for training.
 
 **Inputs:**
 - Repository manifest from Phase 2
-- GitHub API tokens (secrets in AWS via Terraform)
+- GitHub API tokens (secrets in GCP via Terraform)
 - W&B API key
-- S3 bucket (from Phase 1 Terraform)
+- GCS bucket (from Phase 1 Terraform)
 
 **Outputs:**
 - `data_engineering/` Python package (complete)
 - W&B dataset artifacts with full lineage
-- S3 dataset artifacts (versioned)
+- GCS dataset artifacts (versioned)
 - Golden evaluation subset (8-12k examples with verified test-suite fixes)
 - Train/validation/test split artifacts
 
@@ -506,14 +506,14 @@ swe-qwen/
 | 3.5 | Implement train/val/test stratified split (by repo) | `data_engineering/split.py` |
 | 3.6 | Implement golden eval subset extraction (test-verified fixes only) | `data_engineering/golden.py` |
 | 3.7 | Implement W&B dataset versioning integration | `data_engineering/version.py` |
-| 3.8 | Implement S3 upload with Terraform-managed bucket path | `data_engineering/archive.py` |
+| 3.8 | Implement GCS upload with Terraform-managed bucket path | `data_engineering/archive.py` |
 | 3.9 | Build dataset card generation (auto-generated summary) | `data_engineering/card.py` |
 | 3.10 | Write unit tests for all pipeline modules | `tests/test_data.py` |
 | 3.11 | Write integration test: full pipeline from manifest → validated dataset | Integration test |
 | 3.12 | Run pipeline on 1-2 repos as proof of concept | Sample dataset artifact in W&B |
 | 3.13 | Run pipeline on all 10 repos for full dataset | Complete dataset artifact |
 
-**Dependencies:** Phase 2 complete (repo manifest required). Phase 1 complete (S3 bucket, W&B project required for archive and versioning).
+**Dependencies:** Phase 2 complete (repo manifest required). Phase 1 complete (GCS bucket, W&B project required for archive and versioning).
 
 **Risks:**
 - GitHub API rate limits on large-scale ingestion → Mitigation: Implement exponential backoff, use GitHub App token for higher limits, batch requests
@@ -525,16 +525,16 @@ swe-qwen/
 - [ ] Full pipeline runs end-to-end on all 10 repos
 - [ ] Golden eval subset contains 200+ verified examples (target), 800+ total validated examples
 - [ ] Dataset artifacts versioned in W&B with full lineage
-- [ ] Dataset archived to S3
+- [ ] Dataset archived to GCS
 - [ ] Dataset card auto-generated
 
 **Acceptance Criteria:**
-1. `python -m data_engineering.pipeline --config manifest.json` produces a validated split dataset
-2. Each example in the golden subset has a failing test case before the fix and passing after (verified)
-3. W&B shows dataset artifact lineage: raw ingestion → validation → cleaning → split → archive
-4. The pipeline can be re-run reproducibly from the same manifest and produce identical splits (seeded RNG)
+1. `python -m data_engineering.run_pipeline --manifest repos/manifest.json` produces a complete dataset artifact in W&B and GCS
+2. Golden eval subset validation pass rate ≥ 95% (schema, test-verification, deduplication)
+3. W&B shows dataset lineage: manifest → raw → validated → cleaned → split → versioned
+4. Dataset card includes: size, schema, source repos, quality stats, split ratios
 
-**Expected repository state:** Working `data_engineering/` package, complete dataset in W&B + S3, golden eval subset ready for Phase 5.
+**Expected repository state:** Working `data_engineering/` package, complete dataset in W&B + GCS, golden eval subset ready for Phase 5.
 
 ---
 
@@ -547,7 +547,7 @@ swe-qwen/
 **Inputs:**
 - Validated dataset from Phase 3 (golden subset + training split)
 - QLoRA configuration (rank, alpha, learning rate, batch size, epochs — initially set to recommended defaults)
-- Modal compute configuration (24GB GPU instance for Qwen 3.6-27B)
+- Modal compute configuration (A100 40GB for Qwen3-30B-A3B QLoRA, A10G 24GB for Qwen3-14B)
 
 **Outputs:**
 - `training/` Python package (complete)
@@ -559,7 +559,7 @@ swe-qwen/
 
 | # | Task | Deliverable |
 |---|------|-------------|
-| 4.1 | Implement model selection logic with baseline evaluation harness (Qwen 3.6-27B primary, Gemma 4 fallback) | `training/model_config.py` |
+| 4.1 | Implement model selection logic with baseline evaluation harness (Qwen3-30B-A3B primary, Qwen3-14B fallback) | `training/model_config.py` |
 | 4.2 | Implement QLoRA configuration (peft + bitsandbytes + transformers integration) | `training/qlora_config.py` |
 | 4.3 | **Prompt engineering workstream**: design and version prompt templates for training/inference (Issue+Context → Patch); W&B artifact versioning for prompt templates; A/B test 2-3 variants in Phase 5 eval | `training/prompts/` + W&B prompt artifacts |
 | 4.4 | Build training entry point with W&B integration | `training/qlora_train.py` |
@@ -575,12 +575,12 @@ swe-qwen/
 **Dependencies:** Phase 3 complete (validated dataset required). Phase 1 complete (Modal, W&B configured).
 
 **Risks:**
-- Qwen 3.6-27B may not fit on Modal's 24GB VRAM after loading → Mitigation: Baseline evaluation in Phase 4.1 tests memory fit; fallback to Gemma 4 if needed; use QLoRA 4-bit quantization to reduce memory
+- Qwen3-30B-A3B (30B total params) requires A100 40GB for QLoRA training → Mitigation: Use A100 40GB GPU (~$1.50/hr on Modal); fallback to Qwen3-14B if budget is tight; QLoRA 4-bit quantization (NF4) keeps weight memory at ~15GB
 - Training instability (loss divergence, NaNs) → Mitigation: Start with conservative hyperparameters (lr=2e-5, rank=16, warmup=10%), log all metrics to W&B for rapid diagnosis
 - Modal job timeout or interruption → Mitigation: Implement checkpoint resume (4.8), use Modal's checkpointing volumes
 
 **Definition of Done:**
-- [ ] Training completes without OOM on selected model within Modal 24GB budget
+- [ ] Training completes without OOM on selected model within Modal budget (A100 40GB for 30B; A10G 24GB for 14B)
 - [ ] W&B shows complete lineage: dataset artifact → training config → run → checkpoint → model registry entry
 - [ ] LoRA adapter checkpoint is loadable and produces valid outputs
 - [ ] Training curve (loss) is logged to W&B and shows convergence
@@ -591,10 +591,10 @@ swe-qwen/
 1. `python -m training.qlora_train --config training_config.yaml --data-dir data/` runs to completion
 2. W&B run shows: loss curve, hyperparameters, dataset version, GPU utilization, estimated cost
 3. Checkpoint can be loaded with `AutoModel.from_pretrained()` + PEFT adapters
-4. Baseline evaluation completed: Qwen 3.6-27B fits in 24GB, performance is acceptable, or Gemma 4 selected as fallback
+4. Baseline evaluation completed: Qwen3-30B-A3B QLoRA fits on A100 40GB; Qwen3-14B fallback fits A10G 24GB
 5. **3-config comparison: three W&B runs exist, F2P on golden set determines Champion, results logged**
 
-**Expected repository state:** Trained LoRA adapter checkpoint in W&B + S3, full training pipeline operational, baseline model evaluation report in W&B.
+**Expected repository state:** Trained LoRA adapter checkpoint in W&B + GCS, full training pipeline operational, baseline model evaluation report in W&B.
 
 ---
 
@@ -724,14 +724,14 @@ swe-qwen/
 
 **Inputs:**
 - All previous phases complete (working code, trained models, evaluation harness, infrastructure)
-- GitHub repository with OIDC configured for AWS
+- GitHub repository with OIDC configured for GCP
 - W&B API key (stored as GitHub secret)
 - Modal API key (stored as GitHub secret)
-- AWS credentials via OIDC (no long-lived keys)
+- GCP credentials via OIDC (no long-lived keys)
 
 **Outputs:**
 - Complete GitHub Actions workflow files
-- OIDC authentication for AWS (Terraform apply from CI)
+- OIDC authentication for GCP (Terraform apply from CI)
 - Quality gate logic (eval F2P threshold check)
 - Automated deployment trigger (promoted model → Terraform apply)
 
@@ -739,7 +739,7 @@ swe-qwen/
 
 | # | Task | Deliverable |
 |---|------|-------------|
-| 7.1 | Configure GitHub OIDC identity provider for AWS | AWS IAM OIDC setup, Terraform `aws_iam_openid_connect_provider` |
+| 7.1 | Configure GitHub OIDC identity provider for GCP | GCP Workload Identity Pool/Provider, Terraform `google_iam_workload_identity_pool` |
 | 7.2 | Configure GitHub OIDC identity provider for Modal | Modal team/org API token via OIDC or scoped secret |
 | 7.3 | Implement CI workflow: lint (Ruff) → typecheck (mypy) → unit test (pytest) → coverage check | `.github/workflows/ci.yml` |
 | 7.4 | Implement eval workflow: on PR → run evaluation harness → check F2P threshold → pass/fail gate | `.github/workflows/eval.yml` |
@@ -752,7 +752,7 @@ swe-qwen/
 **Dependencies:** All previous phases complete (at minimum Phase 6 — inference API must exist to test deployment). Phase 1 complete (Terraform + OIDC must be configured).
 
 **Risks:**
-- OIDC configuration for AWS may fail on first attempt → Mitigation: Test OIDC setup in Phase 7.1 in isolation before wiring into CI/CD
+- OIDC configuration for GCP may fail on first attempt → Mitigation: Test OIDC setup in Phase 7.1 in isolation before wiring into CI/CD
 - GitHub Actions workflow timeout on evaluation runs (may be long) → Mitigation: Use Modal serverless for evaluation to parallelize; set appropriate timeout limits
 - Quality gate threshold too strict/flexible → Mitigation: Start with a generous threshold; tighten in Phase 12 hardening
 
@@ -760,7 +760,7 @@ swe-qwen/
 - [ ] PR must pass CI (lint, typecheck, tests) before merge
 - [ ] PR must pass evaluation quality gate before merge (if model changes)
 - [ ] Merge to main triggers CD: Terraform apply + (if promoted) deployment to Modal
-- [ ] No long-lived AWS or Modal secrets in the repository
+- [ ] No long-lived GCP or Modal secrets in the repository
 - [ ] Full CI/CD pipeline tested end-to-end on a feature branch
 
 **Acceptance Criteria:**
@@ -967,7 +967,7 @@ swe-qwen/
 | 11.2 | Add retry logic with exponential backoff to GitHub API calls | Updated ingest.py |
 | 11.3 | Add retry logic to Modal API calls | Updated modal_train.py, modal_serve.py |
 | 11.4 | Add input validation hardening to inference API | Updated openai_compat.py |
-| 11.5 | Implement model fallback chain (Qwen 3.6-27B → Gemma 4) | Fallback logic |
+| 11.5 | Implement model fallback chain (Qwen3-30B-A3B → Qwen3-14B) | Fallback logic |
 | 11.6 | Add circuit breaker for GitHub API (fail fast if rate limited) | Circuit breaker |
 | 11.7 | Expand edge case test coverage (malformed patches, empty repos, missing test suites) | Expanded tests |
 | 11.8 | Validate error messages are actionable and logged | Error message audit |
@@ -980,7 +980,7 @@ swe-qwen/
 
 **Definition of Done:**
 - [ ] All external API calls have retry + timeout + circuit breaker
-- [ ] Model fallback chain works: primary model unavailable → Gemma 4 serves
+- [ ] Model fallback chain works: primary model unavailable → Qwen3-14B serves
 - [ ] Edge case tests pass (malformed inputs, missing data, API failures)
 - [ ] Error messages are logged with sufficient context for debugging
 
@@ -1188,7 +1188,7 @@ Phase 13 (requires Phase 12) ◄────────────────
 | Dependency | Required When | Source | Notes |
 |-----------|--------------|--------|-------|
 | Modal API | Phase 1 onward | Modal platform | API key in GitHub secrets |
-| AWS (S3, IAM) | Phase 1 onward (Terraform) | AWS account | OIDC keyless auth |
+| GCP (GCS, IAM) | Phase 1 onward (Terraform) | GCP account | OIDC keyless auth |
 | GitHub API | Phase 3 onward | GitHub (token) | Rate limits managed in code |
 | Weights & Biases | Phase 1 onward | W&B platform | API key in GitHub secrets |
 | vLLM | Phase 6 onward | vLLM (pip install) | Runs on Modal |
@@ -1214,7 +1214,7 @@ Phase 13 (requires Phase 12) ◄────────────────
 | Inference API | Phase 6 → Phase 9 | No deployment target |
 | W&B project | Phase 1 → All | No experiment tracking anywhere |
 | CI/CD | Phase 7 → Phase 9 | Promotion has no automated trigger |
-| Terraform infra | Phase 1 → Phase 3, 6 | No S3, no IAM, no secrets |
+| Terraform infra | Phase 1 → Phase 3, 6 | No GCS, no IAM, no secrets |
 
 ---
 
@@ -1222,7 +1222,7 @@ Phase 13 (requires Phase 12) ◄────────────────
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|------|-----------|--------|-----------|
-| R1 | Qwen 3.6-27B exceeds 24GB VRAM on Modal | Medium | High | Baseline evaluation in Phase 4; fallback to Gemma 4; use QLoRA 4-bit to reduce memory. Decision point documented in ADR-007 deferred list |
+| R1 | Qwen3-30B-A3B exceeds available VRAM on Modal | Medium | High | Baseline evaluation in Phase 4; fallback to Qwen3-14B if budget is tight; use QLoRA 4-bit to reduce memory (~15GB for weights). A100 40GB is sufficient |
 | R2 | Dataset yield is lower than expected (fewer valid issue-PR pairs than 8k) | Medium | Medium | Start with larger candidate pool (up to 20 repos); accept smaller dataset if quality is high; synthetic examples only as last resort |
 | R3 | Modal costs unexpectedly high for training runs | Low-Medium | Medium | Use Modal's scale-to-zero for training; benchmark cost per hour pre-committed; set budget alerts; document cost per experiment |
 | R4 | vLLM cold start latency too high for production feel | Medium | Low | Acceptable for V1 (scale-to-zero tradeoff); optimization deferred to v2. Document as known limitation |
@@ -1231,7 +1231,7 @@ Phase 13 (requires Phase 12) ◄────────────────
 | R7 | Golden eval subset too small for statistical significance | Low | Medium | Target 800+ examples in golden set; if insufficient, expand candidate pool in Phase 2; document as limitation |
 | R8 | Quality gate threshold miscalibrated leading to false promotions | Low | High | Start with conservative thresholds; manual review for first 3 promotions; tighten after observing results |
 | R9 | W&B free tier limits reached | Low | Low | Monitor usage; W&B free tier sufficient for V1 scale; upgrade only if needed |
-| R10 | Terraform state drift between phases | Low | Medium | Run `terraform plan` before each apply; use remote state (S3 + DynamoDB); treat state file as critical artifact |
+| R10 | Terraform state drift between phases | Low | Medium | Run `terraform plan` before each apply; use remote state (GCS); treat state file as critical artifact |
 
 ---
 
@@ -1243,7 +1243,7 @@ Phase 13 (requires Phase 12) ◄────────────────
 |-------|-------|-------|-----------|
 | **Unit** | Individual functions/methods | pytest | Every PR |
 | **Integration** | Module-to-module interaction | pytest + fixtures | Every PR |
-| **End-to-End** | Full pipeline execution | pytest + Modal + AWS | Nightly / on release |
+| **End-to-End** | Full pipeline execution | pytest + Modal + GCP | Nightly / on release |
 | **Benchmark** | Performance and quality targets | Custom scripts | Weekly during active training |
 | **Resilience** | Failure modes and recovery | Chaos-style tests | Phase 11 onward |
 
@@ -1268,7 +1268,7 @@ tests/
 ### Key Test Cases
 
 1. **Data Pipeline:** Given 10 repos with issues and PRs, produce ≥8k validated examples with schema compliance ≥95%
-2. **Training:** Given a dataset, training completes without OOM within Modal 24GB budget
+2. **Training:** Given a dataset, training completes without OOM within Modal GPU budget (A100 40GB for 30B MoE; A10G 24GB for 14B dense)
 3. **Evaluation:** Given a fine-tuned model and golden set, F2P rate is computed and logged to W&B
 4. **Inference:** Given an OpenAI-compatible request, the endpoint returns a valid completion in <500ms p50
 5. **Promotion:** Given a candidate model better than champion by threshold, promotion triggers deployment
@@ -1340,7 +1340,7 @@ GitHub PR
 ```
 
 ### Auth Strategy
-- **GitHub → AWS:** OIDC identity provider (no long-lived AWS keys)
+- **GitHub → GCP:** Workload Identity Federation (no long-lived GCP keys)
 - **GitHub → Modal:** Scoped API token in GitHub Secrets
 - **GitHub → W&B:** API key in GitHub Secrets
 - **GitHub → GitHub:** Native (PAT for repo operations only if needed)
@@ -1350,7 +1350,7 @@ GitHub PR
 | V1 (This Plan) | v2 (Future) |
 |----------------|-------------|
 | GitHub Actions for all pipelines | Same |
-| OIDC for AWS only | OIDC for AWS + Modal |
+| OIDC for GCP only | OIDC for GCP + Modal |
 | Quality gate: F2P threshold | Quality gate: F2P + P2P + latency SLA |
 | Manual promotion trigger after Phase 9 | Fully automated promotion in CD |
 | No deployment rollback | Rollback via champion alias revert |
@@ -1364,43 +1364,43 @@ GitHub PR
 
 ```
 Module: storage
-├── AWS S3 Bucket (datasets, checkpoints, artifacts)
-├── S3 Bucket Policy (Least-privilege access)
-├── S3 Lifecycle Policy (archive old versions)
-└── S3 Versioning (enabled)
+├── GCS Bucket (datasets, checkpoints, artifacts)
+├── GCS Bucket Policy (Least-privilege access)
+├── GCS Lifecycle Policy (archive old versions)
+└── GCS Versioning (enabled)
 
 Module: iam
-├── IAM Role for GitHub Actions OIDC
-├── IAM Role for Modal (if cross-platform)
-├── IAM Policy: S3 read/write (scoped)
-├── IAM Policy: W&B API calls (no AWS IAM needed for W&B)
-└── Secrets in GitHub (no AWS Secrets Manager needed for V1)
+├── Service Account for GitHub Actions WIF
+├── Service Account for Modal (if cross-platform)
+├── IAM Policy: GCS read/write (scoped)
+├── IAM Policy: W&B API calls (no GCP IAM needed for W&B)
+└── Secrets in GitHub (no GCP Secret Manager needed for V1)
 ```
 
 ### v2 Infrastructure Additions (Future)
 
 ```
 Module: monitoring
-├── CloudWatch dashboards (optional)
+├── Cloud Monitoring dashboards (optional)
 ├── Alerting on cost thresholds
 └── Deployment success/failure notifications
 
 Module: networking
 ├── VPC for Modal (if required by Modal pricing tier)
-└── Private link to S3 (optional)
+└── Private link to GCS (optional)
 ```
 
 ### Infrastructure Cost Model
 
 | Resource | V1 Cost | Notes |
 |----------|---------|-------|
-| S3 storage | < $1/month | Minimal dataset + checkpoint storage |
-| S3 requests | < $0.10/month | Infrequent access pattern |
+| GCS storage | < $1/month | Minimal dataset + checkpoint storage |
+| GCS requests | < $0.10/month | Infrequent access pattern |
 | Modal GPU training | Pay-per-use | ~$0.50-2.00 per training run (estimated) |
 | Modal GPU inference | Pay-per-use | $0 when idle (scale-to-zero) |
 | W&B tracking | Free | Personal tier sufficient for V1 |
 | GitHub Actions | Free | Public repo, generous free minutes |
-| Terraform state | Free | S3-backed, no additional cost |
+| Terraform state | Free | GCS-backed, no additional cost |
 | **Total estimated V1 cost** | **<$50/month** | Running inference + periodic retraining |
 
 ---
@@ -1412,15 +1412,15 @@ The data lifecycle follows ADR-004's defined stages, implemented across the pipe
 ```
 ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
 │ RAW DATA │────▶│ VALIDATE │────▶│ CLEAN    │────▶│ SPLIT    │────▶│ ARCHIVE  │────▶│ VERSION  │
-│ (GitHub  │     │ (Schema  │     │ (Dedup,  │     │ (Train/  │     │ (S3 +    │     │ (W&B     │
-│  Issues, │     │  check)  │     │  Normal- │     │  Val/Test│     │  S3)     │     │  Dataset │
+│ (GitHub  │     │ (Schema  │     │ (Dedup,  │     │ (Train/  │     │ (GCS +   │     │ (W&B     │
+│  Issues, │     │  check)  │     │  Normal- │     │  Val/Test│     │  GCS)    │     │  Dataset │
 │  PRs)    │     │          │     │  ize)    │     │          │     │          │     │  Artifact)│
 └──────────┘     └──────────┘     └──────────┘     └──────────┘     └──────────┘     └──────────┘
        │                │                │                │                │                │
        ▼                ▼                ▼                ▼                ▼                ▼
-  GitHub API      Pydantic        Dedup by          Stratified      Terraform        W&B run
-  response        validation      repo+issue        by repo         managed          linkage
-                   schema          pair fingerprint  split           S3 bucket
+   GitHub API      Pydantic        Dedup by          Stratified      Terraform        W&B run
+   response        validation      repo+issue        by repo         managed          linkage
+                    schema          pair fingerprint  split           GCS bucket
 ```
 
 ### Data Quality Gates
@@ -1430,14 +1430,14 @@ The data lifecycle follows ADR-004's defined stages, implemented across the pipe
 | Validation | All required fields present, schema valid | Reject record, log reason |
 | Cleaning | No duplicate issue-PR pairs | Remove duplicate, log count |
 | Splitting | No data leakage across splits (same repo stays in one split) | Re-split if leakage detected |
-| Archiving | S3 upload successful, checksums match | Retry upload, fail after 3 attempts |
+| Archiving | GCS upload successful, checksums match | Retry upload, fail after 3 attempts |
 | Versioning | W&B artifact logged successfully | Halt pipeline, alert |
 
 ### Data Versioning
 
 - Each pipeline run produces a uniquely versioned dataset (e.g., `dataset-v20260724-abc123`)
 - W&B tracks: raw data hash → cleaned data hash → split configuration → final dataset artifact
-- S3 stores: raw JSON, cleaned JSON, split artifacts, golden eval set
+- GCS stores: raw JSON, cleaned JSON, split artifacts, golden eval set
 - Dataset card auto-generated with: record count, schema version, source repos, quality stats, split distribution
 
 ---
@@ -1486,10 +1486,10 @@ This section maps every implementation decision in this Master Plan back to the 
 
 | Master Plan Decision | ADR / Conversation Ref | Status |
 |----------------------|----------------------|--------|
-| Foundation model: Qwen 3.6-27B, fallback Gemma 4 | Conversation decision | Locked |
+| Foundation model: Qwen3-30B-A3B (MoE), fallback Qwen3-14B | Conversation decision | Locked |
 | GPU platform: Modal only (Baseten removed) | Conversation decision + ADR-010 update | Locked |
 | Training on Modal | Conversation decision | Locked |
-| AWS only for cloud | Conversation decision | Locked |
+| GCP only for cloud | Conversation decision | Locked |
 | OpenAI-compatible API (with streaming) | Conversation decision | Locked |
 | 8-12k dataset from ~10 repos | Conversation decision | Locked |
 | W&B + Langfuse for V1 monitoring | Conversation decision + ADR-006 | Locked |
@@ -1505,7 +1505,7 @@ This section maps every implementation decision in this Master Plan back to the 
 | Vertical slice delivery | ADR-012 | Locked |
 | GitHub Actions for CI/CD | ADR-009 implementation | Locked |
 | Modal for serverless inference | ADR-010 (updated) | Locked |
-| S3 for artifact storage | ADR-008 implementation | Locked |
+| GCS for artifact storage | ADR-008 implementation | Locked |
 | OIDC keyless auth | ADR-008 implementation | Locked |
 | Mandatory 3-config QLoRA comparison | Conversation decision | Locked |
 | SWE-bench Verified evaluation tier | Conversation decision | Locked |
@@ -1604,7 +1604,7 @@ The project is **Complete** when:
 | **Golden Eval Set** | A subset of examples where test-suite results are verified — the ground truth for evaluation |
 | **Champion/Challenger** | Automated A/B testing pattern: new model (challenger) is compared against current best (champion) and promoted if it wins |
 | **Scale-to-Zero** | Serverless pattern where GPU resources are released when idle, costing $0 until the next request |
-| **OIDC** | OpenID Connect — a federated identity protocol allowing GitHub Actions to authenticate to AWS without long-lived credentials |
+| **OIDC** | OpenID Connect — a federated identity protocol allowing GitHub Actions to authenticate to GCP without long-lived credentials |
 | **Vertical Slice** | A small, end-to-end functional increment that crosses all layers of the system |
 
 ### Appendix C: Modal Configuration Reference
@@ -1615,14 +1615,13 @@ modal_config:
   # Training
   training:
     image: "python:3.11-slim"
-    gpu: "A10G"       # 24GB VRAM, fits Qwen 3.6-27B at 4-bit quant
+    gpu: "A100"       # 40GB VRAM, fits Qwen3-30B-A3B QLoRA 4-bit
     timeout: 3600      # 1 hour max per training job
     volumes:
       - /models       # Persistent storage for checkpoints
     env:
       - WANDB_API_KEY
-      - AWS_ACCESS_KEY_ID
-      - AWS_SECRET_ACCESS_KEY
+      - GCP_PROJECT_ID
 
   # Inference
   inference:
@@ -1633,7 +1632,7 @@ modal_config:
     ports:
       - 8000           # OpenAI-compatible API port
     env:
-      - MODEL_PATH    # S3 path to LoRA adapter + base model
+      - MODEL_PATH    # GCS path to LoRA adapter + base model
       - WANDB_API_KEY
 ```
 
@@ -1665,8 +1664,8 @@ swe-qwen/
 │       ├── outputs.tf                 ← Terraform outputs
 │       ├── providers.tf               ← Provider configuration
 │       └── modules/
-│           ├── storage/               ← S3 bucket + policies
-│           ├── iam/                   ← IAM roles + OIDC + secrets
+│           ├── storage/               ← GCS bucket + policies
+│           ├── iam/                   ← IAM roles + WIF + secrets
 │           └── deployment/            ← Deployment resources (Modal config, etc.)
 ├── data_engineering/                  ← WS-1: data pipeline
 │   ├── __init__.py
