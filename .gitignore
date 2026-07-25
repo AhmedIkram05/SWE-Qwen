@@ -2,6 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
+*.pkl
 
 # C extensions
 *.so
@@ -216,3 +217,60 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific
+# Model checkpoints and artifacts
+models/checkpoints/
+models/*.bin
+models/*.safetensors
+*.gguf
+
+# Weights & Biases
+wandb/
+.wandb/
+
+# Modal
+.modal/
+
+# Service account keys (GCP)
+*-sa-key.json
+*-service-account-key.json
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test outputs
+test-results/
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Data
+data/raw/
+data/processed/
+data/interim/
+*.parquet
+*.arrow
