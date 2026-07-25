@@ -102,7 +102,7 @@ jobs:
     name: Terraform Plan
     needs: terraform-validate
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && secrets.GCP_WIF_PROVIDER != ''
+    if: github.event_name == 'pull_request'
     defaults:
       run:
         working-directory: infra/terraform
