@@ -128,48 +128,71 @@ Each Phase follows this structure:
 
 ---
 
-## Phase 2: Repository Curation & Verification — YYYY-MM-DD
+## Phase 2: Repository Curation & Verification — 2026-07-26
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 |------|---------|--------|--------|--------|
-| 2.1 | Define selection criteria | | | |
-| 2.2 | Identify 10 candidate repos | | | |
-| 2.3 | Verify test suites run | | | |
-| 2.4 | Extract issue-PR pairs | | | |
-| 2.5 | Build manifest.json | | | |
-| 2.6 | Write verification scripts | | | |
-| 2.7 | Document selection rationale | | | |
+| 2.1 | Define selection criteria | Completed | docs/planning/phase2-criteria.md | Low |
+| 2.2 | Identify 10 candidate repos | 50 candidates found, 10 selected | GitHub Search API: topic-only queries need text term. Per-subtopic queries with `topic:+text` work. 5 subtopics used (web-api, cli, data-ml, testing, utils), MAX_PER_QUERY=15 | Medium |
+| 2.3 | Verify test suites run | Deep verify on 15 shortlist, 12 passed | Clone+install+pytest on all 50 too heavy. Picked 15 promising candidates based on API checks, then deep-verified with `verify_repos.py` | Medium |
+| 2.4 | Extract issue-PR pairs | Deferred to Phase 3 | Phase 2 is curation + manifest; ingestion is Phase 3 | Low |
+| 2.5 | Build manifest.json | Completed with star/description enrichment | `scripts/build_manifest.py` merges verification + enrichment | Low |
+| 2.6 | Write verification scripts | 2 scripts: find_candidates.py + verify_repos.py | Replaced single script with separate sourcing and verification | Low |
+| 2.7 | Document selection rationale | repos/README.md + criteria doc | Selection rationale documented | Low |
+| 2.8 | (added) Expand to 14 repos | Added pytest, black, pydantic, mlflow | User: "10 was an aim not a cap". Added 4 to fill testing/utils/data-ml gaps | Low |
+| 2.9 | Test architecture redesign | Replaced `check_tests_run` (heavy pytest-in-verify) with lightweight `check_build_readiness` (pytest config + pip install + import check) + per-repo CI matrix job (`verify-repos-tests`) | Host-venv contamination made in-script pytest unreliable. Isolated venv per repo was too slow (14 venvs × 30s+ each). CI matrix isolates each repo in its own runner — cleaner, faster, matches how CI should work | Medium |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| Per-subtopic GitHub search queries | GitHub API requires text search term alongside `topic:` qualifier | Single broad query, OR between topics | Topic-only queries return 0 results. Per-subtopic with text term works |
+| Deep-verify only shortlist of 15 | 50 candidates would take hours to clone/install/test | Full 50 verification | 15 selected by license+stars+py file count skim; deep verify on those |
+| Dropped graphify + sherlock post-verify | Both passed hard checks but too small (99 and 8 .py files) | Keep them despite size | Minimum size filter ensures sufficient data for Phase 3 ingestion |
+| size_range adjusted to 50-5000 (soft) | Several quality repos have <500 .py files (rich=146, datasets=148) | Hard floor at 500 | Size is soft check; repo quality outweighs arbitrary size threshold |
+| Added `ingestion_config` to manifest | Phase 3 needs per-repo config (branch, labels, paths) | Store in separate config file | Self-contained manifest simplifies pipeline |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
+| GitHub Search API returns 0 results with `topic:` qualifier alone | 2026-07-26 | 2026-07-26 | Must include a text search term alongside qualifier. Per-subtopic queries with MAX_PER_QUERY=15 | 30 min |
+| PyGithub `repo.license` is a property, not callable | 2026-07-26 | 2026-07-26 | Changed `repo.license()` → `repo.license` in verify_repos.py | 5 min |
+| `_allows_python_310()` too strict (only handled `>=3.10` format) | 2026-07-26 | 2026-07-26 | Rewrote to handle `^3.9`, `>=3.8`, `>=3.10.0`, `~=3.10`, poetry/pip constraints | 15 min |
+| PyGithub `get_commits(since=string)` expects datetime object | 2026-07-26 | 2026-07-26 | Pass `datetime.datetime` not ISO string | 5 min |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| GitHub Search API | Queries need `q=python+topic:web-api` format, not `q=topic:web-api` alone | Prevents wasted queries in Phase 3 ingestion |
+| PyGithub Auth | Use `github.Auth.Token(token)`, pass to `github.Github(auth=...)`. Raw token string deprecated | Prevents auth failures |
+| Rate limiting | Search API = 30/non-search = 5000/hr. `rl.rate.remaining` for core, search endpoint separate | Plan Phase 3 with backoff |
+| Python version parsing | Constraint formats vary: `>=3.10`, `^3.9`, `>=3.10.0`, `~=3.10`, `>=3.9,<4.0`, or absent entirely | Version check function handles all formats loosely |
+| manifest.json ingestion_config | Each repo has default_branch, labels, exclude_paths, test_dirs | Phase 3 reads these directly; no separate config needed |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| Star count enrichment | Added to build_manifest.py | README needs star counts for selection rationale |
+| 3 scripts instead of 1 | Modified | find_candidates.py (sourcing) + verify_repos.py (deep verify) + build_manifest.py (manifest assembly) |
 
 ### Metrics / Observations
 
--
--
+- 50 candidates sourced from GitHub (15 web-api, 12 cli, 14 utils, 7 data-ml, 2 testing)
+- 15 shortlisted, 12 passed deep verification (3 failed: pandas>=3.11, strix>=3.12, SWE-agent>=3.11)
+- 14 final repos (expanded from 10 upon request — not a cap)
+- 493,511 total stars across all repos
+- 10,225 total Python files
+- Added 4 repos post-selection: pytest (testing), black (utils), pydantic (utils), mlflow (data-ml)
+- Testing domain doubled from 1→2, utils doubled from 2→4, data-ml grew from 2→3
+- `pip install -e .` succeeded on all 12/12 verified repos
+- tox/nox detected in 3 repos (rich, wagtail, faker) — not a blocker
+- External service imports (openai, boto3, anthropic, redis) detected in 2 repos (headroom, marimo) — soft fail only
+- GitHub API rate limit: ~4,800 remaining after Phase 2 ops
 
 ---
 
