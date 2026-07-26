@@ -66,6 +66,97 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  # ── Structural check (lightweight) ──────────────────────────
+  verify-repos:
+    name: Verify Repos
+    runs-on: ubuntu-latest
+    outputs:
+      repo_matrix: ${{ steps.set-matrix.outputs.repo_matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install SWE-Qwen
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Generate candidates.json from manifest
+        run: |
+          python3 -c "
+          import json
+          m = json.load(open('repos/manifest.json'))
+          candidates = []
+          for r in m['repositories']:
+              candidates.append({
+                  'url': r['url'],
+                  'owner': r['owner'],
+                  'name': r['name'],
+                  'domain': r.get('domain_category', ''),
+              })
+          with open('candidates.json', 'w') as f:
+              json.dump(candidates, f, indent=2)
+          with open('repo-list.json', 'w') as f:
+              json.dump([f\"{r['owner']}/{r['name']}\" for r in m['repositories']], f)
+          print(f'Wrote {len(candidates)} candidates')
+          "
+      - name: Structural check (pytest config, pip install, import)
+        run: python scripts/verify_repos.py --workers 14
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate matrix from manifest
+        id: set-matrix
+        run: |
+          echo "repo_matrix=$(cat repo-list.json | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification-results
+          path: |
+            verified.json
+            repo-list.json
+
+  # ── Full test verification (matrix, per-repo) ───────────────
+  verify-repos-tests:
+    name: Test ${{ matrix.repo }}
+    needs: verify-repos
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJSON(needs.verify-repos.outputs.repo_matrix) }}
+    steps:
+      - name: Clone ${{ matrix.repo }}
+        run: |
+          git clone --depth=1 https://github.com/${{ matrix.repo }}.git /tmp/repo
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install repo with test deps
+        run: |
+          python -m pip install --upgrade pip
+          for spec in ".[dev,test,testing,tests]" ".[testing]" ".[tests]" "."; do
+            if pip install -e "$spec"; then break; fi
+          done
+        working-directory: /tmp/repo
+      - name: Run pytest
+        run: |
+          python -m pytest -x -m "not slow and not requires_modal and not requires_gcp" \
+            --tb=short 2>&1 | tail -20
+        working-directory: /tmp/repo
+        timeout-minutes: 5
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.repo }}
+          path: /tmp/repo/.pytest_cache
+          if-no-files-found: ignore
+
   terraform-validate:
     name: Terraform Validate
     runs-on: ubuntu-latest
