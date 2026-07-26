@@ -1,0 +1,142 @@
+[
+  {
+    "url": "https://github.com/fastapi/fastapi",
+    "owner": "fastapi",
+    "name": "fastapi",
+    "description": "",
+    "stars": 100898,
+    "license": "MIT",
+    "language": "Python",
+    "domain_category": "web-api"
+  },
+  {
+    "url": "https://github.com/headroomlabs-ai/headroom",
+    "owner": "headroomlabs-ai",
+    "name": "headroom",
+    "description": "",
+    "stars": 62544,
+    "license": "Apache-2.0",
+    "language": "Python",
+    "domain_category": "web-api"
+  },
+  {
+    "url": "https://github.com/Textualize/rich",
+    "owner": "Textualize",
+    "name": "rich",
+    "description": "",
+    "stars": 56950,
+    "license": "MIT",
+    "language": "Python",
+    "domain_category": "utils"
+  },
+  {
+    "url": "https://github.com/psf/black",
+    "owner": "psf",
+    "name": "black",
+    "description": "",
+    "stars": 41764,
+    "license": "MIT",
+    "language": "Python",
+    "domain_category": "utils"
+  },
+  {
+    "url": "https://github.com/Textualize/textual",
+    "owner": "Textualize",
+    "name": "textual",
+    "description": "",
+    "stars": 36747,
+    "license": "MIT",
+    "language": "Python",
+    "domain_category": "cli"
+  },
+  {
+    "url": "https://github.com/pydantic/pydantic",
+    "owner": "pydantic",
+    "name": "pydantic",
+    "description": "",
+    "stars": 28401,
+    "license": "MIT",
+    "language": "Python",
+    "domain_category": "utils"
+  },
+  {
+    "url": "https://github.com/mlflow/mlflow",
+    "owner": "mlflow",
+    "name": "mlflow",
+    "description": "",
+    "stars": 27217,
+    "license": "Apache-2.0",
+    "language": "Python",
+    "domain_category": "data-ml"
+  },
+  {
+    "url": "https://github.com/marimo-team/marimo",
+    "owner": "marimo-team",
+    "name": "marimo",
+    "description": "",
+    "stars": 22064,
+    "license": "Apache-2.0",
+    "language": "Python",
+    "domain_category": "utils"
+  },
+  {
+    "url": "https://github.com/huggingface/datasets",
+    "owner": "huggingface",
+    "name": "datasets",
+    "description": "",
+    "stars": 21764,
+    "license": "Apache-2.0",
+    "language": "Python",
+    "domain_category": "data-ml"
+  },
+  {
+    "url": "https://github.com/onnx/onnx",
+    "owner": "onnx",
+    "name": "onnx",
+    "description": "",
+    "stars": 21215,
+    "license": "Apache-2.0",
+    "language": "Python",
+    "domain_category": "data-ml"
+  },
+  {
+    "url": "https://github.com/wagtail/wagtail",
+    "owner": "wagtail",
+    "name": "wagtail",
+    "description": "",
+    "stars": 20419,
+    "license": "BSD-3-Clause",
+    "language": "Python",
+    "domain_category": "web-api"
+  },
+  {
+    "url": "https://github.com/fastapi/typer",
+    "owner": "fastapi",
+    "name": "typer",
+    "description": "",
+    "stars": 19811,
+    "license": "MIT",
+    "language": "Python",
+    "domain_category": "cli"
+  },
+  {
+    "url": "https://github.com/joke2k/faker",
+    "owner": "joke2k",
+    "name": "faker",
+    "description": "",
+    "stars": 19342,
+    "license": "MIT",
+    "language": "Python",
+    "domain_category": "testing"
+  },
+  {
+    "url": "https://github.com/pytest-dev/pytest",
+    "owner": "pytest-dev",
+    "name": "pytest",
+    "description": "",
+    "stars": 14375,
+    "license": "MIT",
+    "language": "Python",
+    "domain_category": "testing"
+  }
+]
