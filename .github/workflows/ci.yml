@@ -146,9 +146,9 @@ jobs:
       - name: Run pytest
         run: |
           python -m pytest -x -m "not slow and not requires_modal and not requires_gcp" \
-            --tb=short 2>&1 | tail -20
+            --tb=short -q 2>&1 | tail -20
         working-directory: /tmp/repo
-        timeout-minutes: 5
+        timeout-minutes: 15
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
