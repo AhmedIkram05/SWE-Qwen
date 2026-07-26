@@ -11,6 +11,8 @@ Fallback model: Qwen/Qwen3-14B (14B dense)
 
 import modal
 
+import wandb
+
 # Modal app configuration
 app = modal.App("swe-qwen")
 
@@ -171,8 +173,6 @@ def train_swe_qwen(  # noqa: PLR0913,PLR0917
         TrainingArguments,
     )
     from trl import SFTTrainer
-
-    import wandb
 
     # Set up W&B
     wandb.login(key=os.environ.get("WANDB_API_KEY"))
