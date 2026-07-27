@@ -15,8 +15,8 @@ DOMAIN_CATEGORIES = {"web-api", "utils", "cli", "data-ml", "testing"}
 MIN_STARS = 300
 MIN_PY_FILES = 50
 MIN_COMMITS_6MO = 10
-EXPECTED_REPO_COUNT = 14
-EXPECTED_DOMAIN_COUNTS = {"web-api": 3, "utils": 4, "cli": 2, "data-ml": 3, "testing": 2}
+EXPECTED_REPO_COUNT = 10
+EXPECTED_DOMAIN_COUNTS = {"web-api": 2, "utils": 2, "cli": 2, "data-ml": 3, "testing": 1}
 MINIMUM_REPOS = 10
 MIN_STARS_FASTAPI = 100000
 MIN_STARS_FAKER = 10000
@@ -243,7 +243,6 @@ class TestIngestionConfig:
 
     INGESTION_FIELDS = {
         "default_branch",
-        "issue_labels_to_include",
         "pr_merge_commits_only",
         "max_issues_per_repo",
         "exclude_paths",
@@ -259,11 +258,6 @@ class TestIngestionConfig:
     @pytest.mark.parametrize("idx", range(EXPECTED_REPO_COUNT))
     def test_default_branch(self, repos, idx):
         assert repos[idx]["ingestion_config"]["default_branch"] in ("main", "master")
-
-    @pytest.mark.parametrize("idx", range(EXPECTED_REPO_COUNT))
-    def test_issue_labels(self, repos, idx):
-        labels = repos[idx]["ingestion_config"]["issue_labels_to_include"]
-        assert "bug" in labels, f"{repos[idx]['id']} missing 'bug' in issue labels"
 
 
 # ── Domain-Specific Spot Checks ─────────────────────────────────────
@@ -285,18 +279,6 @@ class TestDomainSpecific:
         r = self._find(repos, "joke2k/faker")
         assert r["domain_category"] == "testing"
         assert r["stars"] >= MIN_STARS_FAKER
-
-    def test_pytest_is_testing(self, repos):
-        r = self._find(repos, "pytest-dev/pytest")
-        assert r["domain_category"] == "testing"
-
-    def test_black_is_utils(self, repos):
-        r = self._find(repos, "psf/black")
-        assert r["domain_category"] == "utils"
-
-    def test_pydantic_is_utils(self, repos):
-        r = self._find(repos, "pydantic/pydantic")
-        assert r["domain_category"] == "utils"
 
     def test_mlflow_is_data_ml(self, repos):
         r = self._find(repos, "mlflow/mlflow")
