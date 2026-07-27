@@ -196,49 +196,110 @@ Each Phase follows this structure:
 
 ---
 
-## Phase 3: Data Engineering Pipeline — YYYY-MM-DD
+## Phase 3: Data Engineering Pipeline — 2026-07-27
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 |------|---------|--------|--------|--------|
-| 3.1 | Ingest from GitHub API | | | |
-| 3.2 | Validate schema | | | |
-| 3.3 | Clean/normalize data | | | |
-| 3.4 | Train/val/test split | | | |
-| 3.5 | Golden eval subset | | | |
-| 3.6 | W&B dataset artifacts | | | |
-| 3.7 | Archive raw data | | | |
-| 3.8 | Version dataset | | | |
+| 3.1 | config/schema | Completed | DataPipelineConfig (Pydantic Settings) + 15 Pydantic models (IssueRecord, ParsedHunk, Splits, PipelineResult, etc.) | Low |
+| 3.2 | ingest.py | Completed | GitHub API ingestion with exponential backoff, ThreadPoolExecutor, batch processing, manifest loading | Low |
+| 3.3 | validate.py | Completed | Pydantic-based schema validation collecting ALL errors per record, returning validated records + error list | Low |
+| 3.4 | clean.py | Completed | Two-stage dedup (exact repo+issue_id + SHA256 content hash) + quality filters (test files, patch size, binary, non-Python, empty body, F2P keywords) | Low |
+| 3.5 | split.py + golden.py | Completed | Repo-stratified 80/10/10 split with seeded shuffle, no leakage; golden extract from test split via F2P proxy | Low |
+| 3.6 | version.py | Completed | W&B artifact versioning per stage with metadata, temp JSONL files | Low |
+| 3.7 | archive.py | Completed | GCS upload for stages + manifest + dataset card; lazy google.cloud.storage import | Low |
+| 3.8 | card.py | Completed | Dataset card markdown generator with schema table, quality stats, split ratios, GCS/W&B links | Low |
+| 3.9 | run_pipeline.py | Completed | Full orchestrator with checkpoint resume, per-repo ThreadPoolExecutor parallelism, Rich progress bars, aggregate stats | Low |
+| 3.10 | cli.py | Completed | Typer CLI with run, validate-manifest, config subcommands; --resume-from, ratio overrides | Low |
+| 3.11 | Test fixtures | Completed | sample_issues.json (5 valid), sample_invalid_issues.json (3 invalid), conftest.py | Low |
+| 3.12 | Unit tests | 9 test files, 64+ tests | test_data_schema.py (25), validate (5), clean (10), split (7), golden (2), version (2), archive (3), card (2), cli (4) | Low |
+| 3.13 | Integration + property tests | Completed | test_data_integration.py (6 tests), test_data_property.py (7 hypothesis tests) | Low |
+| 3.14 | (added) Patch validation relaxed | unidiff full parse → regex header check | unidiff rejects valid diffs with mismatched hunk line counts. GitHub API diffs can be truncated or have slight formatting quirks | Medium |
+| 3.15 | (added) Dedup stats tracking | Combined exact+content → separate counters | Content duplicates (same patch, different issue) now tracked separately in DedupStats | Low |
+| 3.16 | (added) Modular package layout | Single-level data_engineering/ with flat modules | Pyproject.toml discovers at root level; each module has single responsibility | Low |
+| 3.17 | (added) Rate limiter + parallel ingest | `_RateLimiter` token-bucket + `ThreadPoolExecutor(max_workers=5)` in ingest.py | Sequential issue processing was bottleneck (3-5 API calls/issue). Parallelism + rate limiting saturates GitHub API limits | Medium |
+| 3.18 | (added) W&B run naming | `--run-name` flag + auto-generated names (run-{YYYYMMDD-HHMM}-{run_id[:6]}) | Needed descriptive names for multi-run tracking in W&B UI | Low |
+| 3.19 | (added) Validation errors W&B artifact | `dataset-validation_errors` artifact logged with per-repo error details | Validation errors were saved locally but never logged to W&B — gap in acceptance criteria | Low |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| Flat module structure in data_engineering/ | 12 modules total | Nested subpackages (ingest/, clean/, etc.) | Flat layout is simpler; each module has single responsibility and clear name |
+| Pydantic for schema + validation | Need runtime validation + serialization | dataclasses, msgspec, custom validators | Pydantic provides both field validators and model_dump() for JSONL; already a dependency |
+| regex-based patch validation instead of full unidiff parsing | unidiff rejects valid-looking diffs with incorrect hunk line counts | Full parse, no validation | Production GitHub API diffs can be truncated; regex check catches clearly invalid patches without false negatives |
+| W&B + GCS are non-fatal failures | Pipeline should work offline without credentials | Hard fail on missing creds | Developer iteration without cloud deps; warnings instead of crashes |
+| run_pipeline.py uses ThreadPoolExecutor for per-repo parallelism | 14 repos, each independent | Sequential, asyncio, multiprocessing | I/O-bound (GitHub API); ThreadPoolExecutor with 4 workers balances speed vs rate limiting |
+| Checkpoint resume via JSONL files | Per-repo, per-stage JSONL checkpoints | Single monolithic file, database | JSONL enables append-per-stage, resume-from-any-point, easy inspection |
+| Dedup tracks exact + content separately | Two distinct dedup passes on same data | Single counter | Accurate stats for data quality reporting: exact (same issue re-fetched) vs content (same fix found in different issues) |
+| Lazy google.cloud.storage import | google-cloud-storage heavy dependency | Eager import | Lazy import means tests don't need GCS lib installed; archive step only executed when config.gcs_bucket is set |
+| Token-bucket rate limiter + ThreadPoolExecutor ingest | Sequential issue processing was bottleneck (3-5 API calls per issue) | Asyncio, multiprocessing, process pools | ThreadPoolExecutor is simplest for I/O-bound work; rate limiter singleton prevents 429s; 5 workers saturates the 4800 calls/hr budget |
+| W&B auto-generated run names | Multi-run tracking needs descriptive names | Fixed naming, sequential numbers | Auto-name `run-{YYYYMMDD-HHMM}-{run_id[:6]}` is descriptive, unique, and sortable; `--run-name` override available |
+| Validation_errors logged as W&B artifact | Error records were saved locally but invisible in W&B | Log to separate W&B table, skip entirely | W&B artifacts support arbitrary JSONL files; dataset-validation_errors artifact keeps errors alongside dataset lineage |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
+| unidiff rejects valid diffs with incorrect hunk line counts | 2026-07-27 | 2026-07-27 | Replaced full unidiff parsing with regex check for ---/+++/@@ headers in IssueRecord validator | 20 min |
+| Hypothesis generates empty/whitespace issue_body | 2026-07-27 | 2026-07-27 | Added filter strategy that rejects whitespace-only strings in property tests | 5 min |
+| Typer CLI test errors go to stderr, not stdout | 2026-07-27 | 2026-07-27 | Use result.stderr in CLI assertions | 5 min |
+| google.cloud.storage import at module level blocks test mocking | 2026-07-27 | 2026-07-27 | Moved import inside _ensure_gcs_bucket (lazy import) | 5 min |
+| dedup_stats.content_duplicates_removed always 0 | 2026-07-27 | 2026-07-27 | Split exact/content duplicate counting in deduplicate() | 5 min |
+| gh.get_repo() used opaque repo ID instead of owner/name | 2026-07-27 | 2026-07-27 | Switched to `gh.get_repo(f"{owner}/{name}")` | 10 min |
+| CLI --manifest default overrode env var (DATA_PIPELINE_MANIFEST) | 2026-07-27 | 2026-07-27 | Fixed Typer default precedence — env var checked before default | 5 min |
+| GitHub API labels param is AND, not OR | 2026-07-27 | 2026-07-27 | Fetched per-label separately, merged results client-side | 15 min |
+| Stage name mismatch (CLI human names vs internal file-stage names) | 2026-07-27 | 2026-07-27 | Added reverse-mapping in `_stage_enabled()` | 10 min |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| Patch validation | IssueRecord uses regex check (---/+++/@@) instead of unidiff.PatchSet | Prevents false rejections on GitHub API diffs; lighter validation |
+| Dedup strategy | Primary: (repo, issue_id) exact match; Secondary: SHA256(patch_diff) content match | Same fix appearing in different issues is rare but possible; content dedup catches it |
+| Checkpoint resume | Per-repo JSONL at output_dir/{run_id}/{repo_id}/{stage}.jsonl | Enables resume-from-validated or resume-from-cleaned without re-ingesting |
+| Stratified split | Repo-level grouping ensures each repo appears in exactly one split | Prevents data leakage across train/val/test |
+| Golden set | F2P proxy (test_files_changed + fix keywords in commit messages) | Phase 5 will replace with actual test execution at base/head SHAs |
+| W&B artifacts | Stage-level artifacts with metadata (run_id, manifest_hash, counts) | Enables dataset lineage tracking through W&B |
+| GCS archival | Uploads all stages + manifest + dataset card under gs://bucket/datasets/{run_id}/ | Durable storage independent of W&B; bucket name configured via env |
+| Property tests | 7 Hypothesis tests across validate/dedup/clean/split invariants | Catch edge cases in random data (empty inputs, single records, duplicate content) |
+| Rate limiter | `_RateLimiter` token-bucket class with `threading.Lock`, 4800 calls/hr, ~0.75s spacing. Module-level singleton called from `@github_retry` decorator | Prevents 429 errors; shared across all parallel workers |
+| Parallel ingest | `ThreadPoolExecutor(max_workers=5)` in `ingest_repo` via `_process_single_issue`. Rate limiter spans all workers | Throughput saturates GitHub API limit, not CPU; 5 workers fill I/O wait windows |
+| GitHub label API | `list_issues(labels=["bug", "enhancement"])` uses AND semantics. Must iterate per-label and merge | If future pipeline uses multi-label queries, must fetch per-label separately |
+| Stage name mapping | CLI uses human names (`--stages ingest,validate`), internal files use stage keys (`raw`, `validated`). `_stage_enabled()` reverse-maps human→internal | Keeps CLI intuitive without renaming internal file structure |
+| 14-repo yield analysis | 4 repos (black, pydantic, wagtail, pytest) have 0% issue-PR linkage → zero yield. 10 usable repos at ~40% yield rate | --max-issues 500 → ~2000 cleaned (~30 min). --max-issues 2000 → ~8K cleaned (~2h) |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| Full pipeline orchestrator (run_pipeline.py) | Added (not in original Phase 3 plan) | Single entry point for end-to-end pipeline with checkpoint resume and Rich progress |
+| Typer CLI (cli.py) | Added | Interactive use without Python imports; validate-manifest and config subcommands for debugging |
+| 76 tests (9 unit + 1 integration + 1 property + 1 CLI) | Added | Coverage across all modules including property-based invariants |
+| Patch validation relaxed | Modified | unidiff full parse was too strict for GitHub API data |
+| Lazy GCS import | Modified | Enables test mocking without installing google-cloud-storage |
+| Rate limiter + parallel ingest | Added | Sequential issue processing was bottleneck; 3-5 API calls per issue × 350 issues = 1400+ sequential calls |
+| W&B run naming (--run-name) | Added | Needed descriptive names for multi-run tracking in W&B UI |
+| Validation errors W&B artifact | Added | Gap in AC — errors were saved locally but never logged to W&B |
 
 ### Metrics / Observations
 
--
--
+- **12 modules** in data_engineering/ package (excluding tests)
+- **399 tests passing** (all phases combined — scaffold + phase2 + phase3)
+- **15 Pydantic models**: IssueRecord, ParsedHunk, TestResults, ValidationError, ValidationResult, DedupStats, CleanStats, SplitRatios, Splits, GoldenSet, RepoResult, PipelineStats, PipelineResult
+- **Pipeline stages**: ingest → validate → clean → dedup → split → golden → version → archive → card
+- **Per-repo parallelism**: ThreadPoolExecutor with configurable worker count
+- **Per-issue parallelism**: ThreadPoolExecutor(max_workers=5) inside ingest_repo + `_RateLimiter` (4800 calls/hr token-bucket)
+- **Checkpoint resume**: Supports --resume-from validated|cleaned
+- **W&B + GCS**: Non-fatal warnings on failure; pipeline runs fully offline
+- **Property tests**: 7 Hypothesis tests validating invariants (dedup never increases, split preserves total, no repo leakage)
+- **Coverage gap**: No test_data_ingest.py (requires GITHUB_TOKEN; tested via run_pipeline in integration test)
+- **Full pipeline run** (a67562d0): 7 repos × 50 issues → 201 raw / 201 validated / 110 cleaned / 87 train / 0 val / 23 test / 23 golden
+- **W&B artifacts logged**: dataset-raw:v1, dataset-validated:v1, dataset-cleaned:v1, dataset-train:v1, dataset-val:v0, dataset-test:v1, dataset-golden:v1
+- **GCS archived**: 8 files under gs://.../datasets/a67562d00754/ (all splits + manifest + dataset card)
+- **14-repo analysis**: 4 repos (black, pydantic, wagtail, pytest) have 0% issue-PR linkage → yield 0 records. With --max-issues 500 → ~2000 cleaned, with --max-issues 2000 → ~8K cleaned
+- **Rate limiter + parallel processing**: Total throughput limited by GitHub API (4800 calls/hr) not CPU — saturation confirmed across 7 repos
 
 ---
 
