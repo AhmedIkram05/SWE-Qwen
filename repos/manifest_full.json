@@ -1,0 +1,108 @@
+{
+  "version": "1.0",
+  "created_at": "2026-07-27T00:00:00+00:00",
+  "selection_criteria": {},
+  "repositories": [
+    {
+      "id": "Textualize-rich",
+      "url": "https://github.com/Textualize/rich",
+      "owner": "Textualize",
+      "name": "rich",
+      "license": "MIT",
+      "primary_language": "Python",
+      "stars": 56950,
+      "ingestion_config": {
+        "default_branch": "main",
+        "issue_labels_to_include": ["bug"],
+        "max_issues_per_repo": 50
+      }
+    },
+    {
+      "id": "Textualize-textual",
+      "url": "https://github.com/Textualize/textual",
+      "owner": "Textualize",
+      "name": "textual",
+      "license": "MIT",
+      "primary_language": "Python",
+      "stars": 36747,
+      "ingestion_config": {
+        "default_branch": "main",
+        "issue_labels_to_include": ["bug"],
+        "max_issues_per_repo": 50
+      }
+    },
+    {
+      "id": "mlflow-mlflow",
+      "url": "https://github.com/mlflow/mlflow",
+      "owner": "mlflow",
+      "name": "mlflow",
+      "license": "Apache-2.0",
+      "primary_language": "Python",
+      "stars": 27217,
+      "ingestion_config": {
+        "default_branch": "master",
+        "issue_labels_to_include": ["bug"],
+        "max_issues_per_repo": 50
+      }
+    },
+    {
+      "id": "marimo-team-marimo",
+      "url": "https://github.com/marimo-team/marimo",
+      "owner": "marimo-team",
+      "name": "marimo",
+      "license": "Apache-2.0",
+      "primary_language": "Python",
+      "stars": 22064,
+      "ingestion_config": {
+        "default_branch": "main",
+        "issue_labels_to_include": ["bug"],
+        "max_issues_per_repo": 50
+      }
+    },
+    {
+      "id": "huggingface-datasets",
+      "url": "https://github.com/huggingface/datasets",
+      "owner": "huggingface",
+      "name": "datasets",
+      "license": "Apache-2.0",
+      "primary_language": "Python",
+      "stars": 21764,
+      "ingestion_config": {
+        "default_branch": "main",
+        "issue_labels_to_include": ["bug"],
+        "max_issues_per_repo": 50
+      }
+    },
+    {
+      "id": "joke2k-faker",
+      "url": "https://github.com/joke2k/faker",
+      "owner": "joke2k",
+      "name": "faker",
+      "license": "MIT",
+      "primary_language": "Python",
+      "stars": 19342,
+      "ingestion_config": {
+        "default_branch": "master",
+        "issue_labels_to_include": ["bug"],
+        "max_issues_per_repo": 50
+      }
+    },
+    {
+      "id": "headroomlabs-ai-headroom",
+      "url": "https://github.com/headroomlabs-ai/headroom",
+      "owner": "headroomlabs-ai",
+      "name": "headroom",
+      "license": "Apache-2.0",
+      "primary_language": "Python",
+      "stars": 62544,
+      "ingestion_config": {
+        "default_branch": "main",
+        "issue_labels_to_include": ["bug"],
+        "max_issues_per_repo": 50
+      }
+    }
+  ],
+  "summary": {
+    "total_repos": 7
+  }
+}
