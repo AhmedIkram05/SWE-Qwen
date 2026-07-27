@@ -1,0 +1,44 @@
+[
+  {
+    "issue_id": "invalid#1",
+    "repo": "invalid-repo",
+    "issue_body": "  ",
+    "patch_diff": "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1,2 @@\n-x=1\n+x=1\n+y=2\n",
+    "pr_title": "",
+    "pr_description": "",
+    "commit_messages": [],
+    "files_changed": ["foo.py"],
+    "test_files_changed": [],
+    "issue_labels": [],
+    "repo_domain": "github.com",
+    "metadata": {}
+  },
+  {
+    "issue_id": "invalid#2",
+    "repo": "invalid-repo",
+    "issue_body": "Empty patch diff test",
+    "patch_diff": "",
+    "pr_title": "",
+    "pr_description": "",
+    "commit_messages": [],
+    "files_changed": ["bar.py"],
+    "test_files_changed": [],
+    "issue_labels": [],
+    "repo_domain": "github.com",
+    "metadata": {}
+  },
+  {
+    "issue_id": "invalid#3",
+    "repo": "invalid-repo",
+    "issue_body": "Invalid diff test",
+    "patch_diff": "this is not a valid unified diff",
+    "pr_title": "",
+    "pr_description": "",
+    "commit_messages": [],
+    "files_changed": ["baz.py"],
+    "test_files_changed": [],
+    "issue_labels": [],
+    "repo_domain": "github.com",
+    "metadata": {}
+  }
+]
