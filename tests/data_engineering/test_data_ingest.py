@@ -385,6 +385,284 @@ class TestFetchPRDetails:
         assert "tests/test_auth.py" in rec["test_files_changed"]
 
 
+# ── _run_graphql ──────────────────────────────────────────────────────────────
+
+
+class TestRunGraphQL:
+    """Contract tests for _run_graphql: verify it correctly unwraps
+    GitHub's GraphQL response shape { "data": { ... } }.
+    """
+
+    def test_unwraps_data_key_on_success(self) -> None:
+        from data_engineering.ingest import _run_graphql
+
+        mock_gh = MagicMock()
+        # GitHub returns (headers, { "data": { "repository": { ... } } })
+        mock_gh.requester.graphql_query.return_value = (
+            {},
+            {"data": {"repository": {"name": "test-repo"}}},
+        )
+
+        result = _run_graphql(mock_gh, "query { repository { name } }")
+
+        assert result == {"repository": {"name": "test-repo"}}
+        mock_gh.requester.graphql_query.assert_called_once()
+
+    def test_handles_missing_data_key(self) -> None:
+        """Some GraphQL endpoints may return bare dict (mocking fallback)."""
+        from data_engineering.ingest import _run_graphql
+
+        mock_gh = MagicMock()
+        mock_gh.requester.graphql_query.return_value = (
+            {},
+            {"repository": {"name": "test-repo"}},  # no "data" wrapper
+        )
+
+        result = _run_graphql(mock_gh, "query { repository { name } }")
+
+        # Falls back to original dict
+        assert result == {"repository": {"name": "test-repo"}}
+
+    def test_extracts_partial_data_from_400_error(self) -> None:
+        """GraphQL 400 errors (NOT_FOUND) carry usable data in exc.data."""
+        from github import GithubException
+
+        from data_engineering.ingest import _run_graphql
+
+        mock_gh = MagicMock()
+        exc = GithubException(
+            400,
+            {
+                "data": {"repository": {"i0": {"timelineItems": {"nodes": []}}}},
+                "errors": [{"type": "NOT_FOUND"}],
+            },
+        )
+        mock_gh.requester.graphql_query.side_effect = exc
+
+        result = _run_graphql(mock_gh, "query ...")
+
+        # Should extract partial data from exc.data["data"]
+        assert result == {"repository": {"i0": {"timelineItems": {"nodes": []}}}}
+
+    def test_re_raises_non_400_errors(self) -> None:
+        """Non-recoverable GraphQL errors are propagated."""
+        from github import GithubException
+
+        from data_engineering.ingest import _run_graphql
+
+        mock_gh = MagicMock()
+        exc = GithubException(500, {"message": "internal server error"})
+        mock_gh.requester.graphql_query.side_effect = exc
+
+        with pytest.raises(GithubException):
+            _run_graphql(mock_gh, "query ...")
+
+
+# ── _graphql_resolve_issue_pr_links ────────────────────────────────────────────
+
+
+class TestGraphQLResolveIssuePRLinks:
+    """Contract tests for _graphql_resolve_issue_pr_links using
+    exact GitHub GraphQL API response shapes.
+    """
+
+    def test_resolves_links_from_raw_graphql_response(self) -> None:
+        from data_engineering.ingest import _graphql_resolve_issue_pr_links
+
+        mock_gh = MagicMock()
+        # Exact GitHub response shape with "data" wrapper
+        # GraphQL query: source { ... on PullRequest { number state merged } }
+        mock_gh.requester.graphql_query.return_value = (
+            {},
+            {
+                "data": {
+                    "repository": {
+                        "i0": {
+                            "timelineItems": {
+                                "nodes": [
+                                    {
+                                        "source": {
+                                            "__typename": "PullRequest",
+                                            "number": 142,
+                                            "state": "MERGED",
+                                            "merged": True,
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                        "i1": {
+                            "timelineItems": {
+                                "nodes": []  # no PR link for issue 43
+                            }
+                        },
+                    }
+                }
+            },
+        )
+
+        issues = [MagicMock(number=42), MagicMock(number=43)]
+
+        result = _graphql_resolve_issue_pr_links("owner/repo", mock_gh, issues, 30)
+
+        assert result == {42: [142]}  # only issue 42 has linked PR
+
+    def test_skips_unmerged_prs(self) -> None:
+        from data_engineering.ingest import _graphql_resolve_issue_pr_links
+
+        mock_gh = MagicMock()
+        mock_gh.requester.graphql_query.return_value = (
+            {},
+            {
+                "data": {
+                    "repository": {
+                        "i0": {
+                            "timelineItems": {
+                                "nodes": [
+                                    {
+                                        "source": {
+                                            "__typename": "PullRequest",
+                                            "number": 142,
+                                            "state": "OPEN",  # not merged
+                                            "merged": False,
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            },
+        )
+
+        issues = [MagicMock(number=42)]
+        result = _graphql_resolve_issue_pr_links("owner/repo", mock_gh, issues, 30)
+
+        assert result == {}  # OPEN PRs are not linked
+
+    def test_falls_back_to_rest_on_graphql_exception(self) -> None:
+        """When GraphQL fails entirely, falls back to REST per-issue."""
+        from data_engineering.ingest import _graphql_resolve_issue_pr_links
+
+        mock_gh = MagicMock()
+        mock_gh.requester.graphql_query.side_effect = Exception("GraphQL unavailable")
+
+        mock_issue = MagicMock()
+        mock_issue.number = 42
+        mock_issue.repository = MagicMock()
+        mock_pr = MagicMock()
+        mock_pr.number = 142
+        mock_pr.merged = True
+        mock_issue.repository.get_pull.return_value = mock_pr
+
+        # Mock timeline for REST fallback
+        event = MagicMock()
+        event.event = "cross-referenced"
+        source = MagicMock()
+        src_issue = MagicMock()
+        src_issue.number = 142
+        src_issue.pull_request = MagicMock()
+        source.issue = src_issue
+        event.source = source
+        mock_issue.get_timeline.return_value = MagicMock(get_page=MagicMock(return_value=[event]))
+
+        issues = [mock_issue]
+        result = _graphql_resolve_issue_pr_links("owner/repo", mock_gh, issues, 100)
+
+        assert result == {42: [142]}
+
+
+# ── _graphql_fetch_pr_details ─────────────────────────────────────────────────
+
+
+class TestGraphQLFetchPRDetails:
+    """Contract tests for _graphql_fetch_pr_details using
+    exact GitHub GraphQL API response shapes.
+    """
+
+    def test_fetches_pr_details_from_raw_graphql_response(self) -> None:
+        from data_engineering.ingest import _graphql_fetch_pr_details
+
+        mock_gh = MagicMock()
+        mock_gh.requester.graphql_query.return_value = (
+            {},
+            {
+                "data": {
+                    "repository": {
+                        "pr0": {
+                            "state": "MERGED",
+                            "merged": True,
+                            "mergedAt": "2024-01-01T00:00:00Z",
+                            "title": "Fix bug",
+                            "body": "Closes #42",
+                            "baseRefOid": "base123",
+                            "headRefOid": "head456",
+                            "url": "https://github.com/owner/repo/pull/142",
+                            "files": {"nodes": [{"filename": "src/auth.py"}]},
+                            "commits": {
+                                "nodes": [
+                                    {"commit": {"message": "Fix auth bug"}},
+                                    {"commit": {"message": "Add test"}},
+                                ]
+                            },
+                        }
+                    }
+                }
+            },
+        )
+
+        result = _graphql_fetch_pr_details(mock_gh, "owner/repo", [142])
+
+        assert 142 in result
+        pr = result[142]
+        assert pr["title"] == "Fix bug"
+        assert pr["merged"] is True
+        assert pr["base_sha"] == "base123"
+        assert pr["head_sha"] == "head456"
+        assert pr["files_changed"] == ["src/auth.py"]
+        assert len(pr["commit_messages"]) == 2
+
+    def test_skips_unmerged_prs(self) -> None:
+        from data_engineering.ingest import _graphql_fetch_pr_details
+
+        mock_gh = MagicMock()
+        mock_gh.requester.graphql_query.return_value = (
+            {},
+            {
+                "data": {
+                    "repository": {
+                        "pr0": {
+                            "state": "OPEN",
+                            "merged": False,
+                            "mergedAt": None,
+                            "title": "WIP",
+                            "body": "",
+                            "baseRefOid": "",
+                            "headRefOid": "",
+                            "url": "",
+                            "files": {"nodes": []},
+                            "commits": {"nodes": []},
+                        }
+                    }
+                }
+            },
+        )
+
+        result = _graphql_fetch_pr_details(mock_gh, "owner/repo", [142])
+
+        assert result == {}  # OPEN PRs skipped
+
+    def test_skips_on_graphql_exception(self) -> None:
+        from data_engineering.ingest import _graphql_fetch_pr_details
+
+        mock_gh = MagicMock()
+        mock_gh.requester.graphql_query.side_effect = Exception("GraphQL unavailable")
+
+        result = _graphql_fetch_pr_details(mock_gh, "owner/repo", [142])
+
+        assert result == {}
+
+
 # ── ingest_repo ─────────────────────────────────────────────────────────────
 
 

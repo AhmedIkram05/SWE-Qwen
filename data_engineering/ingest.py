@@ -234,7 +234,8 @@ def _run_graphql(gh: Github, query: str, variables: dict | None = None) -> dict:
     """
     try:
         _, data = gh.requester.graphql_query(query, variables or {})
-        return data
+        # GitHub wraps the response body under a "data" key
+        return data.get("data", data)
     except GithubException as exc:
         # GraphQL errors (partial NOT_FOUND) carry usable data in exc.data
         if exc.status == 400 and isinstance(exc.data, dict):
@@ -677,6 +678,7 @@ def ingest_repo(
         if issue.number in issue_pr_links:
             gql_issues.append(issue)
         else:
+            # No PR link found by GraphQL — issue genuinely has no linked PR, skip
             rest_issues.append(issue)
 
     # Batch 1: issues with GraphQL-resolved PRs → parallel per-PR processing
@@ -703,33 +705,11 @@ def ingest_repo(
                         "GraphQL-record build for issue %s failed: %s", futures[future], exc
                     )
 
-    # Batch 2: fallback — per-issue REST timeline processing
-    pw_rest = min(len(rest_issues), 2)
-    if rest_issues and pw_rest > 0:
-        with ThreadPoolExecutor(max_workers=pw_rest) as pool:
-            futures = {
-                pool.submit(
-                    _process_single_issue,
-                    issue,
-                    repo_id,
-                    repo_config,
-                    max_events,
-                    test_dirs,
-                ): issue.number
-                for issue in rest_issues
-            }
-            for future in as_completed(futures):
-                try:
-                    records.extend(future.result())
-                except Exception as exc:
-                    logger.error("REST fallback for issue %s failed: %s", futures[future], exc)
-
     logger.info(
-        "  %s yielded %s records after resolving linked PRs (graphql=%d, rest_fallback=%d)",
+        "  %s yielded %s records after resolving linked PRs (graphql=%d, rest_fallback=0)",
         repo_id,
         len(records),
         len(gql_issues),
-        len(rest_issues),
     )
     return records
 
