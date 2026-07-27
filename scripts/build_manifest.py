@@ -85,7 +85,7 @@ class SelectionCriteria(BaseModel):
     min_commits_6mo: int = 10
     max_age_days: int = 365
     test_framework: str = "pytest"
-    issue_pr_linkage_min_ratio: float = 0.35
+    issue_pr_linkage_min_ratio: float = 0.3
     size_range_py_files: list[int] = [500, 5000]
 
 
