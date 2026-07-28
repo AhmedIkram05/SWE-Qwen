@@ -9,10 +9,17 @@ Usage:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import modal
 
 from training.qlora_config import resolve_gpu_type
+
+# ── Repo-relative mounts (via Image.add_local_dir) ──────────────────────────
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_TRAINING_DIR = _REPO_ROOT / "training"
+_CONFIG_DIR = _REPO_ROOT / "config"
 
 # ── Modal app ─────────────────────────────────────────────────────────────────
 
@@ -28,6 +35,13 @@ training_image = (
         "curl",
         "build-essential",
     )
+    .pip_install("packaging>=24.0")  # required by flash-attn setup.py
+    # Install flash-attn from a pre-built wheel (avoids nvcc requirement at build time)
+    # Uses torch 2.6+cu12 wheel — ABI-compatible with our torch 2.11+cu126 at runtime
+    .pip_install(
+        "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/"
+        "flash_attn-2.8.3.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
+    )
     .pip_install(
         "torch==2.11.0",
         index_url="https://download.pytorch.org/whl/cu126",
@@ -40,7 +54,6 @@ training_image = (
         "trl>=1.9.0",
         "datasets>=5.0.0",
         "wandb>=0.28.0",
-        "flash-attn>=2.7.0",
         "sentencepiece>=0.2.0",
         "protobuf>=5.28.0",
         "jinja2>=3.1.0",
@@ -48,6 +61,9 @@ training_image = (
         "tqdm>=4.66.0",
         "rich>=13.7.0",
     )
+    # Copy local source into the image — must be LAST
+    .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
+    .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)
 )
 
 # ── Modal volumes ─────────────────────────────────────────────────────────────
@@ -71,6 +87,7 @@ models_volume = modal.Volume.from_name("swe-qwen-models", create_if_missing=True
         "/data": data_volume,
         "/models": models_volume,
     },
+    memory=64000,  # 64 GB to avoid OOM on 30B model
     timeout=7200,  # 2 hours max
     retries=modal.Retries(
         max_retries=1,

@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 from peft import LoraConfig
-from transformers import TrainingArguments
+from trl import SFTConfig
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -84,8 +84,8 @@ def build_qlora_config(
     model_name: str = "qwen3-30b-a3b",
     output_dir: str | None = None,
     run_name: str | None = None,
-) -> tuple[LoraConfig, TrainingArguments]:
-    """Build ``(LoraConfig, TrainingArguments)`` for a given variant + model.
+) -> tuple[LoraConfig, SFTConfig]:
+    """Build ``(LoraConfig, SFTConfig)`` for a given variant + model.
 
     Args:
         variant: Key from ``qlora_variants.yaml`` (e.g. ``"baseline"``).
@@ -94,7 +94,7 @@ def build_qlora_config(
         run_name: W&B run name (auto-generated if ``None``).
 
     Returns:
-        Tuple of ``(LoraConfig, TrainingArguments)`` ready for ``QLoRATrainer``
+        Tuple of ``(LoraConfig, SFTConfig)`` ready for ``QLoRATrainer``
         or ``SFTTrainer``.
     """
     model_cfg = _get_model_config(model_name)
@@ -107,20 +107,32 @@ def build_qlora_config(
 
     lora_config = LoraConfig(**lora_params)
 
-    # ── Build TrainingArguments ────────────────────────────────────────────────
+    # ── Build SFTConfig ────────────────────────────────────────────────────────
     train_params = dict(var_cfg.get("training", {}))
     train_params["output_dir"] = output_dir or f"/tmp/qlora-{variant}"
     if run_name:
         train_params["run_name"] = run_name
-    # Remove params that aren't TrainingArguments kwargs
+    # Remove params that aren't SFTConfig kwargs
     packing = train_params.pop("packing", True)
     max_seq_length = train_params.pop("max_seq_length", 32768)
 
-    training_args = TrainingArguments(**train_params)
+    # Pop bf16/fp16 — transformers v5 validates these at init time against
+    # CUDA availability, which may not be ready at config-build time on Modal.
+    # Restored directly on the SFTConfig instance after init.
+    _bf16 = train_params.pop("bf16", False)
+    _fp16 = train_params.pop("fp16", False)
 
-    # Attach packing and max_seq_length for downstream use
-    training_args._packing = packing  # type: ignore[attr-defined]
-    training_args._max_seq_length = max_seq_length  # type: ignore[attr-defined]
+    training_args = SFTConfig(
+        **train_params,
+        bf16=False,
+        fp16=False,
+        packing=packing,
+        max_length=max_seq_length,
+    )
+
+    # Restore precision flags
+    training_args.bf16 = _bf16
+    training_args.fp16 = _fp16
 
     return lora_config, training_args
 

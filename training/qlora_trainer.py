@@ -161,14 +161,19 @@ class QLoRATrainer:
             bnb_4bit_use_double_quant=True,
         )
 
-        logger.info("Loading model %s with 4-bit NF4...", hf_id)
+        # Use SDPA attention — PyTorch 2.11 has flash-attn built into
+        # scaled_dot_product_attention; avoids transformers v5 init-time
+        # validation that fails when the model is still on CPU.
+        attn_impl = "sdpa" if self.use_flash_attn else "eager"
+
+        logger.info("Loading model %s with 4-bit NF4 (attn=%s)...", hf_id, attn_impl)
         self.model = AutoModelForCausalLM.from_pretrained(
             hf_id,
             quantization_config=bnb_config,
             device_map="auto",
             torch_dtype=torch_dtype,
             trust_remote_code=True,
-            attn_implementation="flash_attention_2" if self.use_flash_attn else "eager",
+            attn_implementation=attn_impl,
         )
 
         # Prepare for k-bit training
@@ -225,18 +230,14 @@ class QLoRATrainer:
                 "Model/tokenizer not initialized. Call _setup_model_and_tokenizer() first."
             )
 
-        # Extract packing and max_seq_length from TrainingArguments (attached in qlora_config)
-        packing = getattr(self.training_args, "_packing", True)
-        max_seq_length = getattr(self.training_args, "_max_seq_length", 32768)
-
+        # SFTConfig now carries packing/max_length as proper fields.
+        # SFTTrainer skips re-construction since args is already an SFTConfig.
         self.trainer = SFTTrainer(
             model=self.model,
             args=self.training_args,
             train_dataset=self.train_dataset,
             eval_dataset=self.eval_dataset,
-            tokenizer=self.tokenizer,
-            max_seq_length=max_seq_length,
-            packing=packing,
+            processing_class=self.tokenizer,
             callbacks=[
                 WandbCheckpointCallback(),
                 WandbLoggingCallback(),
