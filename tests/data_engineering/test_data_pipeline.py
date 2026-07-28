@@ -187,7 +187,8 @@ class TestRunPipelineSWEBench:
 
 class TestRunPipeline:
     @patch("data_engineering.run_pipeline.run_pipeline_swebench")
-    def test_run_pipeline_basic(self, mock_run_swebench, tmp_path) -> None:
+    @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
+    def test_run_pipeline_basic(self, mock_validate_auth, mock_run_swebench, tmp_path) -> None:
         """run_pipeline should coordinate stages and return PipelineResult."""
         mock_run_swebench.return_value = [_make_record("test#1")]
 
