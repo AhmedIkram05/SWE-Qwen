@@ -57,3 +57,83 @@ class TestValidateBatch:
         valid, errors = validate_batch(data)
         assert len(valid) == 0
         assert any("body" in e.field or "issue_body" in e.field for e in errors)
+
+    def test_malformed_hunks_skipped(self) -> None:
+        """Malformed hunk dicts should be silently skipped, valid ones kept."""
+        data = [
+            {
+                "issue_id": "test#1",
+                "repo": "r",
+                "issue_body": "body",
+                "patch_diff": "--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n-x\n+x\n+y\n",
+                "files_changed": ["f.py"],
+                "parsed_hunks": [
+                    {
+                        "file": "good.py",
+                        "old_start": 1,
+                        "old_lines": 5,
+                        "new_start": 1,
+                        "new_lines": 6,
+                        "diff_lines": ["+x"],
+                    },
+                    {"file": "bad.py"},  # missing required fields — should be skipped
+                ],
+            }
+        ]
+        valid, errors = validate_batch(data)
+        assert len(valid) == 1
+        assert len(valid[0].parsed_hunks) == 1  # only the valid hunk kept
+        assert valid[0].parsed_hunks[0].file == "good.py"
+
+    def test_invalid_test_results_handled(self) -> None:
+        """When test_results is not a dict, the code uses TestResults() default
+        and the record validates without a test_results error."""
+        data = [
+            {
+                "issue_id": "test#1",
+                "repo": "r",
+                "issue_body": "body",
+                "patch_diff": "--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n-x\n+x\n+y\n",
+                "files_changed": ["f.py"],
+                "test_results": "not-a-dict",  # string instead of dict
+            }
+        ]
+        valid, errors = validate_batch(data)
+        # Silently falls back to TestResults() default, no error for test_results
+        assert len(valid) == 1
+        assert not any("test_results" in e.field for e in errors)
+
+    def test_empty_files_changed_warns(self) -> None:
+        """Empty files_changed should produce a validation error
+        and mark the record as invalid."""
+        data = [
+            {
+                "issue_id": "test#1",
+                "repo": "r",
+                "issue_body": "body",
+                "patch_diff": "--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n-x\n+x\n+y\n",
+                "files_changed": [],
+            }
+        ]
+        valid, errors = validate_batch(data)
+        # files_changed empty should produce validation error
+        assert len(valid) == 0
+        assert any("files_changed" in e.field for e in errors)
+
+    def test_invalid_test_results_type_raises_error(self) -> None:
+        """TestResults with invalid field types should produce validation error
+        but record still validates with default TestResults()."""
+        data = [
+            {
+                "issue_id": "test#1",
+                "repo": "r",
+                "issue_body": "body",
+                "patch_diff": "--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n-x\n+x\n+y\n",
+                "files_changed": ["f.py"],
+                "test_results": {"passed": "not-a-list"},  # list expected
+            }
+        ]
+        valid, errors = validate_batch(data)
+        # Record invalid because test_results error is collected
+        assert len(valid) == 0
+        assert any("test_results" in e.field for e in errors)

@@ -149,3 +149,66 @@ class TestCleanRecords:
         cleaned, stats = clean_records([], config)
         assert cleaned == []
         assert stats.total_input == 0
+
+    def test_binary_diff_removed(self, config: DataPipelineConfig) -> None:
+        """Binary diffs should be detected and removed."""
+        binary_diff = (
+            "Binary files a/foo.py and b/foo.py differ\n"
+            "--- a/foo.py\n+++ b/foo.py\n"
+            "@@ -1 +1 @@\n-old\n+new\n"
+        )
+        records = [_make_record("repo#1", test_files=["test_foo.py"], patch_diff=binary_diff)]
+        cleaned, stats = clean_records(records, config)
+        assert len(cleaned) == 0
+        assert stats.removed_binary == 1
+
+    def test_removes_non_python_dominated(self, config: DataPipelineConfig) -> None:
+        """Records with <50% Python files should be removed."""
+        records = [
+            _make_record(
+                "repo#1",
+                test_files=["test_foo.py"],
+                files_changed=["foo.js", "bar.js", "baz.js", "foo.py"],
+            )
+        ]
+        cleaned, stats = clean_records(records, config)
+        assert len(cleaned) == 0
+        assert stats.removed_non_python == 1
+
+    def test_training_records_without_verified_kept(self, config: DataPipelineConfig) -> None:
+        """is_verified=False records survive no_test_files and no_f2p_signal."""
+        rec = IssueRecord.model_construct(
+            issue_id="train#1",
+            repo="owner/repo",
+            issue_body="Training example",
+            patch_diff="--- a/foo.py\n+++ b/foo.py\n@@ -1 +1,2 @@\n-x=1\n+x=1\n+y=2\n",
+            test_files_changed=[],  # no test files
+            files_changed=["foo.py"],
+            commit_messages=["chore: cleanup"],  # no F2P keywords
+            metadata={"is_verified": False},
+        )
+        cleaned, stats = clean_records([rec], config)
+        assert len(cleaned) == 1  # kept despite no test files + no F2P
+
+    def test_zero_output_logs_warning(self, config: DataPipelineConfig, caplog) -> None:
+        """When all records are removed, a warning should be logged."""
+        import logging
+
+        caplog.set_level(logging.WARNING)
+        rec = _make_record("repo#1", test_files=[])
+        cleaned, stats = clean_records([rec], config)
+        assert len(cleaned) == 0
+        assert "0 records" in caplog.text
+
+    def test_non_python_files_warns_but_keeps(self, config: DataPipelineConfig) -> None:
+        """Mixed Python/non-Python files should warn but keep record."""
+        records = [
+            _make_record(
+                "repo#1",
+                test_files=["test_foo.py"],
+                files_changed=["foo.py", "foo.js"],
+            )
+        ]
+        cleaned, stats = clean_records(records, config)
+        assert len(cleaned) == 1  # kept
+        assert len(stats.warnings_non_python) >= 1
