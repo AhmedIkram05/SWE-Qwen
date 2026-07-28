@@ -1,0 +1,334 @@
+"""QLoRA fine-tuning trainer class.
+
+``QLoRATrainer`` encapsulates model loading (4-bit NF4), PEFT wrapping,
+data loading, callback setup, training loop, checkpoint saving, and
+experiment resumption.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+import torch
+import wandb
+from datasets import DatasetDict, load_from_disk
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    PreTrainedTokenizer,
+    TrainingArguments,
+)
+from trl import SFTTrainer
+
+from training.callbacks import WandbCheckpointCallback, WandbLoggingCallback
+from training.prompt_loader import PromptLoader
+from training.qlora_config import _get_model_config, build_qlora_config
+
+logger = logging.getLogger(__name__)
+
+
+class QLoRATrainer:
+    """End-to-end QLoRA trainer for SWE-Qwen.
+
+    Args:
+        model_name: Key from ``models.yaml`` (e.g. ``"qwen3-30b-a3b"``).
+        variant: Key from ``qlora_variants.yaml`` (e.g. ``"baseline"``).
+        data_dir: Path to tokenized ``.arrow`` shards (from ``tokenize.py``).
+        output_dir: Local directory for checkpoints (Modal volume mount point).
+        wandb_project: W&B project name.
+        wandb_entity: W&B entity (optional).
+        run_name: Optional W&B run name (auto-generated if ``None``).
+        resume_from_checkpoint: Path or W&B artifact ref for resume.
+        use_flash_attn: Enable Flash Attention 2.
+        prompt_template_dir: Override prompt template directory.
+    """
+
+    def __init__(  # noqa: PLR0913, PLR0917
+        self,
+        model_name: str = "qwen3-30b-a3b",
+        variant: str = "baseline",
+        data_dir: str = "data/tokenized",
+        output_dir: str = "/tmp/qlora-output",
+        wandb_project: str = "swe-qwen",
+        wandb_entity: str | None = None,
+        run_name: str | None = None,
+        resume_from_checkpoint: str | None = None,
+        use_flash_attn: bool = True,
+        prompt_template_dir: str | None = None,
+    ):
+        self.model_name = model_name
+        self.variant = variant
+        self.data_dir = Path(data_dir)
+        self.output_dir = Path(output_dir)
+        self.wandb_project = wandb_project
+        self.wandb_entity = wandb_entity
+        self.run_name = run_name
+        self.resume_from_checkpoint = resume_from_checkpoint
+        self.use_flash_attn = use_flash_attn
+        self.prompt_template_dir = prompt_template_dir
+
+        # Set early — resolved below
+        self.model_cfg: dict[str, Any] = {}
+        self.lora_config: LoraConfig | None = None
+        self.training_args: TrainingArguments | None = None
+        self.model: Any = None
+        self.tokenizer: PreTrainedTokenizer | None = None
+        self.train_dataset: Any = None
+        self.eval_dataset: Any = None
+        self.trainer: SFTTrainer | None = None
+        self.prompt_loader: PromptLoader | None = None
+
+    # ── Setup methods ─────────────────────────────────────────────────────────
+
+    def setup(self) -> None:
+        """Run the full setup: config → model → data → callbacks."""
+        self._setup_config()
+        self._setup_wandb()
+        self._setup_model_and_tokenizer()
+        self._setup_data()
+        self._setup_callbacks()
+
+    def _setup_config(self) -> None:
+        """Load model config and build QLoRA config."""
+        self.model_cfg = _get_model_config(self.model_name)
+        self.lora_config, self.training_args = build_qlora_config(
+            variant=self.variant,
+            model_name=self.model_name,
+            output_dir=str(self.output_dir),
+            run_name=self.run_name,
+        )
+        logger.info(
+            "Config loaded: model=%s, variant=%s, lora_r=%d",
+            self.model_name,
+            self.variant,
+            self.lora_config.r,
+        )
+
+    def _setup_wandb(self) -> None:
+        """Initialize W&B run."""
+        api_key = os.environ.get("WANDB_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "WANDB_API_KEY environment variable not set. "
+                "Ensure 'wandb-secret' Modal secret is mounted with WANDB_API_KEY."
+            )
+        wandb.login(key=api_key)
+        config = {
+            "model_name": self.model_name,
+            "model_hf_id": self.model_cfg.get("hf_id"),
+            "variant": self.variant,
+            "lora_r": self.lora_config.r if self.lora_config else None,
+            "lora_alpha": self.lora_config.lora_alpha if self.lora_config else None,
+            "learning_rate": self.training_args.learning_rate if self.training_args else None,
+            "num_epochs": self.training_args.num_train_epochs if self.training_args else None,
+            "gradient_accumulation_steps": (
+                self.training_args.gradient_accumulation_steps if self.training_args else None
+            ),
+        }
+        wandb.init(
+            project=self.wandb_project,
+            entity=self.wandb_entity,
+            name=self.run_name,
+            config=config,
+        )
+
+        # Log prompt templates as artifact
+        self.prompt_loader = PromptLoader(
+            template_dir=self.prompt_template_dir,
+        )
+        if wandb.run is not None:
+            self.prompt_loader.log_to_wandb_artifact(version="1.0")
+
+        logger.info("W&B run initialized: %s", wandb.run.name if wandb.run else "N/A")
+
+    def _setup_model_and_tokenizer(self) -> None:
+        """Load 4-bit model, apply PEFT LoRA."""
+        model_cfg = self.model_cfg
+        hf_id: str = model_cfg["hf_id"]
+        compute_dtype = model_cfg.get("compute_dtype", "bfloat16")
+        torch_dtype = torch.bfloat16 if compute_dtype == "bfloat16" else torch.float16
+
+        # Quantization config (4-bit NF4)
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch_dtype,
+            bnb_4bit_use_double_quant=True,
+        )
+
+        logger.info("Loading model %s with 4-bit NF4...", hf_id)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            hf_id,
+            quantization_config=bnb_config,
+            device_map="auto",
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+            attn_implementation="flash_attention_2" if self.use_flash_attn else "eager",
+        )
+
+        # Prepare for k-bit training
+        self.model = prepare_model_for_kbit_training(self.model)
+
+        # Apply PEFT LoRA
+        if self.lora_config is not None:
+            self.model = get_peft_model(self.model, self.lora_config)
+        self.model.print_trainable_parameters()
+
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True)
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "right"
+
+        logger.info("Model and tokenizer loaded successfully")
+
+    def _setup_data(self) -> None:
+        """Load tokenized ``DatasetDict`` from disk."""
+        if not self.data_dir.exists():
+            raise FileNotFoundError(
+                f"Tokenized data directory not found: {self.data_dir}. Run tokenize.py first."
+            )
+
+        dataset = load_from_disk(str(self.data_dir))
+        dataset_dict: DatasetDict = dataset  # type: ignore[assignment]
+
+        self.train_dataset = dataset_dict.get("train")
+        self.eval_dataset = dataset_dict.get("val") or dataset_dict.get("test")
+
+        if self.train_dataset is None:
+            raise ValueError(f"No 'train' split found in {self.data_dir}")
+
+        # Adjust eval_strategy if no eval dataset available
+        if self.eval_dataset is None and self.training_args is not None:
+            logger.warning(
+                "No 'val' or 'test' split found in %s; disabling evaluation",
+                self.data_dir,
+            )
+            self.training_args.eval_strategy = "no"
+
+        logger.info(
+            "Data loaded: train=%d, eval=%d",
+            len(self.train_dataset),
+            len(self.eval_dataset) if self.eval_dataset else 0,
+        )
+
+    def _setup_callbacks(self) -> None:
+        """Attach W&B callbacks to the SFTTrainer."""
+        if self.training_args is None:
+            raise RuntimeError("TrainingArguments not initialized. Call _setup_config() first.")
+        if self.model is None or self.tokenizer is None:
+            raise RuntimeError(
+                "Model/tokenizer not initialized. Call _setup_model_and_tokenizer() first."
+            )
+
+        # Extract packing and max_seq_length from TrainingArguments (attached in qlora_config)
+        packing = getattr(self.training_args, "_packing", True)
+        max_seq_length = getattr(self.training_args, "_max_seq_length", 32768)
+
+        self.trainer = SFTTrainer(
+            model=self.model,
+            args=self.training_args,
+            train_dataset=self.train_dataset,
+            eval_dataset=self.eval_dataset,
+            tokenizer=self.tokenizer,
+            max_seq_length=max_seq_length,
+            packing=packing,
+            callbacks=[
+                WandbCheckpointCallback(),
+                WandbLoggingCallback(),
+            ],
+        )
+
+        logger.info("SFTTrainer initialized with callbacks")
+
+    # ── Training ──────────────────────────────────────────────────────────────
+
+    def train(self) -> dict[str, Any]:
+        """Run training (with optional resume from checkpoint)."""
+        if self.trainer is None:
+            self.setup()
+
+        resume_path = self.resume_from_checkpoint
+        if resume_path:
+            from training.resume import resolve_checkpoint_path
+
+            # Pass wandb run_id if available for "latest" resolution
+            run_id = wandb.run.id if wandb.run else None
+            resume_path = resolve_checkpoint_path(
+                resume_path,
+                local_volume_path=self.output_dir,
+                run_id=run_id,
+            )
+            if resume_path:
+                logger.info("Resuming from checkpoint: %s", resume_path)
+            else:
+                logger.warning("Resume path not found, starting from scratch")
+
+        logger.info("Starting training (variant=%s, model=%s)...", self.variant, self.model_name)
+        train_result = self.trainer.train(resume_from_checkpoint=resume_path)
+
+        # Save final model
+        self.save_model()
+
+        # Log final metrics
+        metrics = {
+            "train_loss": train_result.training_loss
+            if hasattr(train_result, "training_loss")
+            else 0.0,
+            "train_runtime": train_result.metrics.get("train_runtime", 0)
+            if hasattr(train_result, "metrics")
+            else 0,
+            "train_samples_per_second": (
+                train_result.metrics.get("train_samples_per_second", 0)
+                if hasattr(train_result, "metrics")
+                else 0
+            ),
+        }
+        wandb.log(metrics)
+        logger.info("Training complete. Metrics: %s", metrics)
+
+        return metrics
+
+    def save_model(self) -> None:
+        """Save the LoRA adapter and tokenizer."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.trainer is None:
+            logger.warning("No trainer to save")
+            return
+
+        # Save adapter
+        self.trainer.save_model(str(self.output_dir))
+        logger.info("Model saved to %s", self.output_dir)
+
+        # Log as W&B artifact
+        if wandb.run is not None:
+            artifact = wandb.Artifact(
+                name=f"model-{self.model_name}-{self.variant}",
+                type="model_checkpoint",
+                metadata={
+                    "model_name": self.model_name,
+                    "variant": self.variant,
+                    "lora_r": self.lora_config.r if self.lora_config else None,
+                    "lora_alpha": self.lora_config.lora_alpha if self.lora_config else None,
+                },
+            )
+            artifact.add_dir(str(self.output_dir))
+            wandb.log_artifact(artifact)
+            logger.info("Model artifact logged to W&B")
+
+    def resume(self, checkpoint_path: str) -> dict[str, Any]:
+        """Resume training from a checkpoint.
+
+        Args:
+            checkpoint_path: Local path or W&B artifact ref.
+
+        Returns:
+            Training metrics.
+        """
+        self.resume_from_checkpoint = checkpoint_path
+        return self.train()
