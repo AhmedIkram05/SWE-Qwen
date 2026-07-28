@@ -29,6 +29,8 @@ def config() -> DataPipelineConfig:
     return DataPipelineConfig(
         max_patch_lines=500,
         test_directories=["tests/", "test/"],
+        augment_codecontests=False,
+        augment_codealpaca=False,
     )
 
 

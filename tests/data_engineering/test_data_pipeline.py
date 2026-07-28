@@ -195,6 +195,8 @@ class TestRunPipeline:
         config = DataPipelineConfig(
             output_dir=tmp_path,
             bigquery_enabled=False,
+            augment_codecontests=False,
+            augment_codealpaca=False,
         )
         with patch.dict("sys.modules", {"wandb": _mock_wandb()}):
             result = run_pipeline(config)
@@ -212,7 +214,73 @@ class TestRunPipeline:
         config = DataPipelineConfig(
             output_dir=tmp_path,
             bigquery_enabled=False,
+            augment_codecontests=False,
+            augment_codealpaca=False,
         )
         with patch.dict("sys.modules", {"wandb": _mock_wandb()}):
             with pytest.raises(RuntimeError, match="0 cleaned records"):
                 run_pipeline(config)
+
+    @patch("data_engineering.run_pipeline.run_pipeline_swebench")
+    @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
+    def test_run_pipeline_with_augmentation(
+        self, mock_validate_auth, mock_run_swebench, tmp_path
+    ) -> None:
+        """When augmentation is enabled, synthetic records are added to train split."""
+        mock_run_swebench.return_value = [_make_record("swe#1")]
+
+        config = DataPipelineConfig(
+            output_dir=tmp_path,
+            bigquery_enabled=False,
+            augment_codecontests=True,
+            augment_codealpaca=True,
+            max_train_examples=30000,
+        )
+
+        synthetic_records = [
+            _make_record("synth_cc_001", repo="synthetic/codecontests"),
+            _make_record("synth_ca_001", repo="synthetic/codealpaca"),
+        ]
+
+        with (
+            patch.dict("sys.modules", {"wandb": _mock_wandb()}),
+            patch(
+                "data_engineering.run_pipeline.synthetic_augment.augment_training_data",
+                return_value=synthetic_records,
+            ) as mock_augment,
+        ):
+            result = run_pipeline(config)
+
+        mock_augment.assert_called_once()
+        args, kwargs = mock_augment.call_args
+        assert len(args) >= 2  # records, config
+        # Verify augmentation was called with the cleaned records and config
+        assert args[1] is config
+        assert result.stats.train_count == 2  # synthetic records
+        assert result.stats.total_examples == 2  # only train has records (no val/test)
+
+    @patch("data_engineering.run_pipeline.run_pipeline_swebench")
+    @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
+    def test_run_pipeline_augmentation_disabled(
+        self, mock_validate_auth, mock_run_swebench, tmp_path
+    ) -> None:
+        """When augmentation is disabled, augment_training_data is NOT called."""
+        mock_run_swebench.return_value = [_make_record("swe#1")]
+
+        config = DataPipelineConfig(
+            output_dir=tmp_path,
+            bigquery_enabled=False,
+            augment_codecontests=False,
+            augment_codealpaca=False,
+        )
+
+        with (
+            patch.dict("sys.modules", {"wandb": _mock_wandb()}),
+            patch(
+                "data_engineering.run_pipeline.synthetic_augment.augment_training_data",
+            ) as mock_augment,
+        ):
+            result = run_pipeline(config)
+
+        mock_augment.assert_not_called()
+        assert result.stats.train_count == 1  # Only the SWE-bench record

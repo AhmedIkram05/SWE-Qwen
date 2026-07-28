@@ -32,6 +32,8 @@ def config() -> DataPipelineConfig:
         max_patch_lines=500,
         min_golden_examples=1,
         bigquery_enabled=False,
+        augment_codecontests=False,
+        augment_codealpaca=False,
     )
 
 
