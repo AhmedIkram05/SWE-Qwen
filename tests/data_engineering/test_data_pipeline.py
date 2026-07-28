@@ -203,7 +203,10 @@ class TestRunPipeline:
         assert isinstance(result.stats.total_raw, int)
 
     @patch("data_engineering.run_pipeline.run_pipeline_swebench")
-    def test_run_pipeline_empty_cleaned_raises(self, mock_run_swebench, tmp_path) -> None:
+    @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
+    def test_run_pipeline_empty_cleaned_raises(
+        self, mock_validate_auth, mock_run_swebench, tmp_path
+    ) -> None:
         """Pipeline with 0 cleaned records should raise RuntimeError."""
         mock_run_swebench.return_value = []
         config = DataPipelineConfig(
