@@ -30,9 +30,6 @@ dependencies = [
     "pandas>=2.2.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
-    # GitHub API
-    "pygithub>=2.5.0",
-    "githubkit>=0.16.0",
     # Cloud/Infrastructure
     "google-cloud-storage>=2.19.0",
     "google-auth>=2.29.0",
@@ -42,7 +39,7 @@ dependencies = [
     # Langfuse for LLM observability
     "langfuse>=2.60.0",
     # Inference serving
-    "vllm>=0.26.0",
+    "vllm>=0.26.0; sys_platform == 'linux'",
     "openai>=1.70.0",
     # Utilities
     "jinja2>=3.1.0",
@@ -151,7 +148,6 @@ ignore = [
 "data_engineering/cli.py" = ["B008", "PLR0913", "PLR0917", "W292"]
 "data_engineering/card.py" = ["E501"]
 "data_engineering/split.py" = ["E402", "F401"]
-"data_engineering/ingest.py" = ["E402", "B007", "PLR2004", "TRY300", "TRY400", "TRY401", "TRY003", "PLR0912", "PLR0913", "PLR0917", "SIM105", "PLR0915", "E501", "F841"]
 "data_engineering/run_pipeline.py" = ["SIM103", "PLW2901", "TRY401", "PLR0912", "PLR0915", "TRY003", "F841", "SIM105"]
 
 [tool.ruff.format]
@@ -196,6 +192,7 @@ markers = [
     "requires_modal: Tests requiring Modal credentials",
     "requires_gcp: Tests requiring GCP credentials",
     "requires_wandb: Tests requiring W&B credentials",
+    "requires_credentials: Tests requiring any external credentials (GCP/W&B/env)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",
