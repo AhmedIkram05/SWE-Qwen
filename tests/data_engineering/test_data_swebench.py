@@ -271,12 +271,16 @@ class TestBigQueryCache:
 class TestFetchRepoStats:
     """Tests for BigQuery repo stats fetching."""
 
-    @patch("google.cloud.bigquery.Client")
-    def test_fetch_repo_stats(self, mock_bq_client_cls) -> None:
+    def test_fetch_repo_stats(self) -> None:
+        from unittest.mock import MagicMock, patch
+
         from data_engineering.config import DataPipelineConfig
         from data_engineering.swebench_ingest import _fetch_repo_stats
 
-        mock_client = mock_bq_client_cls.return_value
+        # Mock google.cloud.bigquery before function imports it
+        mock_bigquery = MagicMock()
+        mock_client = MagicMock()
+        mock_bigquery.Client.return_value = mock_client
         mock_rows = MagicMock()
         mock_rows.__iter__.return_value = iter(
             [
@@ -285,10 +289,11 @@ class TestFetchRepoStats:
         )
         mock_client.query.return_value.result.return_value = mock_rows
 
-        config = DataPipelineConfig(bigquery_project="test-project")
-        result = _fetch_repo_stats(config, {"django/django"})
-        assert "django/django" in result
-        assert result["django/django"]["stars"] == 5000
+        with patch.dict("sys.modules", {"google.cloud.bigquery": mock_bigquery}):
+            config = DataPipelineConfig(bigquery_project="test-project")
+            result = _fetch_repo_stats(config, {"django/django"})
+            assert "django/django" in result
+            assert result["django/django"]["stars"] == 5000
 
 
 class TestAugmentWithBigQuery:
