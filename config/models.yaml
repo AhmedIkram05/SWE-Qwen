@@ -1,0 +1,42 @@
+# ── Model Registry ────────────────────────────────────────────────────────────
+# Each entry maps a short name → Hugging Face model ID + hardware requirements.
+# Used by training/qlora_config.py to resolve GPU type and model config.
+
+models:
+  qwen3-30b-a3b:
+    hf_id: "Qwen/Qwen3-30B-A3B"
+    active_params: 3_000_000_000
+    total_params: 30_000_000_000
+    quantization: "nf4"
+    compute_dtype: "bfloat16"
+    gpu_mapping:
+      primary: "h100-80gb"      # Modal GPU type
+      fallback: "a100-80gb"
+    context_window: 32768
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+
+  qwen3-14b:
+    hf_id: "Qwen/Qwen3-14B"
+    active_params: 14_000_000_000
+    total_params: 14_000_000_000
+    quantization: "nf4"
+    compute_dtype: "bfloat16"
+    gpu_mapping:
+      primary: "a10g-24gb"
+      fallback: "a100-40gb"
+    context_window: 32768
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
