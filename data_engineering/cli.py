@@ -134,6 +134,22 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         "--bigquery/--no-bigquery",
         help="Enable BigQuery augmentation (v2 feature)",
     ),
+    augment_codecontests: bool = typer.Option(
+        True,
+        "--augment-codecontests/--no-augment-codecontests",
+        help="Augment training with CodeContests (13k Python solutions)",
+    ),
+    augment_codealpaca: bool = typer.Option(
+        True,
+        "--augment-codealpaca/--no-augment-codealpaca",
+        help="Augment training with CodeAlpaca-20k (filtered to ~8k Python)",
+    ),
+    max_train_examples: int = typer.Option(
+        30000,
+        "--max-train-examples",
+        help="Cap total training size after augmentation",
+        min=1000,
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -160,6 +176,9 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         val_ratio=val_ratio,
         test_ratio=test_ratio,
         bigquery_enabled=bigquery,
+        augment_codecontests=augment_codecontests,
+        augment_codealpaca=augment_codealpaca,
+        max_train_examples=max_train_examples,
     )
 
     try:

@@ -40,6 +40,11 @@ class DataPipelineConfig(BaseSettings):
     bigquery_enabled: bool = False
     bigquery_project: str = ""  # GCP project for BigQuery
 
+    # Synthetic augmentation
+    augment_codecontests: bool = True  # +13k Python solutions from CodeContests
+    augment_codealpaca: bool = True  # +20k instruction-following (filtered to ~8k Python)
+    max_train_examples: int = 30000  # Cap total training size after augmentation
+
     # Stage control
     resume_from: str | None = None  # stage name to resume from (None = full run)
     enabled_stages: list[str] | None = None  # None = all stages; else whitelist

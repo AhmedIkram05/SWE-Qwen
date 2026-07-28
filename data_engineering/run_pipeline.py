@@ -26,7 +26,17 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from data_engineering import archive, card, clean, golden, split, swebench_ingest, validate, version
+from data_engineering import (
+    archive,
+    card,
+    clean,
+    golden,
+    split,
+    swebench_ingest,
+    synthetic_augment,
+    validate,
+    version,
+)
 from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import (
     IssueRecord,
@@ -361,6 +371,17 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         splits = split.stratified_split(all_cleaned, config, seed=seed)
     else:
         splits = split.Splits()
+
+    # Synthetic augmentation (Phase 3 extension)
+    if config.augment_codecontests or config.augment_codealpaca:
+        logger.info("Augmenting training set with synthetic data...")
+        orig_count = len(splits.train)
+        splits.train = synthetic_augment.augment_training_data(splits.train, config)
+        logger.info(
+            "Training set augmented: %d records (was %d)",
+            len(splits.train),
+            orig_count,
+        )
 
     # Golden
     if _stage_enabled(config, "golden"):
