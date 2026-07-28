@@ -30,7 +30,7 @@ variable "repository_owner" {
 variable "dataset_bucket_name" {
   description = "Name of the GCS bucket for dataset storage"
   type        = string
-  default     = ""
+  default     = "swe-qwen-datasets"
 }
 
 variable "model_bucket_name" {
@@ -70,7 +70,7 @@ variable "wandb_api_key_secret_name" {
 }
 
 variable "github_token_secret_name" {
-  description = "Secret Manager secret name for GitHub token"
+  description = "Secret Manager secret name for GitHub token (legacy — data pipeline now uses SWE-bench + BigQuery)"
   type        = string
   default     = "github-token"
 }

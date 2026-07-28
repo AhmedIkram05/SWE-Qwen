@@ -45,7 +45,7 @@ variable "wandb_api_key_secret" {
 }
 
 variable "github_token_secret" {
-  description = "Secret Manager secret name for GitHub token"
+  description = "Secret Manager secret name for GitHub token (legacy — data pipeline now uses SWE-bench + BigQuery, not GitHub API)"
   type        = string
   default     = "github-token"
 }
