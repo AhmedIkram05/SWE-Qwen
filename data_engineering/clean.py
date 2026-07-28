@@ -34,9 +34,16 @@ PYTHON_RATIO_THRESHOLD = 0.5
 
 
 def _has_f2p_keywords(record: IssueRecord) -> bool:
-    """Check if commit messages or PR description contain F2P keywords."""
+    """Check if commit messages or PR description contain F2P keywords.
+
+    For SWE-bench records, also check metadata.has_test_patch (indicates
+    FAIL_TO_PASS tests exist, which is the ground-truth F2P signal).
+    """
     text = " ".join(record.commit_messages) + " " + record.pr_description
-    return bool(F2P_KEYWORD_PATTERN.search(text))
+    if F2P_KEYWORD_PATTERN.search(text):
+        return True
+    # SWE-bench: metadata.has_test_patch indicates FAIL_TO_PASS tests present
+    return bool(record.metadata.get("has_test_patch"))
 
 
 def _is_binary_diff(diff: str) -> bool:
@@ -159,6 +166,11 @@ def clean_records(
 
     Each filter can independently remove a record. **WARN** filters log
     warnings but keep the record.
+
+    For records with ``metadata.is_verified=False`` (e.g. SWE-bench Train
+    split — no FAIL_TO_PASS), the ``no_test_files`` and ``no_f2p_signal``
+    filters are demoted to warnings instead of removal reasons. This preserves
+    training data while keeping verified eval data high-quality.
     """
     stats = CleanStats(total_input=len(records))
     cleaned: list[IssueRecord] = []
@@ -166,9 +178,9 @@ def clean_records(
     for rec in records:
         reasons: list[str] = []
         warnings: list[str] = []
+        is_verified = rec.metadata.get("is_verified", True)
 
         checks: list = [
-            _check_no_test_files(rec),
             _check_patch_size(rec, config.max_patch_lines),
             _check_binary(rec),
         ]
@@ -177,9 +189,20 @@ def clean_records(
             [
                 non_python_reason,
                 _check_empty_body(rec),
-                _check_f2p(rec),
             ]
         )
+
+        # Hard gates for verified records; soft warnings for training-only records
+        if is_verified:
+            checks.append(_check_no_test_files(rec))
+            checks.append(_check_f2p(rec))
+        else:
+            nt = _check_no_test_files(rec)
+            if nt:
+                warnings.append(nt)
+            f2p = _check_f2p(rec)
+            if f2p:
+                warnings.append(f2p)
 
         for reason in checks:
             if reason:

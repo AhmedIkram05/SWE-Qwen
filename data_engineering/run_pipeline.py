@@ -1,9 +1,9 @@
 """Pipeline orchestrator.
 
-Coordinates the full data pipeline: ingest → validate → clean → split →
-golden → version → archive → card generation.
+Coordinates the full data pipeline: ingest -> validate -> clean -> split ->
+golden -> version -> archive -> card generation.
 
-Supports checkpoint resume (``--resume-from``) and per-repo parallelism.
+Source: SWE-bench dataset from Hugging Face
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +26,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from data_engineering import archive, card, clean, golden, ingest, split, validate, version
+from data_engineering import archive, card, clean, golden, split, swebench_ingest, validate, version
 from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import (
     IssueRecord,
@@ -40,8 +39,13 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-# ── Checkpoint helpers ────────────────────────────────────────────────────
+def _manifest_hash(manifest: dict[str, Any]) -> str:
+    """Compute SHA256 of the serialised manifest."""
+    raw = json.dumps(manifest, sort_keys=True, default=str).encode()
+    return hashlib.sha256(raw).hexdigest()[:16]
 
+
+# Checkpoint helpers
 
 _STAGE_MAP = {
     "raw": "ingest",
@@ -56,24 +60,24 @@ _STAGE_MAP = {
     "card": "card",
 }
 
-# Reverse map: human-readable → file-stage name
+# Reverse map: human-readable -> file-stage name
 _HUMAN_TO_FILE = {v: k for k, v in _STAGE_MAP.items()}
 
 
 def _stage_enabled(config: DataPipelineConfig, stage: str) -> bool:
-    """Check if *stage* is in the enabled-stages whitelist.
+    """Check if stage is in the enabled-stages whitelist.
 
-    Accepts both file-stage names (``raw``, ``validated``) and human names
-    (``ingest``, ``validate``). ``enabled_stages=None`` means all stages are
-    enabled.
+    Args:
+        stage: File-stage name (e.g., "raw", "validated", "cleaned")
     """
     if config.enabled_stages is None:
         return True
-    if stage in config.enabled_stages:
+    # Map file stage to human stage
+    human_stage = _STAGE_MAP.get(stage)
+    if human_stage and human_stage in config.enabled_stages:
         return True
-    # Translate human name to file-stage name (e.g. "ingest" → "raw")
-    file_stage = _HUMAN_TO_FILE.get(stage)
-    if file_stage and file_stage in config.enabled_stages:
+    # Also check direct match (in case human stage was passed)
+    if stage in config.enabled_stages:
         return True
     return False
 
@@ -121,110 +125,195 @@ def _load_stage(
     return records
 
 
-def _manifest_hash(manifest: dict[str, Any]) -> str:
-    """Compute SHA256 of the serialised manifest."""
-    raw = json.dumps(manifest, sort_keys=True, default=str).encode()
-    return hashlib.sha256(raw).hexdigest()[:16]
+# SWE-bench pipeline
 
 
-# ── Per-repo pipeline ─────────────────────────────────────────────────────
-
-
-def run_pipeline_for_repo(
-    repo_cfg: dict[str, Any],
+def run_pipeline_swebench(
     config: DataPipelineConfig,
     run_id: str,
     resume_from: str | None,
-    gh: Any = None,
-) -> RepoResult:
-    """Run the complete pipeline for a single repo.
+) -> list[IssueRecord]:
+    """Run the complete pipeline for SWE-bench source with progress tracking."""
 
-    Stages: ingest → validate → clean
-    (split/golden are global operations across all repos).
-    """
-    repo_id: str = repo_cfg["id"]
-    result = RepoResult(repo_id=repo_id)
+    # Initialize W&B run for progress tracking
+    import wandb
+
+    wandb_entity = config.wandb_entity
+    wandb_project = config.wandb_project
+    from datetime import datetime
+
+    if config.run_name:
+        run_display_name = config.run_name
+    else:
+        now = datetime.now()
+        run_display_name = f"run-{now.strftime('%Y%m%d-%H%M')}-{run_id[:6]}"
+
+    wandb_run = wandb.init(
+        project=wandb_project,
+        entity=wandb_entity,
+        job_type="data_pipeline",
+        name=run_display_name,
+        config={"run_id": run_id, "source": "swebench", "run_name": run_display_name},
+        reinit=True,
+    )
 
     try:
-        # ── Stage 1: Ingest ─────────────────────────────────────────────
-        ingest_enabled = _stage_enabled(config, "raw")
-        if resume_from and resume_from in ("validated", "cleaned"):
-            logger.info("Resuming %s from '%s' — skipping ingest", repo_id, resume_from)
-            raw_records = _load_stage(config, run_id, repo_id, "raw")
-        elif not ingest_enabled:
-            raw_records = []
-        else:
-            _gh = gh or ingest.get_github_client()  # shared client when available
-            raw_records = ingest.ingest_repo(repo_cfg, _gh, config)
-            _save_stage(raw_records, config, run_id, repo_id, "raw")
+        # Initialize stats for W&B logging
+        dedup_stats = clean.DedupStats()
+        clean_stats = clean.CleanStats()
+        validation_errors = []
 
-        result.raw_count = len(raw_records)
-        if not raw_records:
-            logger.warning("Repo %s: 0 raw records (zero-yield), skipping further stages", repo_id)
-            return result
+        # Progress bar for SWE-bench stages
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("SWE-bench pipeline", total=4)
 
-        # ── Stage 2: Validate ───────────────────────────────────────────
-        validate_enabled = _stage_enabled(config, "validated")
-        if resume_from and resume_from == "cleaned":
-            validated_records = _load_stage(config, run_id, repo_id, "validated")
-            validated = [IssueRecord(**r) for r in validated_records]
-        elif not validate_enabled:
-            validated = []
-        else:
-            validated, validation_errors = validate.validate_batch(raw_records)
-            _save_stage(
-                [r.model_dump() for r in validated],
-                config,
-                run_id,
-                repo_id,
-                "validated",
-            )
-            if validation_errors:
+            # Stage 1: Ingest
+            ingest_enabled = _stage_enabled(config, "ingest")
+            raw_records: list[IssueRecord] = []
+
+            if resume_from and resume_from in ("validated", "cleaned"):
+                logger.info("Resuming from '%s' -- skipping SWE-bench ingest", resume_from)
+                raw_dicts = _load_stage(config, run_id, "swebench", "raw")
+                raw_records = [IssueRecord(**r) for r in raw_dicts]
+            elif not ingest_enabled:
+                raw_records = []
+            else:
+                progress.update(task, description="Ingesting SWE-bench dataset...")
+                logger.info("Ingesting SWE-bench dataset...")
+                raw_records = swebench_ingest.ingest_swebench(config)
                 _save_stage(
-                    [e.model_dump() for e in validation_errors],
+                    [r.model_dump() for r in raw_records],
                     config,
                     run_id,
-                    repo_id,
-                    "validation_errors",
+                    "swebench",
+                    "raw",
                 )
 
-        result.validated_count = len(validated)
-        if not validated:
-            logger.warning("Repo %s: 0 valid records after validation (zero-yield)", repo_id)
-            return result
+            # Convert to dicts for validation (validate_batch expects dicts)
+            raw_dicts = [r.model_dump() for r in raw_records]
 
-        # ── Stage 3: Clean ──────────────────────────────────────────────
-        if _stage_enabled(config, "cleaned"):
-            deduped, dedup_stats = clean.deduplicate(validated)
-            cleaned_records, clean_stats = clean.clean_records(deduped, config)
-            _save_stage(
-                [r.model_dump() for r in cleaned_records],
-                config,
-                run_id,
-                repo_id,
-                "cleaned",
+            logger.info("SWE-bench raw records: %d", len(raw_records))
+            progress.update(task, advance=1, description=f"Raw: {len(raw_records)} records")
+            # Log to W&B
+            wandb_run.log({"stage_raw_count": len(raw_records)})
+
+            if not raw_records:
+                raise RuntimeError("SWE-bench ingest produced 0 records")
+
+            # BigQuery Augmentation (optional)
+            if config.bigquery_enabled:
+                progress.update(task, description="Augmenting with BigQuery...")
+                raw_records = swebench_ingest.augment_with_bigquery(raw_records, config)
+                _save_stage(
+                    [r.model_dump() for r in raw_records],
+                    config,
+                    run_id,
+                    "swebench",
+                    "bigquery_augmented",
+                )
+                wandb_run.log({"stage_bigquery_augmented": len(raw_records)})
+
+            # Stage 2: Validate
+            validate_enabled = _stage_enabled(config, "validated")
+            if resume_from and resume_from == "cleaned":
+                validated_records = _load_stage(config, run_id, "swebench", "validated")
+                validated = [IssueRecord(**r) for r in validated_records]
+            elif not validate_enabled:
+                validated = []
+            else:
+                progress.update(task, description="Validating records...")
+                # Use augmented records if BigQuery enabled, otherwise use raw
+                validation_dicts = (
+                    [r.model_dump() for r in raw_records] if config.bigquery_enabled else raw_dicts
+                )
+                validated, validation_errors = validate.validate_batch(validation_dicts)
+                _save_stage(
+                    [r.model_dump() for r in validated],
+                    config,
+                    run_id,
+                    "swebench",
+                    "validated",
+                )
+                if validation_errors:
+                    _save_stage(
+                        [e.model_dump() for e in validation_errors],
+                        config,
+                        run_id,
+                        "swebench",
+                        "validation_errors",
+                    )
+
+            logger.info("SWE-bench validated records: %d", len(validated))
+            progress.update(task, advance=1, description=f"Validated: {len(validated)} records")
+            wandb_run.log(
+                {
+                    "stage_validated_count": len(validated),
+                    "stage_validation_errors": len(validation_errors),
+                }
             )
-        else:
-            cleaned_records = []
 
-        result.cleaned_count = len(cleaned_records)
+            if not validated and validate_enabled:
+                raise RuntimeError("SWE-bench validation produced 0 valid records")
 
-    except Exception as exc:
-        logger.exception("Pipeline failed for repo %s: %s", repo_id, exc)
-        result.error = str(exc)
+            # Stage 3: Clean
+            clean_enabled = _stage_enabled(config, "cleaned")
+            if not validate_enabled and not clean_enabled:
+                # Validation disabled and clean disabled: stop pipeline after ingest
+                logger.info("Pipeline stopped after ingest (no further stages enabled)")
+                return raw_records
 
-    return result
+            if clean_enabled:
+                progress.update(task, description="Cleaning records...")
+                deduped, dedup_stats = clean.deduplicate(validated)
+                cleaned_records, clean_stats = clean.clean_records(deduped, config)
+                _save_stage(
+                    [r.model_dump() for r in cleaned_records],
+                    config,
+                    run_id,
+                    "swebench",
+                    "cleaned",
+                )
+            else:
+                cleaned_records = []
+
+            logger.info("SWE-bench cleaned records: %d", len(cleaned_records))
+            progress.update(task, advance=1, description=f"Cleaned: {len(cleaned_records)} records")
+            wandb_run.log(
+                {
+                    "stage_cleaned_count": len(cleaned_records),
+                    "dedup_exact_removed": dedup_stats.exact_duplicates_removed,
+                    "dedup_content_removed": dedup_stats.content_duplicates_removed,
+                    "clean_removed_no_test_files": clean_stats.removed_no_test_files,
+                    "clean_removed_patch_too_large": clean_stats.removed_patch_too_large,
+                    "clean_removed_binary": clean_stats.removed_binary,
+                    "clean_removed_non_python": clean_stats.removed_non_python,
+                    "clean_removed_empty_body": clean_stats.removed_empty_body,
+                    "clean_removed_no_f2p_signal": clean_stats.removed_no_f2p_signal,
+                }
+            )
+
+            # Stage 4: Complete
+            progress.update(task, advance=1, description="Complete")
+
+    finally:
+        wandb_run.finish()
+
+    return cleaned_records
 
 
-# ── Full pipeline ─────────────────────────────────────────────────────────
+# Full pipeline entry point
 
 
 def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
-    """Run the full multi-repo pipeline end to end.
-
-    Returns a ``PipelineResult`` with all splits, stats, and paths.
-    """
-    # ── Setup ───────────────────────────────────────────────────────────
+    """Run the full multi-repo pipeline end to end."""
+    # Setup
     missing = config.validate_auth()
     if missing:
         raise RuntimeError(
@@ -233,125 +322,70 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         )
 
     run_id = config.run_id_override or uuid.uuid4().hex[:12]
-    manifest = ingest.load_manifest(str(config.manifest_path))
-    mft_hash = _manifest_hash(manifest)
-    repos: list[dict[str, Any]] = manifest.get("repositories", [])
-
     resume_from = config.resume_from
 
-    # Create ONE shared Github client for all repos (shares connection pool + rate-limit tracking)
-    gh = ingest.get_github_client()
-
     logger.info(
-        "Pipeline run %s: %d repos, manifest hash=%s",
+        "Pipeline run %s: source=swebench, resume_from=%s",
         run_id,
-        len(repos),
-        mft_hash,
+        resume_from,
     )
 
-    all_validated: list[IssueRecord] = []
-    all_raw: list[dict[str, Any]] = []
-
-    # ── Per-repo processing (parallel) ──────────────────────────────────
+    all_cleaned: list[IssueRecord] = []
     repo_results: list[RepoResult] = []
 
-    console.print(f"[bold]Pipeline Run:[/bold] {run_id}")
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task(f"Processing {len(repos)} repos...", total=len(repos))
+    # SWE-bench flow (only source)
+    console.print(f"[bold]Pipeline Run:[/bold] {run_id} (SWE-bench)")
 
-        with ThreadPoolExecutor(max_workers=config.parallel_workers) as pool:
-            futures = {
-                pool.submit(run_pipeline_for_repo, r, config, run_id, resume_from, gh): r["id"]
-                for r in repos
-            }
-            for future in as_completed(futures):
-                rid = futures[future]
-                try:
-                    repo_res = future.result()
-                    repo_results.append(repo_res)
-                    if repo_res.error:
-                        console.print(f"  [red]✗[/red] {rid}: {repo_res.error}")
-                    else:
-                        progress.update(
-                            task,
-                            advance=1,
-                            description=f"{rid}: {repo_res.cleaned_count} cleaned",
-                        )
-                except Exception as exc:
-                    logger.exception("Unhandled exception for repo %s", rid)
-                    repo_results.append(RepoResult(repo_id=rid, error=str(exc)))
-                    progress.update(task, advance=1)
+    all_cleaned = run_pipeline_swebench(config, run_id, resume_from)
 
-    # ── Zero-yield warning summary ──────────────────────────────────────
-    zero_yield_repos = [r for r in repo_results if r.raw_count == 0 and not r.error]
-    if zero_yield_repos:
-        logger.warning(
-            "Zero-yield repos (%d): %s",
-            len(zero_yield_repos),
-            ", ".join(r.repo_id for r in zero_yield_repos),
+    repo_results = [
+        RepoResult(
+            repo_id="swebench",
+            raw_count=0,
+            validated_count=0,
+            cleaned_count=len(all_cleaned),
         )
-        console.print(
-            f"[yellow]⚠ {len(zero_yield_repos)} repo(s) yielded 0 records: "
-            f"{', '.join(r.repo_id for r in zero_yield_repos)}[/yellow]"
-        )
+    ]
 
-    # ── Aggregate all cleaned records ───────────────────────────────────
-    all_cleaned: list[IssueRecord] = []
-    total_raw = 0
-    total_validated = 0
-    total_validation_errors = 0
-    dedup_stats_total = clean.DedupStats()
-    clean_stats_total = clean.CleanStats()
-
-    for r in repo_results:
-        total_raw += r.raw_count
-        total_validated += r.validated_count
-
-        # Load cleaned records from checkpoint
-        cleaned_dicts = _load_stage(config, run_id, r.repo_id, "cleaned")
-        all_cleaned.extend(IssueRecord(**d) for d in cleaned_dicts)
+    raw_dicts = _load_stage(config, run_id, "swebench", "raw")
+    validated_dicts = _load_stage(config, run_id, "swebench", "validated")
+    repo_results[0].raw_count = len(raw_dicts)
+    repo_results[0].validated_count = len(validated_dicts)
 
     if not all_cleaned:
         raise RuntimeError("Pipeline produced 0 cleaned records. Check per-repo logs.")
 
-    # Re-run dedup + clean globally to get accurate total stats
-    # (per-repo dedup is approximate; global dedup is authoritative)
-    all_cleaned, dedup_stats_total = clean.deduplicate(all_cleaned)
-    all_cleaned, clean_stats_total = clean.clean_records(all_cleaned, config)
-
-    # ── Split ───────────────────────────────────────────────────────────
+    # Split
     if _stage_enabled(config, "split"):
         seed = int.from_bytes(hashlib.sha256(run_id.encode()).digest()[:4], "little")
         splits = split.stratified_split(all_cleaned, config, seed=seed)
     else:
         splits = split.Splits()
 
-    # ── Golden ──────────────────────────────────────────────────────────
+    # Golden
     if _stage_enabled(config, "golden"):
         golden_set = golden.build_golden_set_from_config(splits, config)
     else:
         golden_set = golden.GoldenSet()
 
-    # ── Collect validation errors ───────────────────────────────────────
+    # Collect validation errors
     from data_engineering.schema import ValidationError
 
     all_validation_errors: list[ValidationError] = []
-    for r in repo_results:
-        for d in _load_stage(config, run_id, r.repo_id, "validation_errors"):
-            try:
-                all_validation_errors.append(ValidationError(**d))
-            except Exception:
-                pass  # skip malformed error records
+    for d in _load_stage(config, run_id, "swebench", "validation_errors"):
+        try:
+            all_validation_errors.append(ValidationError(**d))
+        except Exception:
+            pass
     total_validation_errors = len(all_validation_errors)
 
-    # ── Stats ───────────────────────────────────────────────────────────
+    # Stats
+    total_raw = sum(r.raw_count for r in repo_results)
+    total_validated = sum(r.validated_count for r in repo_results)
+
+    dedup_stats_total = clean.DedupStats()
+    clean_stats_total = clean.CleanStats()
+
     stats = PipelineStats(
         total_raw=total_raw,
         total_validated=total_validated,
@@ -364,22 +398,13 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         test_count=len(splits.test),
         golden_count=len(golden_set.records),
         total_examples=len(splits.train) + len(splits.val) + len(splits.test),
-        repo_count=len(repos),
+        repo_count=len(repo_results),
         repo_results=repo_results,
     )
 
-    # ── Version (W&B) ───────────────────────────────────────────────────
     stages: dict[str, Any] = {
-        "raw": [
-            IssueRecord(**d)
-            for r in repo_results
-            for d in _load_stage(config, run_id, r.repo_id, "raw")
-        ],
-        "validated": [
-            IssueRecord(**d)
-            for r in repo_results
-            for d in _load_stage(config, run_id, r.repo_id, "validated")
-        ],
+        "raw": [],
+        "validated": [],
         "cleaned": all_cleaned,
         "train": splits.train,
         "val": splits.val,
@@ -388,9 +413,15 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         "validation_errors": all_validation_errors,
     }
 
+    raw_dicts = _load_stage(config, run_id, "swebench", "raw")
+    validated_dicts = _load_stage(config, run_id, "swebench", "validated")
+    stages["raw"] = [IssueRecord(**d) for d in raw_dicts]
+    stages["validated"] = [IssueRecord(**d) for d in validated_dicts]
+
     wandb_artifacts: dict[str, str] = {}
     if _stage_enabled(config, "version"):
         try:
+            mft_hash = _manifest_hash({})
             wandb_artifacts = version.log_dataset_artifacts(
                 run_id,
                 stages,
@@ -401,42 +432,36 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         except Exception as exc:
             logger.warning("W&B artifact logging failed (non-fatal): %s", exc)
 
-    # ── Update stats with W&B paths BEFORE card ─────────────────────────
     stats.wandb_artifacts = {k: str(v) for k, v in wandb_artifacts.items()}
 
-    # ── Archive (GCS) ───────────────────────────────────────────────────
     gcs_paths: dict[str, str] = {}
     if _stage_enabled(config, "archive"):
         try:
-            # Upload stages + manifest first; card gets placeholder,
-            # overwritten after generation below
             gcs_paths = archive.upload_to_gcs(
                 run_id,
                 stages,
-                manifest,
-                "",  # placeholder card — overwritten below
+                {},
+                "",
                 config,
             )
         except Exception as exc:
             logger.warning("GCS upload failed (non-fatal): %s", exc)
 
-    # ── Update stats with GCS paths BEFORE card ─────────────────────────
     stats.gcs_paths = gcs_paths
 
-    # ── Dataset Card (now with full W&B + GCS paths) ────────────────────
+    # Dataset Card
     dataset_card_md = card.generate_dataset_card(
-        manifest,
-        stats,
-        run_id,
+        manifest={},
+        stats=stats,
+        run_id=run_id,
         git_sha=os.environ.get("GIT_SHA", ""),
+        source="swebench",
     )
 
-    # Write dataset card locally
     card_path = config.output_dir / run_id / "dataset_card.md"
     card_path.parent.mkdir(parents=True, exist_ok=True)
     card_path.write_text(dataset_card_md)
 
-    # Overwrite card on GCS with full paths
     if gcs_paths and config.gcs_bucket:
         try:
             archive.upload_text_to_gcs(
@@ -462,7 +487,7 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
 
     return PipelineResult(
         run_id=run_id,
-        manifest_hash=mft_hash,
+        manifest_hash=_manifest_hash({}),
         splits=splits,
         stats=stats,
         gcs_paths=gcs_paths,
@@ -471,10 +496,6 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
 
 
 if __name__ == "__main__":
-    """Entry point: ``python -m data_engineering.run_pipeline``.
-
-    Delegates to the Typer CLI so both entry points behave identically.
-    """
     from data_engineering.cli import app as cli_app
 
     cli_app()

@@ -62,7 +62,7 @@ class IssueRecord(BaseModel):
         """Validate that *v* looks like a unified diff.
 
         Tries ``unidiff.PatchSet`` first (per plan spec); falls back to
-        regex check (``---`` / ``+++`` / ``@@``) because GitHub API diffs
+        regex check (``---`` / ``+++`` / ``@@``) because API diffs
         can be truncated or have formatting quirks that unidiff rejects.
         """
         if not v or not v.strip():
