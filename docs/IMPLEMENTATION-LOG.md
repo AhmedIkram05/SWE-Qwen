@@ -412,6 +412,66 @@ Each Phase follows this structure:
 
 ---
 
+## Phase 3b (Extension): Synthetic Data Augmentation — 2026-07-28
+
+### Deviation Log
+
+| Task | Planned | Actual | Reason | Impact |
+|------|---------|--------|--------|--------|
+| 3b.11 | `synthetic_augment.py` | Created | New module: CodeContests (13k) + CodeAlpaca (20k filtered to ~8k Python) mapped to IssueRecord schema | Low |
+| 3b.12 | Config updates | Added `augment_codecontests`, `augment_codealpaca`, `max_train_examples` | CLI flags for augmentation control | Low |
+| 3b.13 | Pipeline integration | `run_pipeline()` augmented after split | Synthetic records injected into train split only — zero leakage to val/test/golden | Low |
+| 3b.14 | Tests | 11 tests (4 dedup/cap/disable + 5 mocked loaders + 2 integration) | Full coverage of augment_training_data edge cases | Low |
+
+### Decisions Made
+
+| Decision | Context | Alternatives Considered | Rationale |
+|----------|---------|------------------------|-----------|
+| `IssueRecord.model_construct()` for synthetic records | Full code solutions as `patch_diff` don't pass Pydantic unified-diff validator | Wrap in fake diff headers, skip validation entirely | `model_construct()` is intentional Pydantic v2 API for bypassing validation; cleaner than faking diff format |
+| CodeContests sourced first (13k) if time-pressed | CodeAlpaca is instruction-following, not bug-fixes, noisier | Skip CodeAlpaca entirely | CodeContests alone gets to ~20k with SWE-bench; CodeAlpaca adds variety at ~8k Python-filtered |
+| Dedup by SHA256(issue_body) across synthetic + SWE-bench | Same problem text could appear in both sources | Dedup per-field pair | issue_body hash catches near-identical problem statements; cheap and effective |
+| Augmentation runs AFTER split | Synthetic must never leak into val/test/golden | Pre-split augmentation with extra columns | Post-split augmentation guarantees A3: synthetic repos (`synthetic/codecontests`, `synthetic/codealpaca`) never appear in non-train splits |
+
+### Blockers & Resolutions
+
+| Blocker | Discovered | Resolved | Resolution | Time Lost |
+|---------|------------|----------|------------|-----------|
+| `patch_diff` validator rejects synthetic solutions | 2026-07-28 | 2026-07-28 | Switched to `IssueRecord.model_construct()` to bypass Pydantic validation | 5 min |
+| Existing `run_pipeline` tests download CodeContests from HF | 2026-07-28 | 2026-07-28 | Disabled augmentation in existing test configs (`augment_codecontests=False`) | 10 min |
+| `ruff` B905 on `zip()` without `strict` | 2026-07-28 | 2026-07-28 | Added `strict=False` to CodeContests zip | 2 min |
+
+### Technical Details (For Future Phases)
+
+| Area | Detail | Why It Matters |
+|------|--------|----------------|
+| CodeContests loading | `load_dataset("deepmind/code_contests")`, split="train". Solutions stored as `{solution: [...], language: [...]}`. Python = 3 in int enum. | Must handle solutions dict shape; HF datasets includes solutions for 13k problems |
+| CodeAlpaca loading | `load_dataset("sahil2801/CodeAlpaca-20k")`, split="train". Python filter by `"python" in instruction + input (lowercase)`. | ~8k of 20k pass the Python filter; remaining 12k skipped |
+| `model_construct()` | Pydantic v2 method that skips `field_validator` decorators entirely | Synthetic records carry full solutions, not diffs — normal constructor would reject them |
+| Dedup strategy | SHA256 of `issue_body` text, accumulated across both SWE-bench and synthetic sets | Prevents duplicate problem statements from appearing in training; cross-source dedup |
+| Cap behavior | `max_train_examples` slices `merged[:max_train_examples]` after dedup | Default 30k should hold ~20k SWE-bench + ~13k CodeContests + ~8k CodeAlpaca; cap fires if needed |
+
+### Scope Changes
+
+| Change | Added/Removed/Modified | Justification |
+|--------|------------------------|---------------|
+| `data_engineering/synthetic_augment.py` | Added | ~210 lines: load_codecontests, load_codealpaca, augment_training_data |
+| `data_engineering/config.py` | Added 3 fields | `augment_codecontests` (bool), `augment_codealpaca` (bool), `max_train_examples` (int) |
+| `data_engineering/cli.py` | Added 3 flags | `--augment-codecontests/--no-augment-codecontests`, `--augment-codealpaca/--no-augment-codealpaca`, `--max-train-examples` |
+| `data_engineering/run_pipeline.py` | Modified | Import + integration point after `split.stratified_split()` |
+| `tests/data_engineering/test_data_synthetic.py` | Added | 11 tests: dedup, cap, capping, mocked loaders, metadata shape, no-repo-leakage |
+
+### Metrics / Observations
+
+- **New module**: `data_engineering/synthetic_augment.py` (210 lines)
+- **11 new tests**: all passing (183/183 total data engineering tests)
+- **CodeContests**: ~13k Python solutions (competitive programming) filtered from full dataset
+- **CodeAlpaca**: ~8k Python-related instruction-following examples filtered from 20k
+- **Default cap**: 30k `max_train_examples`
+- **Augmentation point**: runs after `split.stratified_split()` — synthetic repos never appear in val/test/golden
+- **Ponytail**: CodeAlpaca is noisier (instruction-following, not bug fixes). `--no-augment-codealpaca` to skip if time-pressed.
+
+---
+
 ## Phase 4: Fine-Tuning Pipeline — 2026-07-28 ✅ COMPLETED
 
 ### Deviation Log
