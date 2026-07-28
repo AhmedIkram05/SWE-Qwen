@@ -11,7 +11,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import wandb
 
@@ -234,7 +234,7 @@ def log_validation_errors(
     # Retrieve the artifact object from wandb
     try:
         api = wandb.Api()
-        return api.artifact(name)
+        return cast(wandb.Artifact, api.artifact(name))
     except Exception:
         # Fallback: return a minimal artifact with the name
         return wandb.Artifact(

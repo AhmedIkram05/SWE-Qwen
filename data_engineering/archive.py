@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def _ensure_gcs_bucket(bucket_name: str) -> Any:
     """Get or create a GCS bucket and return it."""
-    from google.cloud import storage
+    from google.cloud import storage  # type: ignore[attr-defined]
 
     client = storage.Client()
     bucket = client.bucket(bucket_name)
@@ -121,7 +121,7 @@ def upload_text_to_gcs(
     Useful for overwriting a previously uploaded file (e.g. dataset card
     after W&B/GCS paths are known).
     """
-    from google.cloud import storage
+    from google.cloud import storage  # type: ignore[attr-defined]
 
     client = storage.Client()
     bucket = client.bucket(bucket_name)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from datasets import load_dataset
 from pydantic import BaseModel
@@ -296,7 +296,7 @@ def _load_bq_stats_cache(cache_path: Path) -> dict[str, dict]:
     import json
 
     with cache_path.open() as f:
-        return json.load(f)
+        return cast(dict[str, dict], json.load(f))
 
 
 def _save_bq_stats_cache(cache_path: Path, data: dict[str, dict]) -> None:

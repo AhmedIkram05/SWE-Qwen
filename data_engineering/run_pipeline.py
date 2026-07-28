@@ -161,7 +161,7 @@ def run_pipeline_swebench(
         # Initialize stats for W&B logging
         dedup_stats = clean.DedupStats()
         clean_stats = clean.CleanStats()
-        validation_errors = []
+        validation_errors: list = []
 
         # Progress bar for SWE-bench stages
         with Progress(
@@ -498,4 +498,4 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
 if __name__ == "__main__":
     from data_engineering.cli import app as cli_app
 
-    cli_app()
+    cli_app()  # type: ignore[has-type]

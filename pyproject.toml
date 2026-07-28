@@ -177,7 +177,7 @@ exclude = [
     "tests/fixtures",
 ]
 [[tool.mypy.overrides]]
-module = ["pydantic.*", "google.*", "modal.*", "wandb.*", "vllm.*", "torch.*", "transformers.*", "peft.*", "bitsandbytes.*"]
+module = ["pydantic.*", "google.*", "wandb.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
