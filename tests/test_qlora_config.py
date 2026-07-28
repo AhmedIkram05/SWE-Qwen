@@ -58,7 +58,7 @@ class TestVariantConfig:
         assert cfg["lora"]["r"] == 32
         assert cfg["lora"]["lora_alpha"] == 64
         # Inherited from baseline
-        assert cfg["lora"]["lora_dropout"] == 0.05
+        assert cfg["lora"]["lora_dropout"] == 0
         assert cfg["lora"]["bias"] == "none"
         assert cfg["training"]["learning_rate"] == 2.0e-5
         assert cfg["training"]["num_train_epochs"] == 3
@@ -96,7 +96,7 @@ class TestBuildQLoraConfig:
         )
         assert lora_config.r == 16
         assert lora_config.lora_alpha == 32
-        assert lora_config.lora_dropout == 0.05
+        assert lora_config.lora_dropout == 0
         assert lora_config.task_type == "CAUSAL_LM"
         # target_modules resolved from model config
         assert len(lora_config.target_modules or []) == 7

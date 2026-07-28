@@ -92,8 +92,7 @@ class TestQLoRATrainerSmoke:
 
         import torch
         from datasets import Dataset
-        from transformers import TrainingArguments
-        from trl import SFTTrainer
+        from trl import SFTConfig, SFTTrainer
 
         from training.qlora_trainer import QLoRATrainer
 
@@ -130,7 +129,8 @@ class TestQLoRATrainerSmoke:
             trainer.eval_dataset = None
 
             # Create SFTTrainer directly for the one-step test
-            training_args = TrainingArguments(
+            # TRL 1.9.2 uses SFTConfig (not TrainingArguments) with processing_class
+            training_args = SFTConfig(
                 output_dir=Path(tmpdir) / "output",
                 num_train_epochs=1,
                 per_device_train_batch_size=1,
@@ -145,15 +145,15 @@ class TestQLoRATrainerSmoke:
                 remove_unused_columns=False,
                 ddp_find_unused_parameters=False,
                 dataloader_num_workers=0,
+                max_length=64,
+                packing=False,
             )
 
             sft_trainer = SFTTrainer(
                 model=trainer.model,
                 args=training_args,
                 train_dataset=train_dataset,
-                tokenizer=trainer.tokenizer,
-                max_seq_length=64,
-                packing=False,
+                processing_class=trainer.tokenizer,
             )
 
             # Run one step
