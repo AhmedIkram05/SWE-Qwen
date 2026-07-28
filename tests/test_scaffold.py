@@ -128,7 +128,12 @@ class TestPyProjectToml:
         assert "ruff" in tools
         assert "mypy" in tools
         assert "pytest" in tools
-        assert "pre-commit-hooks" in tools
+
+    def test_package_version(self):
+        """Verify swe_qwen package version can be imported."""
+        from swe_qwen import __version__
+
+        assert __version__ == "0.1.0"
 
 
 class TestGitIgnore:

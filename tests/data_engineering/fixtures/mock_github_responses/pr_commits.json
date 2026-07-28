@@ -1,0 +1,14 @@
+[
+  {
+    "sha": "abc123def456",
+    "commit": {
+      "message": "fix: extend session timeout (#42)\n\nCloses #42 by increasing session TTL from 300s to 3600s"
+    }
+  },
+  {
+    "sha": "789012ghi345",
+    "commit": {
+      "message": "chore: add tests for session expiry"
+    }
+  }
+]

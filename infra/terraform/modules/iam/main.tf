@@ -13,7 +13,9 @@ resource "google_project_service" "required_apis" {
     "container.googleapis.com",
     "monitoring.googleapis.com",
     "logging.googleapis.com",
-    "storage.googleapis.com"
+    "storage.googleapis.com",
+    "bigquery.googleapis.com",
+    "bigquerydatatransfer.googleapis.com"
   ])
 
   service            = each.value
@@ -171,6 +173,12 @@ resource "google_project_iam_member" "modal_runner_monitoring_writer" {
   member  = "serviceAccount:${google_service_account.modal_runner.email}"
 }
 
+resource "google_project_iam_member" "modal_runner_bigquery_job_user" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.modal_runner.email}"
+}
+
 # IAM Roles for GitHub Actions Service Account
 resource "google_project_iam_member" "github_actions_storage_admin" {
   count   = var.enable_workload_identity ? 1 : 0
@@ -204,6 +212,13 @@ resource "google_project_iam_member" "github_actions_service_account_user" {
   count   = var.enable_workload_identity ? 1 : 0
   project = var.project_id
   role    = "roles/iam.serviceAccountUser"
+  member  = "serviceAccount:${google_service_account.github_actions[0].email}"
+}
+
+resource "google_project_iam_member" "github_actions_bigquery_job_user" {
+  count   = var.enable_workload_identity ? 1 : 0
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
   member  = "serviceAccount:${google_service_account.github_actions[0].email}"
 }
 

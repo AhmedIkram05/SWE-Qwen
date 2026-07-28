@@ -274,5 +274,6 @@ htmlcov/
 data/raw/
 data/processed/
 data/interim/
+data/*/
 *.parquet
 *.arrow

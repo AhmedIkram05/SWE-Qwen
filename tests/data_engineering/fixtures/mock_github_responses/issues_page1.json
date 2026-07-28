@@ -1,0 +1,20 @@
+[
+  {
+    "number": 42,
+    "title": "Fix session expiry",
+    "body": "Session token expires too early, need to extend TTL",
+    "state": "closed",
+    "labels": [{"name": "bug"}],
+    "html_url": "https://github.com/owner/repo1/issues/42",
+    "pull_request": null
+  },
+  {
+    "number": 43,
+    "title": "Add input validation",
+    "body": "Registration endpoint lacks input validation",
+    "state": "closed",
+    "labels": [{"name": "enhancement"}],
+    "html_url": "https://github.com/owner/repo1/issues/43",
+    "pull_request": null
+  }
+]

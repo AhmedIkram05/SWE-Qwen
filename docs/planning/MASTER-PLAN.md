@@ -97,7 +97,7 @@ The project is successful when **all** of the following are true:
 
 | Workstream | Primary Metric | Gate |
 |------------|---------------|------|
-| Data Pipeline | Schema validation pass rate ≥ 95% | All examples pass validation before training |
+| Data Pipeline | All records pass schema validation + dedup + F2P heuristics | Zero duplicates, no invalid records after cleaning |
 | Fine-Tuning | QLoRA convergence without OOM | Training completes within Modal GPU budget (A100 40GB for 30B MoE) |
 | Evaluation | F2P rate measured on golden set | Golden set results logged to W&B per run |
 | Inference | OpenAI-compatible API responds to chat completions | Integration test passes against running endpoint |
@@ -530,7 +530,7 @@ swe-qwen/
 
 **Acceptance Criteria:**
 1. `python -m data_engineering.run_pipeline --manifest repos/manifest.json` produces a complete dataset artifact in W&B and GCS
-2. Golden eval subset validation pass rate ≥ 95% (schema, test-verification, deduplication)
+2. Golden eval subset: all records pass schema validation + F2P heuristic verification + dedup checks (zero duplicates)
 3. W&B shows dataset lineage: manifest → raw → validated → cleaned → split → versioned
 4. Dataset card includes: size, schema, source repos, quality stats, split ratios
 
