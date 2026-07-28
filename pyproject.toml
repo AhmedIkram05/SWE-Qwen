@@ -158,6 +158,7 @@ line-ending = "lf"
 
 [tool.ruff.lint.isort]
 known-first-party = ["swe_qwen"]
+known-third-party = ["modal", "wandb"]
 
 [tool.mypy]
 python_version = "3.11"

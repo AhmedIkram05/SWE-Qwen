@@ -10,7 +10,6 @@ Fallback model: Qwen/Qwen3-14B (14B dense)
 """
 
 import modal
-
 import wandb
 
 # Modal app configuration
