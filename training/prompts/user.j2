@@ -1,0 +1,19 @@
+## Issue: {{ issue_title }}
+
+{{ issue_body }}
+
+### Repository Context
+- **Repository:** {{ repo_name }}
+- **Domain:** {{ repo_domain }}
+
+### Relevant Files
+{% for file in context_files %}
+- `{{ file }}`
+{% endfor %}
+
+### Test Files
+{% for file in test_files %}
+- `{{ file }}`
+{% endfor %}
+
+Generate a patch (unified diff format) that fixes this issue.
