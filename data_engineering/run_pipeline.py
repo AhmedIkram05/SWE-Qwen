@@ -39,10 +39,12 @@ from data_engineering import (
 )
 from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import (
+    GoldenSet,
     IssueRecord,
     PipelineResult,
     PipelineStats,
     RepoResult,
+    Splits,
 )
 
 logger = logging.getLogger(__name__)
@@ -321,6 +323,33 @@ def run_pipeline_swebench(
 # Full pipeline entry point
 
 
+def _save_splits_jsonl(
+    splits: Splits,
+    golden_set: GoldenSet,
+    config: DataPipelineConfig,
+    run_id: str,
+) -> None:
+    """Save train/val/test/golden splits as JSONL files for tokenization."""
+    out_dir = config.output_dir / run_id / "swebench"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Helper to save records
+    def save_records(records, filename):
+        path = out_dir / filename
+        with path.open("w") as f:
+            for rec in records:
+                if hasattr(rec, "model_dump"):
+                    f.write(json.dumps(rec.model_dump(), default=str) + "\n")
+                else:
+                    f.write(json.dumps(rec, default=str) + "\n")
+        logger.info("Saved %d records to %s", len(records), path)
+
+    save_records(splits.train, "train.jsonl")
+    save_records(splits.val, "val.jsonl")
+    save_records(splits.test, "test.jsonl")
+    save_records(golden_set.records, "golden.jsonl")
+
+
 def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
     """Run the full multi-repo pipeline end to end."""
     # Setup
@@ -388,6 +417,9 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         golden_set = golden.build_golden_set_from_config(splits, config)
     else:
         golden_set = golden.GoldenSet()
+
+    # Save splits as JSONL for tokenization
+    _save_splits_jsonl(splits, golden_set, config, run_id)
 
     # Collect validation errors
     from data_engineering.schema import ValidationError
