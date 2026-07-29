@@ -66,6 +66,59 @@ def build_model_and_peft(
         return _build_fallback(model_cfg, variant_cfg)
 
 
+def _fix_eos_token(tokenizer: Any) -> None:
+    """Fix tokenizer eos_token if it's not in the vocabulary.
+
+    Unsloth's FastLanguageModel wrapper may set eos_token to a placeholder
+    (e.g. '<EOS_TOKEN>') that doesn't exist in the actual tokenizer vocab.
+    SFTTrainer validates eos_token is in vocab at init time, so we need
+    to correct it here.
+
+    Falls back to a known-good token for the architecture if needed.
+    """
+    if tokenizer.eos_token is None:
+        return
+
+    # Fast path: already valid
+    vocab = tokenizer.get_vocab()
+    if tokenizer.eos_token in vocab:
+        return
+
+    logger.warning(
+        "eos_token %r not in vocabulary. Attempting to fix...",
+        tokenizer.eos_token,
+    )
+
+    # Try common candidates in priority order
+    # Qwen3 uses <|endoftext|> (token ID 151643)
+    for candidate in ("<|endoftext|>", "<|im_end|>", "</s>", "<EOS>"):
+        if candidate in vocab:
+            tokenizer.eos_token = candidate
+            tokenizer.eos_token_id = vocab[candidate]
+            logger.info("Fixed eos_token: %s -> %s (id=%d)", candidate, candidate, vocab[candidate])
+            return
+
+    # Last resort: set eos_token_id from the model config (it's usually correct)
+    # and update the string representation
+    if tokenizer.eos_token_id is not None:
+        # Try to decode the token ID to find its string representation
+        try:
+            decoded = tokenizer.decode([tokenizer.eos_token_id])
+            decoded = decoded.strip()
+            if decoded:
+                tokenizer.eos_token = decoded
+                logger.info("Restored eos_token from id=%d: %s", tokenizer.eos_token_id, decoded)
+                return
+        except Exception:
+            pass
+
+    logger.error(
+        "Could not fix eos_token %r — not in vocabulary and no candidate found. "
+        "SFTTrainer will likely fail.",
+        tokenizer.eos_token,
+    )
+
+
 def _build_with_unsloth(
     model_cfg: dict[str, Any],
     variant_cfg: dict[str, Any],
@@ -111,6 +164,16 @@ def _build_with_unsloth(
         trust_remote_code=True,
     )
 
+    # Fix eos_token: Unsloth wrapper may set a placeholder (<EOS_TOKEN>)
+    # that doesn't exist in the actual vocabulary. Qwen3 uses <|endoftext|>.
+    # SFTTrainer validates eos_token is in vocab before training.
+    _fix_eos_token(tokenizer)
+
+    # Ensure tokenizer has proper pad_token
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+
     # Extract LoRA params from variant config
     lora_params = variant_cfg.get("lora", {})
     r = lora_params.get("r", 16)
@@ -118,8 +181,6 @@ def _build_with_unsloth(
     lora_dropout = lora_params.get("lora_dropout", 0.05)
     target_modules = lora_params.get("target_modules")
     bias = lora_params.get("bias", "none")
-    task_type = lora_params.get("task_type", "CAUSAL_LM")
-
     # If target_modules not specified, use model config
     if target_modules is None:
         target_modules = model_cfg.get("target_modules", [])
@@ -128,11 +189,11 @@ def _build_with_unsloth(
 
     # Remove ALL keys that we'll pass explicitly to avoid duplicate kwargs
     peft_kwargs = dict(lora_params)
-    for key in ["r", "lora_alpha", "lora_dropout", "target_modules", "bias", "task_type"]:
+    for key in ["r", "lora_alpha", "lora_dropout", "target_modules", "bias"]:
         peft_kwargs.pop(key, None)
 
-    # Pass everything via peft_kwargs to avoid Unsloth internal wrapper issues
-    # (the wrapper seems to add task_type again, causing duplicate kwarg errors)
+    # Pass everything via peft_kwargs - DO NOT include task_type or padding_free
+    # Unsloth wrapper passes to LoraConfig which doesn't support these
     peft_kwargs.update(
         {
             "r": r,
@@ -140,9 +201,7 @@ def _build_with_unsloth(
             "lora_dropout": lora_dropout,
             "target_modules": target_modules,
             "bias": bias,
-            "task_type": task_type,
             "use_gradient_checkpointing": "unsloth",  # saves 30% VRAM
-            "padding_free": False,  # avoids collision with assistant_only_loss
         }
     )
 
@@ -151,7 +210,7 @@ def _build_with_unsloth(
     # Attach tokenizer for downstream use
     model.tokenizer = tokenizer
 
-    return model, model
+    return model, tokenizer
 
 
 def _build_fallback(
