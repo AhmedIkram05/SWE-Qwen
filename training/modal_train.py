@@ -272,6 +272,15 @@ def train_qlora(  # noqa: PLR0913, PLR0917
 
     metrics = trainer.train()
 
+    # Gracefully shut down torch compile workers before Modal kills the container.
+    # Prevents harmless-but-ugly "Exception ignored in atexit callback" traceback.
+    try:
+        import torch._inductor.async_compile  # noqa: F811
+
+        torch._inductor.async_compile.shutdown_compile_workers()
+    except Exception:
+        pass
+
     return {
         "status": "completed",
         "model_name": model_name,
