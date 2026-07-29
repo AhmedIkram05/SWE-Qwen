@@ -1,0 +1,33 @@
+{
+  "run_id": "3cfd5d59bc2b",
+  "dry_run": true,
+  "golden_path": "/Users/ahmedikram/GitHub Repos/SWE-Qwen/data/3cfd5d59bc2b/swebench/golden.jsonl",
+  "variants": {
+    "baseline_14b": {
+      "run_name": "3config-baseline_14b-20260729-122101",
+      "wandb_run_id": "dry-run-baseline_14b",
+      "adapter_path": "/Users/ahmedikram/GitHub Repos/SWE-Qwen/models/comparisons/3cfd5d59bc2b/adapter-dry-run-baseline_14b",
+      "mean_f2p": 0.0384,
+      "count": 2056,
+      "patch_present": false
+    },
+    "higher_rank_14b": {
+      "run_name": "3config-higher_rank_14b-20260729-122102",
+      "wandb_run_id": "dry-run-higher_rank_14b",
+      "adapter_path": "/Users/ahmedikram/GitHub Repos/SWE-Qwen/models/comparisons/3cfd5d59bc2b/adapter-dry-run-higher_rank_14b",
+      "mean_f2p": 0.0384,
+      "count": 2056,
+      "patch_present": false
+    },
+    "higher_lr_14b": {
+      "run_name": "3config-higher_lr_14b-20260729-122102",
+      "wandb_run_id": "dry-run-higher_lr_14b",
+      "adapter_path": "/Users/ahmedikram/GitHub Repos/SWE-Qwen/models/comparisons/3cfd5d59bc2b/adapter-dry-run-higher_lr_14b",
+      "mean_f2p": 0.0384,
+      "count": 2056,
+      "patch_present": false
+    }
+  },
+  "champion": "baseline_14b",
+  "champion_f2p": 0.0384
+}
