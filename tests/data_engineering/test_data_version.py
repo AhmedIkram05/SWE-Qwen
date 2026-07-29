@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import IssueRecord, ValidationError
@@ -88,6 +88,29 @@ class TestLogDatasetArtifacts:
             assert mock_artifact.add_file.called
             assert mock_run.log_artifact.called
             assert isinstance(result, dict)
+
+    def test_artifact_upload_waits_for_files(self) -> None:
+        """artifact.wait() and time.sleep(1) are called after log_artifact.
+
+        Guards against regression: if either is removed, file uploads may
+        not complete before run.finish() terminates the uploader thread.
+        """
+        stages = {"train": [_rec("r#1")]}
+        config = DataPipelineConfig(wandb_project="test-proj")
+
+        with (
+            patch("data_engineering.version.wandb") as mock_wandb,
+            patch("data_engineering.version.time.sleep") as mock_sleep,
+        ):
+            mock_run = mock_wandb.init.return_value
+            mock_artifact = mock_wandb.Artifact.return_value
+            mock_artifact.name = "dataset-train:v1"
+
+            log_dataset_artifacts("run_id", stages, config, "abc123")
+
+            mock_run.log_artifact.assert_called_with(mock_artifact)
+            mock_artifact.wait.assert_called_once()
+            mock_sleep.assert_has_calls([call(1)])
 
     def test_empty_stages(self) -> None:
         """Empty stages dict should not raise and return empty dict."""
