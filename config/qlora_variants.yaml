@@ -65,6 +65,7 @@ variants:
       learning_rate: 5.0e-5
       # all other training args inherit from baseline_14b
 
+  # Used for quick debugging only
   efficient_14b:
     lora:
       r: 8
