@@ -40,7 +40,7 @@ variants:
       dataloader_num_workers: 2
       remove_unused_columns: false
       packing: true
-      max_seq_length: 8192
+      max_seq_length: 4096
       dataloader_pin_memory: false
 
   higher_rank_14b:
@@ -76,6 +76,6 @@ variants:
       learning_rate: 5.0e-5
       per_device_train_batch_size: 2
       gradient_accumulation_steps: 8
-      max_seq_length: 8192
+      max_seq_length: 4096
       num_train_epochs: 2
       # inherits: warmup_ratio, lr_scheduler_type, weight_decay, max_grad_norm, bf16, optim, logging_steps, save_strategy, save_steps, eval_strategy, eval_steps, save_total_limit, load_best_model_at_end, metric_for_best_model, greater_is_better, report_to, ddp_find_unused_parameters, gradient_checkpointing, dataloader_num_workers, remove_unused_columns, packing, dataloader_pin_memory
