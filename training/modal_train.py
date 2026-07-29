@@ -94,24 +94,15 @@ training_image = (
 # ── Modal volumes ─────────────────────────────────────────────────────────────
 
 # GCS bucket for training data (tokenized .arrow shards) — read-only mount
-# Replaces modal.Volume to avoid local staging costs
+# Streams directly from GCS, no local volume storage cost
 gcs_data = modal.CloudBucketMount(
     bucket_name="swe-qwen-datasets",
-    key_prefix="tokenized",
+    key_prefix="tokenized/",  # must end with /
     read_only=True,
 )
 
 # Persistent volume for model checkpoints
 models_volume = modal.Volume.from_name("swe-qwen-models", create_if_missing=True)
-
-
-def _get_gcs_data_mount() -> modal.CloudBucketMount:
-    """Create GCS bucket mount - defined as function to avoid Modal dependency tracking issues."""
-    return modal.CloudBucketMount(
-        bucket_name="swe-qwen-datasets",
-        key_prefix="tokenized/",  # must end with /
-        read_only=True,
-    )
 
 
 # ── Training function ─────────────────────────────────────────────────────────
@@ -124,7 +115,7 @@ def _get_gcs_data_mount() -> modal.CloudBucketMount:
         modal.Secret.from_name("hf-secret"),
     ],
     volumes={
-        "/data": _get_gcs_data_mount(),
+        "/data": gcs_data,
         "/models": models_volume,
     },
     gpu="A10G:1",  # 14B model fits on A10G 24GB
