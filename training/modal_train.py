@@ -29,7 +29,7 @@ _CONFIG_DIR = _REPO_ROOT / "config"
 
 # ── Modal app ─────────────────────────────────────────────────────────────────
 
-app = modal.App("swe-qwen-training")
+app = modal.App("swe-qwen-training-v2")
 
 # ── Modal image with all training dependencies ───────────────────────────────
 
@@ -73,6 +73,8 @@ training_image = (
     .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     # Enable Unsloth by default on H100/A100 ( Modal GPU types)
     .env({"UNSLOTH_ENABLED": "1"})
+    # Force rebuild v5 - fixes duplicate kwargs, max_memory=18GiB, peft_kwargs cleanup
+    .run_commands("echo 'cache-bust-v5'")
     # Copy local source into the image — must be LAST
     .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
     .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)

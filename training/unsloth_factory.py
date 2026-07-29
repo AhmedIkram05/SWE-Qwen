@@ -94,13 +94,19 @@ def _build_with_unsloth(
         attn_impl,
     )
 
+    # A10G has 24GB VRAM but only ~22GB usable. Reserve 4GB for training + activations.
+    # Use explicit device_map to force GPU memory limit - Unsloth may not pass max_memory through.
+    max_memory = {0: "18GiB", "cpu": "32GiB"}
+    device_map = "auto"
+
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=hf_id,
         max_seq_length=max_seq_length,
         dtype=torch_dtype,
         load_in_4bit=load_in_4bit,
         load_in_8bit=load_in_8bit,
-        device_map="auto",
+        device_map=device_map,
+        max_memory=max_memory,
         attn_implementation=attn_impl,
         trust_remote_code=True,
     )
@@ -120,17 +126,27 @@ def _build_with_unsloth(
 
     logger.info(f"Applying Unsloth LoRA: r={r}, alpha={lora_alpha}, targets={target_modules}")
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=r,
-        target_modules=target_modules,
-        lora_alpha=lora_alpha,
-        lora_dropout=lora_dropout,
-        bias=bias,
-        task_type=task_type,
-        use_gradient_checkpointing="unsloth",  # saves 30% VRAM
-        padding_free=False,  # avoids collision with assistant_only_loss
+    # Remove ALL keys that we'll pass explicitly to avoid duplicate kwargs
+    peft_kwargs = dict(lora_params)
+    for key in ["r", "lora_alpha", "lora_dropout", "target_modules", "bias", "task_type"]:
+        peft_kwargs.pop(key, None)
+
+    # Pass everything via peft_kwargs to avoid Unsloth internal wrapper issues
+    # (the wrapper seems to add task_type again, causing duplicate kwarg errors)
+    peft_kwargs.update(
+        {
+            "r": r,
+            "lora_alpha": lora_alpha,
+            "lora_dropout": lora_dropout,
+            "target_modules": target_modules,
+            "bias": bias,
+            "task_type": task_type,
+            "use_gradient_checkpointing": "unsloth",  # saves 30% VRAM
+            "padding_free": False,  # avoids collision with assistant_only_loss
+        }
     )
+
+    model = FastLanguageModel.get_peft_model(model, **peft_kwargs)
 
     # Attach tokenizer for downstream use
     model.tokenizer = tokenizer
@@ -161,6 +177,9 @@ def _build_fallback(
     load_in_4bit = True
     quant_type = "fp4"
 
+    # A10G has 24GB VRAM but only ~22GB usable. Reserve 4GB for training.
+    max_memory = {0: "18GiB", "cpu": "32GiB"}
+
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type=quant_type,
@@ -170,7 +189,7 @@ def _build_fallback(
     )
 
     logger.info(
-        "Loading %s with standard bitsandbytes (4bit=%s, cpu_offload=True)",
+        "Loading %s with standard bitsandbytes (4bit=%s, cpu_offload=True, max_memory=20GiB)",
         hf_id,
         load_in_4bit,
     )
@@ -179,6 +198,7 @@ def _build_fallback(
         hf_id,
         quantization_config=bnb_config,
         device_map="auto",
+        max_memory=max_memory,
         torch_dtype=torch_dtype,
         trust_remote_code=True,
         attn_implementation="sdpa",  # PyTorch native SDPA
