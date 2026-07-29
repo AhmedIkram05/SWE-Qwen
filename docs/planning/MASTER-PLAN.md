@@ -547,7 +547,7 @@ swe-qwen/
 **Inputs:**
 - Validated dataset from Phase 3 (golden subset + training split)
 - QLoRA configuration (rank, alpha, learning rate, batch size, epochs — initially set to recommended defaults)
-- Modal compute configuration (A100 40GB for Qwen3-30B-A3B QLoRA, A10G 24GB for Qwen3-14B)
+- Modal compute configuration (**A10G 24GB for Qwen3-14B QLoRA** — Phase 4 pivot: 14B-only, 30B excluded due to cost)
 
 **Outputs:**
 - `training/` Python package (complete)
@@ -559,7 +559,7 @@ swe-qwen/
 
 | # | Task | Deliverable |
 |---|------|-------------|
-| 4.1 | Implement model selection logic with baseline evaluation harness (Qwen3-30B-A3B primary, Qwen3-14B fallback) | `training/model_config.py` |
+| 4.1 | Implement model selection logic (Qwen3-14B primary; qwen3-30b-a3b retained in config but **phase4_excluded**) | `training/model_config.py` |
 | 4.2 | Implement QLoRA configuration (peft + bitsandbytes + transformers integration) | `training/qlora_config.py` |
 | 4.3 | **Prompt engineering workstream**: design and version prompt templates for training/inference (Issue+Context → Patch); W&B artifact versioning for prompt templates; A/B test 2-3 variants in Phase 5 eval | `training/prompts/` + W&B prompt artifacts |
 | 4.4 | Build training entry point with W&B integration | `training/qlora_train.py` |
@@ -570,31 +570,34 @@ swe-qwen/
 | 4.9 | Write unit tests for all training modules | `tests/test_training.py` |
 | 4.10 | Run baseline training on small subset (100 examples) to validate pipeline | Test run artifact |
 | 4.11 | Run full training on complete dataset | Final LoRA adapter checkpoint |
-| 4.12 | **Mandatory 3-config QLoRA comparison**: run three configs in parallel on Modal (baseline rank=16/alpha=32/lr=2e-5; higher_rank rank=32/alpha=64/lr=2e-5; higher_lr rank=16/alpha=32/lr=5e-5); all three evaluated on golden F2P set in Phase 5; winner → Champion. Optuna deferred to v2 (budget >50 GPU-hrs, automated eval) | `training/qlora_compare.py`, 3 W&B runs, comparison report |
+| 4.12 | **Mandatory 3-config QLoRA comparison**: run three 14B-optimized configs on Modal (baseline_14b r=16/alpha=32/lr=2e-5; higher_rank_14b r=32/alpha=64/lr=2e-5; higher_lr_14b r=16/alpha=32/lr=5e-5); all three evaluated on golden F2P set in Phase 5; winner → Champion. Optuna deferred to v2 (budget >50 GPU-hrs, automated eval). **Cost: ~$10-17 total (vs ~$110-160 for 30B)** | `scripts/run_3config_comparison.py`, 3 W&B runs, comparison report |
 
 **Dependencies:** Phase 3 complete (validated dataset required). Phase 1 complete (Modal, W&B configured).
 
 **Risks:**
-- Qwen3-30B-A3B (30B total params) requires A100 40GB for QLoRA training → Mitigation: Use A100 40GB GPU (~$1.50/hr on Modal); fallback to Qwen3-14B if budget is tight; QLoRA 4-bit quantization (NF4) keeps weight memory at ~15GB
+- ~~Qwen3-30B-A3B (30B total params) requires A100 40GB for QLoRA training~~ — **Phase 4 pivot eliminates this risk**
+- Qwen3-14B on A10G 24GB: OOM risk low → Mitigation: Gradient checkpointing, batch_size=2, grad_accum=8, max_seq_length=8192, fallback to A100-40GB
 - Training instability (loss divergence, NaNs) → Mitigation: Start with conservative hyperparameters (lr=2e-5, rank=16, warmup=10%), log all metrics to W&B for rapid diagnosis
 - Modal job timeout or interruption → Mitigation: Implement checkpoint resume (4.8), use Modal's checkpointing volumes
 
 **Definition of Done:**
-- [ ] Training completes without OOM on selected model within Modal budget (A100 40GB for 30B; A10G 24GB for 14B)
+- [ ] Training completes without OOM on Qwen3-14B within Modal budget (A10G 24GB)
 - [ ] W&B shows complete lineage: dataset artifact → training config → run → checkpoint → model registry entry
 - [ ] LoRA adapter checkpoint is loadable and produces valid outputs
 - [ ] Training curve (loss) is logged to W&B and shows convergence
 - [ ] All unit tests pass
-- [ ] **3-config comparison completed and winner selected via F2P on golden eval set**
+- [ ] **3-config 14B-optimized comparison completed and winner selected via F2P on golden eval set**
 
 **Acceptance Criteria:**
 1. `python -m training.qlora_train --config training_config.yaml --data-dir data/` runs to completion
 2. W&B run shows: loss curve, hyperparameters, dataset version, GPU utilization, estimated cost
 3. Checkpoint can be loaded with `AutoModel.from_pretrained()` + PEFT adapters
-4. Baseline evaluation completed: Qwen3-30B-A3B QLoRA fits on A100 40GB; Qwen3-14B fallback fits A10G 24GB
-5. **3-config comparison: three W&B runs exist, F2P on golden set determines Champion, results logged**
+4. Baseline evaluation completed: Qwen3-14B QLoRA fits on A10G 24GB (primary), A100-40GB (fallback)
+5. **3-config 14B-optimized comparison: three W&B runs exist, F2P on golden set determines Champion, results logged**
 
 **Expected repository state:** Trained LoRA adapter checkpoint in W&B + GCS, full training pipeline operational, baseline model evaluation report in W&B.
+
+> **PIVOT NOTE:** Phase 4 now uses ONLY qwen3-14b on A10G 24GB. qwen3-30b-a3b is excluded from Phase 4 execution due to cost (~$110-160 for 3-config on H100). The 30B config is retained in `config/models.yaml` for future phases but marked `phase4_excluded: true`. All 3 mandatory comparison variants are redesigned for 14B (baseline_14b, higher_rank_14b, higher_lr_14b). Cost reduction: ~90% ($10-17 total vs $110-160). Full details in `docs/planning/PHASE-4-QLoRA-TRAINING-PIPELINE.md`.
 
 ---
 

@@ -1,37 +1,39 @@
 # Phase 4 Implementation Plan: QLoRA Training Pipeline
 
 **Document Type:** Phase Plan (Level 4 in project hierarchy)
-**Status:** Draft v1.1 (post-audit fixes)
+**Status:** Draft v1.2 (post-pivot: 14B-only)
 **Parent Document:** `docs/planning/MASTER-PLAN.md`
 **Dependencies:** Phase 1 complete (Modal, W&B, GCS infra), Phase 3 complete (JSONL dataset splits in `data/`)
 
+> **PIVOT NOTE (v1.2):** Phase 4 now uses **ONLY qwen3-14b** on A10G 24GB. qwen3-30b-a3b is excluded from Phase 4 execution due to cost (~$110-160 for 3-config on H100). The 30B config is retained in `models.yaml` for future phases but marked `phase4_excluded: true`. All 3 mandatory comparison variants are redesigned for 14B (baseline_14b, higher_rank_14b, higher_lr_14b). Cost reduction: ~90% ($10-17 total vs $110-160).
+>
 > **Deviation Note:** This plan uses `training/` at repo root (matching Master Plan Appendix D), not `src/training/`. Existing `src/swe_qwen/modal_app.py` (Phase 1 skeleton) will be superseded by the modular pipeline; `modal_app.py.train_swe_qwen` serves as reference for smoke testing. See Notes section for full deviation log.
 
 ## Overview
-Build a complete QLoRA fine-tuning pipeline for Qwen3-30B-A3B (primary, Modal A100 40GB) and Qwen3-14B (fallback, Modal A10G 24GB) using 4-bit NF4 quantization. Includes model config registry, QLoRA factory, prompt templates, class-based trainer, Modal GPU dispatch, W&B checkpoint callbacks, hybrid resume, and 3-config mandatory comparison with F2P proxy evaluation.
+Build a complete QLoRA fine-tuning pipeline for **Qwen3-14B (primary, Modal A10G 24GB)** using 4-bit NF4 quantization. Includes model config registry, QLoRA factory, prompt templates, class-based trainer, Modal GPU dispatch, W&B checkpoint callbacks, hybrid resume, and **3-config mandatory 14B-optimized comparison** with F2P proxy evaluation.
 
-## Requirements (from MASTER-PLAN Phase 4 + Grilling Answers)
-- 4.1 Model config registry (models.yaml with GPU mapping) — Q1:C
-- 4.2 QLoRA config factory `build_qlora_config(variant)` — Q2:C
+## Requirements (from MASTER-PLAN Phase 4 + Grilling Answers + Pivot)
+- 4.1 Model config registry (models.yaml with GPU mapping) — Q1:C → **Updated: qwen3-14b primary, qwen3-30b-a3b retained but phase4_excluded**
+- 4.2 QLoRA config factory `build_qlora_config(variant, model_name)` — Q2:C → **Updated: 14B-optimized variants**
 - 4.3 Prompt engineering with Jinja2 + W&B Artifact versioning — Q3:A
 - 4.4 Class-based `QLoRATrainer` — Q4:B
-- 4.5 Modal train wrapper with dynamic GPU selection — Q5:C
+- 4.5 Modal train wrapper with dynamic GPU selection — Q5:C → **Updated: A10G 24GB primary**
 - 4.6 W&B checkpoint callback with artifact logging — Q6:B
 - 4.7 Hybrid resume (Modal volume → W&B artifact fallback) — Q7:C
 - 4.8 Pre-tokenized .arrow shards from Phase 3 tokenize.py — Q8:B
 - 4.9 Unit tests: config, trainer smoke (tiny model), full pipeline mock — Q10:C
 - 4.10 Baseline training (100 examples)
 - 4.11 Full training
-- 4.12 **MANDATORY**: 3-config QLoRA comparison → F2P on golden → Champion
+- 4.12 **MANDATORY**: 3-config 14B-optimized QLoRA comparison → F2P on golden → Champion
 
 ## Architecture Changes
 
 ### New Files
 | File | Purpose |
 |------|---------|
-| `config/models.yaml` | Model registry: name, hf_id, active_params, total_params, gpu_mapping, quantization |
-| `config/qlora_variants.yaml` | 3 mandatory variants: baseline, higher_rank, higher_lr |
-| `training/qlora_config.py` | Factory `build_qlora_config(variant)` → `(LoraConfig, TrainingArguments)` |
+| `config/models.yaml` | Model registry: name, hf_id, active_params, total_params, gpu_mapping, quantization (**updated: qwen3-14b primary, qwen3-30b-a3b phase4_excluded**) |
+| `config/qlora_variants.yaml` | **3 mandatory 14B-optimized variants: baseline_14b, higher_rank_14b, higher_lr_14b** (deprecated 30B variants retained in file) |
+| `training/qlora_config.py` | Factory `build_qlora_config(variant, model_name)` → `(LoraConfig, TrainingArguments)` |
 | `training/prompts/` | Jinja2 templates: `system.j2`, `user.j2`, `assistant.j2`, `chat.j2` |
 | `training/prompt_loader.py` | Load/render templates, log to W&B Artifacts |
 | `training/qlora_trainer.py` | Class `QLoRATrainer`: model, data, tokenizer, callbacks, train(), resume() |
@@ -39,12 +41,12 @@ Build a complete QLoRA fine-tuning pipeline for Qwen3-30B-A3B (primary, Modal A1
 | `training/callbacks.py` | `WandbCheckpointCallback` + `WandbLoggingCallback` |
 | `training/resume.py` | Hybrid resume logic: local volume → W&B artifact |
 | `data_engineering/tokenize.py` | **NEW**: Tokenize Phase 3 JSONL → .arrow shards (Phase 3 outputs JSONL) |
-| `training/modal_train.py` | Modal entrypoint: dynamic GPU from models.yaml, variant param |
+| `training/modal_train.py` | Modal entrypoint: dynamic GPU from models.yaml, variant param (**A10G 24GB primary**) |
 | `training/conftest.py` | Shared fixtures: temp dirs, mock config, sample tokenized data |
 | `tests/test_qlora_config.py` | Config factory tests |
 | `tests/test_qlora_trainer_smoke.py` | Smoke test with tiny model (e.g., TinyLlama) |
 | `tests/test_training_pipeline_mock.py` | Full pipeline mock test |
-| `scripts/run_3config_comparison.py` | Orchestrates 3 variants → F2P eval → champion selection |
+| `scripts/run_3config_comparison.py` | Orchestrates 3 14B variants → F2P eval → champion selection |
 
 ### Modified Files
 | File | Change |
@@ -74,21 +76,10 @@ Build a complete QLoRA fine-tuning pipeline for Qwen3-30B-A3B (primary, Modal A1
 
 #### Step 1: Create `config/models.yaml`
 - **File**: `config/models.yaml`
-- **Action**: Define model registry with GPU mapping
+- **Action**: Define model registry with GPU mapping (**PIVOT: qwen3-14b primary, qwen3-30b-a3b phase4_excluded**)
 - **Schema**:
 ```yaml
 models:
-  qwen3-30b-a3b:
-    hf_id: "Qwen/Qwen3-30B-A3B"
-    active_params: 3_000_000_000
-    total_params: 30_000_000_000
-    quantization: "nf4"
-    compute_dtype: "bfloat16"
-    gpu_mapping:
-      primary: "a100-40gb"      # Modal GPU type
-      fallback: "a10g-24gb"
-    context_window: 32768
-    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   qwen3-14b:
     hf_id: "Qwen/Qwen3-14B"
     active_params: 14_000_000_000
@@ -99,30 +90,59 @@ models:
       primary: "a10g-24gb"
       fallback: "a100-40gb"
     context_window: 32768
-    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+
+  # Retained for future phases (Phase 5+ re-evaluation, Phase 6+ serving)
+  # NOT used in Phase 4 training pipeline
+  qwen3-30b-a3b:
+    hf_id: "Qwen/Qwen3-30B-A3B"
+    active_params: 3_000_000_000
+    total_params: 30_000_000_000
+    quantization: "nf4"
+    compute_dtype: "bfloat16"
+    gpu_mapping:
+      primary: "h100-80gb"
+      fallback: "a100-80gb"
+    context_window: 32768
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+    phase4_excluded: true
 ```
 - **Dependencies**: None
 - **Risk**: Low — static config
 
 #### Step 2: Create `config/qlora_variants.yaml`
 - **File**: `config/qlora_variants.yaml`
-- **Action**: Define 3 mandatory comparison variants
+- **Action**: Define 3 mandatory 14B-optimized comparison variants (**PIVOT: baseline_14b, higher_rank_14b, higher_lr_14b**)
 - **Schema**:
 ```yaml
 variants:
-  baseline:
+  baseline_14b:
     lora:
       r: 16
       lora_alpha: 32
       lora_dropout: 0.05
-      target_modules: null  # resolved from model config
+      target_modules: null  # resolved from model config at runtime
       bias: "none"
       task_type: "CAUSAL_LM"
     training:
       learning_rate: 2.0e-5
       num_train_epochs: 3
-      per_device_train_batch_size: 1
-      gradient_accumulation_steps: 16
+      per_device_train_batch_size: 2
+      gradient_accumulation_steps: 8
       warmup_ratio: 0.03
       lr_scheduler_type: "cosine"
       weight_decay: 0.01
@@ -131,7 +151,9 @@ variants:
       bf16: true
       optim: "paged_adamw_8bit"
       logging_steps: 10
+      save_strategy: "steps"
       save_steps: 500
+      eval_strategy: "steps"
       eval_steps: 500
       save_total_limit: 3
       load_best_model_at_end: true
@@ -142,25 +164,48 @@ variants:
       gradient_checkpointing: true
       dataloader_num_workers: 2
       remove_unused_columns: false
+      packing: true
+      max_seq_length: 8192
+      dataloader_pin_memory: false
 
-  higher_rank:
+  higher_rank_14b:
     lora:
       r: 32
       lora_alpha: 64
       lora_dropout: 0.05
+      # target_modules, bias, task_type inherit from baseline_14b
     training:
       learning_rate: 2.0e-5
-      # inherit rest from baseline
+      per_device_train_batch_size: 1
+      gradient_accumulation_steps: 16
+      # all other training args inherit from baseline_14b
 
-  higher_lr:
+  higher_lr_14b:
     lora:
       r: 16
       lora_alpha: 32
       lora_dropout: 0.05
+      # target_modules, bias, task_type inherit from baseline_14b
     training:
       learning_rate: 5.0e-5
-      # inherit rest from baseline
+      # all other training args inherit from baseline_14b
+
+  efficient_14b:
+    lora:
+      r: 8
+      lora_alpha: 16
+      lora_dropout: 0.05
+      # target_modules, bias, task_type inherit from baseline_14b
+    training:
+      learning_rate: 5.0e-5
+      per_device_train_batch_size: 2
+      gradient_accumulation_steps: 8
+      max_seq_length: 8192
+      num_train_epochs: 2
+      # inherits: warmup_ratio, lr_scheduler_type, weight_decay, max_grad_norm, bf16, optim, logging_steps, save_strategy, save_steps, eval_strategy, eval_steps, save_total_limit, load_best_model_at_end, metric_for_best_model, greater_is_better, report_to, ddp_find_unused_parameters, gradient_checkpointing, dataloader_num_workers, remove_unused_columns, packing, dataloader_pin_memory
 ```
+- **Dependencies**: Step 1 (target_modules reference)
+- **Risk**: Low — static config
 - **Dependencies**: Step 1 (target_modules reference)
 - **Risk**: Low — static config
 
@@ -300,8 +345,8 @@ class QLoRATrainer:
     secrets=[modal.Secret.from_name("wandb-secret"), modal.Secret.from_name("hf-secret")],
 )
 def train_qlora(
-    model_name: str = "qwen3-30b-a3b",
-    variant: str = "baseline",
+    model_name: str = "qwen3-14b",
+    variant: str = "baseline_14b",
     data_volume: str = "training-data",
     run_name: str | None = None,
     resume: str | None = None,
@@ -328,9 +373,9 @@ def train_qlora(
 
 #### Step 11: `tests/test_qlora_config.py`
 - **Tests**:
-  - `test_build_baseline_config()` — returns correct LoraConfig + TrainingArguments
-  - `test_build_higher_rank_config()` — r=32, alpha=64
-  - `test_build_higher_lr_config()` — lr=5e-5
+  - `test_build_baseline_14b_config()` — returns correct LoraConfig + TrainingArguments
+  - `test_build_higher_rank_14b_config()` — r=32, alpha=64
+  - `test_build_higher_lr_14b_config()` — lr=5e-5
   - `test_invalid_variant_raises()`
   - `test_invalid_model_raises()`
   - `test_target_modules_merged_from_model_config()`
@@ -364,27 +409,7 @@ def train_qlora(
 
 ---
 
-### Phase 4H: 3-Config Comparison & Champion Selection (Task 4.12)
-
-#### Step 14: Create `scripts/run_3config_comparison.py`
-- **File**: `scripts/run_3config_comparison.py`
-- **Action**: Orchestration script
-- **Flow**:
-  1. For each variant in `[baseline, higher_rank, higher_lr]`:
-     - Launch `modal_train.py` via `modal.run()` or subprocess
-     - Wait for completion, capture W&B run ID
-  2. For each completed run:
-     - Download adapter from W&B artifact
-     - Run F2P evaluation on `golden.jsonl` (Phase 3 proxy: test file overlap + fix keywords)
-     - Compute F2P score
-  3. Select champion: highest F2P
-  4. Promote champion adapter to W&B Registry as `champion` alias
-  5. Output summary JSON with scores, winner
-- **Dependencies**: Steps 7, 10, Phase 3 `golden.jsonl`, `evaluation/f2p_proxy.py` (new or reuse Phase 3)
-- **Risk**: High — orchestration, multiple Modal runs, evaluation logic
-- **Post-Phase-5 Re-evaluation**: Champion selected by proxy F2P must be re-evaluated with full Phase 5 evaluation harness (`evaluation/harness.py`). Step 14 champion promotion to W&B Registry alias `champion` is provisional until Phase 5 validates. See Notes.
-- **Sequencing Note**: Master Plan 4.12 assigns golden F2P evaluation to Phase 5; proxy F2P here enables Phase 4 champion selection. Full F2P re-evaluation in Phase 5 supersedes proxy results.
-
+### Phase 4H: 3-Config Comparison & Champion Selection (Task 4.12)nn#### Step 14: Create `scripts/run_3config_comparison.py`n- **File**: `scripts/run_3config_comparison.py`n- **Action**: Orchestration script (**PIVOT: 14B-optimized variants**)n- **Flow**:n  1. For each variant in `[baseline_14b, higher_rank_14b, higher_lr_14b]`:n     - Launch `modal_train.py` via `modal.run()` or subprocessn     - Wait for completion, capture W&B run IDn  2. For each completed run:n     - Download adapter from W&B artifactn     - Run F2P evaluation on `golden.jsonl` (Phase 3 proxy: test file overlap + fix keywords)n     - Compute F2P scoren  3. Select champion: highest F2Pn  4. Promote champion adapter to W&B Registry as `champion` aliasn  5. Output summary JSON with scores, winnern- **Dependencies**: Steps 7, 10, Phase 3 `golden.jsonl`, `evaluation/f2p_proxy.py` (new or reuse Phase 3)n- **Risk**: High u2014 orchestration, multiple Modal runs, evaluation logicn- **Post-Phase-5 Re-evaluation**: Champion selected by proxy F2P must be re-evaluated with full Phase 5 evaluation harness (`evaluation/harness.py`). Step 14 champion promotion to W&B Registry alias `champion` is provisional until Phase 5 validates. See Notes.n- **Sequencing Note**: Master Plan 4.12 assigns golden F2P evaluation to Phase 5; proxy F2P here enables Phase 4 champion selection. Full F2P re-evaluation in Phase 5 supersedes proxy results.
 ---
 
 ### Phase 4I: Training Execution (Tasks 4.10, 4.11)
@@ -430,12 +455,12 @@ python scripts/run_3config_comparison.py
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| OOM on A100 40GB with Qwen3-30B-A3B 4-bit | Medium | High | Gradient checkpointing, batch_size=1, grad_accum=16, fallback to A10G with Qwen3-14B |
+| OOM on A10G 24GB with Qwen3-14B 4-bit | Low | High | Gradient checkpointing, batch_size=2, grad_accum=8, max_seq_length=8192, fallback to A100-40GB |
 | PEFT + bitsandbytes version incompatibility | Low | High | Pin versions in pyproject.toml, test smoke first |
 | W&B artifact download fails on resume | Medium | Medium | Retry logic, local volume primary, clear error messages |
 | Modal GPU type string mapping incorrect | Low | High | Map in models.yaml, test GPU detection in modal_train.py |
 | F2P proxy doesn't correlate with real quality | Medium | Medium | Phase 5 adds real eval; champion selected in Step 14 is **provisional** — Phase 5 must re-evaluate and confirm |
-| Long training time (>24h per variant) | High | Medium | Checkpoint every 500 steps, resume support, early stopping on eval_loss plateau |
+| Long training time (>8h per variant) | Medium | Medium | Checkpoint every 500 steps, resume support, early stopping on eval_loss plateau |
 
 ---
 
