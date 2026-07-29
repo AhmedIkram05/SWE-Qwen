@@ -52,7 +52,7 @@ class TestVariantConfig:
         assert cfg["lora"]["lora_alpha"] == 32
         assert cfg["lora"]["lora_dropout"] == 0.0
         assert cfg["training"]["learning_rate"] == 2.0e-5
-        assert cfg["training"]["num_train_epochs"] == 3
+        assert cfg["training"]["num_train_epochs"] == 1
         assert cfg["training"]["bf16"] is True
         assert cfg["training"]["gradient_checkpointing"] is True
 
@@ -65,7 +65,7 @@ class TestVariantConfig:
         assert cfg["lora"]["lora_dropout"] == 0.0
         assert cfg["lora"]["bias"] == "none"
         assert cfg["training"]["learning_rate"] == 2.0e-5
-        assert cfg["training"]["num_train_epochs"] == 3
+        assert cfg["training"]["num_train_epochs"] == 1
         assert cfg["training"]["per_device_train_batch_size"] == 1
         assert cfg["training"]["gradient_accumulation_steps"] == 16
 
@@ -74,7 +74,7 @@ class TestVariantConfig:
         cfg = _get_variant_config("higher_lr_14b")
         assert cfg["lora"]["r"] == 16  # same as baseline_14b
         assert cfg["training"]["learning_rate"] == 5.0e-5  # overridden
-        assert cfg["training"]["num_train_epochs"] == 3  # inherited
+        assert cfg["training"]["num_train_epochs"] == 1  # inherited
 
     def test_efficient_14b_config(self):
         """Efficient variant for cheap iteration."""
@@ -116,7 +116,7 @@ class TestBuildQLoraConfig:
         assert len(lora_config.target_modules or []) == 7
 
         assert training_args.learning_rate == 2.0e-5
-        assert training_args.num_train_epochs == 3
+        assert training_args.num_train_epochs == 1
         assert training_args.bf16 is True
         assert training_args.fp16 is False
         assert training_args.gradient_checkpointing is True

@@ -15,7 +15,7 @@ variants:
       task_type: "CAUSAL_LM"
     training:
       learning_rate: 2.0e-5
-      num_train_epochs: 3
+      num_train_epochs: 1        # 1 epoch sufficient for hyperparam comparison; 3 would be ~60h
       per_device_train_batch_size: 2
       gradient_accumulation_steps: 8
       warmup_ratio: 0.03
