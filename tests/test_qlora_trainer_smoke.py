@@ -25,14 +25,14 @@ class TestQLoRATrainerSmoke:
         from training.qlora_trainer import QLoRATrainer
 
         trainer = QLoRATrainer(
-            model_name="qwen3-30b-a3b",
-            variant="baseline",
+            model_name="qwen3-14b",
+            variant="baseline_14b",
             data_dir="/tmp/nonexistent",  # won't be accessed in init
             output_dir="/tmp/qlora-smoke",
             wandb_project="swe-qwen-test",
         )
-        assert trainer.model_name == "qwen3-30b-a3b"
-        assert trainer.variant == "baseline"
+        assert trainer.model_name == "qwen3-14b"
+        assert trainer.variant == "baseline_14b"
         assert trainer.lora_config is None  # not yet set up
 
     def test_setup_config(self):
@@ -40,8 +40,8 @@ class TestQLoRATrainerSmoke:
         from training.qlora_trainer import QLoRATrainer
 
         trainer = QLoRATrainer(
-            model_name="qwen3-30b-a3b",
-            variant="baseline",
+            model_name="qwen3-14b",
+            variant="baseline_14b",
             data_dir="/tmp/nonexistent",
             output_dir="/tmp/qlora-smoke",
         )
@@ -57,10 +57,11 @@ class TestQLoRATrainerSmoke:
 
         # Use tiny model for fast test
         trainer = QLoRATrainer(
-            model_name="qwen3-30b-a3b",
-            variant="baseline",
+            model_name="qwen3-14b",
+            variant="baseline_14b",
             data_dir="/tmp/nonexistent",
             output_dir="/tmp/qlora-smoke",
+            use_flash_attn=False,
         )
         trainer._setup_config()
 
@@ -99,11 +100,12 @@ class TestQLoRATrainerSmoke:
         with tempfile.TemporaryDirectory() as tmpdir:
             # Setup trainer
             trainer = QLoRATrainer(
-                model_name="qwen3-30b-a3b",
-                variant="baseline",
+                model_name="qwen3-14b",
+                variant="baseline_14b",
                 data_dir=tmpdir,
                 output_dir=str(Path(tmpdir) / "output"),
                 wandb_project="swe-qwen-test",
+                use_flash_attn=False,
             )
             trainer._setup_config()
 

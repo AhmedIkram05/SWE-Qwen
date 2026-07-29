@@ -225,8 +225,8 @@ class TestQLoRAConfig:
         from training.qlora_train import parse_args
 
         args = parse_args([])
-        assert args.model_name == "qwen3-30b-a3b"
-        assert args.variant == "baseline"
+        assert args.model_name == "qwen3-14b"
+        assert args.variant == "baseline_14b"
         assert args.data_dir == "data/tokenized"
         assert args.output_dir == "/tmp/qlora-output"
         assert args.wandb_project == "swe-qwen"
