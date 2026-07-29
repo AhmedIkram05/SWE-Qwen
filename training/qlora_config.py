@@ -196,3 +196,40 @@ def list_variants() -> list[str]:
     """Return all registered variant names."""
     data = _load_yaml(_VARIANTS_PATH)
     return list(data.get("variants", {}).keys())
+
+
+def build_model_and_peft(
+    variant: str,
+    model_name: str = "qwen3-14b",
+    max_seq_length: int = 8192,
+    use_flash_attn: bool = True,
+) -> tuple:
+    """Build (model, tokenizer) using Unsloth or fallback.
+
+    Delegates to `training.unsloth_factory.build_model_and_peft`.
+    Uses model config from models.yaml and variant config from qlora_variants.yaml.
+
+    Args:
+        variant: Key from qlora_variants.yaml
+        model_name: Key from models.yaml
+        max_seq_length: Max sequence length (overrides variant config)
+        use_flash_attn: Whether to use flash attention
+
+    Returns:
+        Tuple of (model, tokenizer) ready for SFTTrainer
+    """
+    from training.unsloth_factory import build_model_and_peft as _build
+
+    model_cfg = _get_model_config(model_name)
+    var_cfg = _get_variant_config(variant)
+
+    # Override max_seq_length from variant if provided
+    if "max_seq_length" in var_cfg.get("training", {}):
+        max_seq_length = var_cfg["training"]["max_seq_length"]
+
+    return _build(
+        model_cfg=model_cfg,
+        variant_cfg=var_cfg,
+        max_seq_length=max_seq_length,
+        use_flash_attn=use_flash_attn,
+    )

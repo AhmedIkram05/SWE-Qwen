@@ -50,6 +50,9 @@ class QLoRATrainer:
         hf_id: Direct HuggingFace model ID override. When set, skips models.yaml
                lookup and uses this as the model source. Useful for local testing
                with tiny models.
+        model: Pre-built model (e.g., from Unsloth factory). If provided,
+            skips internal model loading.
+        tokenizer: Pre-built tokenizer. If provided, skips internal tokenizer loading.
     """
 
     def __init__(  # noqa: PLR0913, PLR0917
@@ -66,6 +69,8 @@ class QLoRATrainer:
         prompt_template_dir: str | None = None,
         gpu_type: str | None = None,
         hf_id: str | None = None,
+        model: Any | None = None,
+        tokenizer: PreTrainedTokenizer | None = None,
     ):
         self.model_name = model_name
         self.variant = variant
@@ -79,6 +84,10 @@ class QLoRATrainer:
         self.use_flash_attn = use_flash_attn
         self.prompt_template_dir = prompt_template_dir
         self.gpu_type = gpu_type
+
+        # Pre-built model/tokenizer (e.g., from Unsloth factory)
+        self._prebuilt_model = model
+        self._prebuilt_tokenizer = tokenizer
 
         # Set early — resolved below
         self.model_cfg: dict[str, Any] = {}
@@ -168,7 +177,24 @@ class QLoRATrainer:
         logger.info("W&B run initialized: %s", wandb.run.name if wandb.run else "N/A")
 
     def _setup_model_and_tokenizer(self) -> None:
-        """Load model, apply PEFT LoRA. Uses 4-bit quantization on CUDA, full precision on CPU."""
+        """Load model, apply PEFT LoRA. Uses 4-bit quantization on CUDA, full precision on CPU.
+
+        If pre-built model/tokenizer provided (e.g., from Unsloth factory), uses those instead.
+        """
+        # Use pre-built model/tokenizer if provided (Unsloth path)
+        if self._prebuilt_model is not None and self._prebuilt_tokenizer is not None:
+            self.model = self._prebuilt_model
+            self.tokenizer = self._prebuilt_tokenizer
+            logger.info("Using pre-built model and tokenizer (Unsloth)")
+            # Ensure pad_token is set
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.padding_side = "right"
+            self.model.print_trainable_parameters()
+            logger.info("Model and tokenizer loaded successfully")
+            return
+
+        # Standard path (bitsandbytes + PEFT)
         model_cfg = self.model_cfg
         hf_id: str = model_cfg["hf_id"]
         compute_dtype = model_cfg.get("compute_dtype", "bfloat16")
