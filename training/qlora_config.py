@@ -8,12 +8,15 @@ with model-level defaults, and returns instantiated ``LoraConfig`` /
 from __future__ import annotations
 
 import copy
+import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
 from peft import LoraConfig
 from trl import SFTConfig
+
+logger = logging.getLogger(__name__)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -203,6 +206,7 @@ def build_model_and_peft(
     model_name: str = "qwen3-14b",
     max_seq_length: int = 8192,
     use_flash_attn: bool = True,
+    gpu_type: str | None = None,
 ) -> tuple:
     """Build (model, tokenizer) using Unsloth or fallback.
 
@@ -214,6 +218,8 @@ def build_model_and_peft(
         model_name: Key from models.yaml
         max_seq_length: Max sequence length (overrides variant config)
         use_flash_attn: Whether to use flash attention
+        gpu_type: Modal GPU spec (e.g. ``"A10G:1"``). When provided, applies
+                  GPU-specific memory overrides to max_seq_length.
 
     Returns:
         Tuple of (model, tokenizer) ready for SFTTrainer
@@ -226,6 +232,17 @@ def build_model_and_peft(
     # Override max_seq_length from variant if provided
     if "max_seq_length" in var_cfg.get("training", {}):
         max_seq_length = var_cfg["training"]["max_seq_length"]
+
+    # Apply GPU-specific overrides (same as build_qlora_config does for SFTConfig)
+    if gpu_type and gpu_type in GPU_MEMORY_OVERRIDES:
+        gpu_max_seq = GPU_MEMORY_OVERRIDES[gpu_type].get("max_seq_length")
+        if gpu_max_seq is not None:
+            max_seq_length = gpu_max_seq
+            logger.info(
+                "Overriding max_seq_length to %d for GPU %s",
+                max_seq_length,
+                gpu_type,
+            )
 
     return _build(
         model_cfg=model_cfg,
