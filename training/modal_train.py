@@ -11,8 +11,11 @@ Env vars:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
+import urllib.request
 from pathlib import Path
 
 import modal
@@ -31,6 +34,59 @@ except ImportError:
 from training.qlora_config import resolve_gpu_type
 
 logger = logging.getLogger(__name__)
+
+# ── GCS constants ─────────────────────────────────────────────────────────────
+# The bucket is publicly readable (allUsers with objectViewer).
+# We download data at runtime via the public JSON API instead of CloudBucketMount,
+# because GCS CloudBucketMount requires HMAC keys which are blocked by GCP org
+# policy (iam.disableServiceAccountKeyCreation).
+
+_GCS_BUCKET = "swe-qwen-datasets"
+_GCS_TOKENIZED_PREFIX = "tokenized/18e63eac42bb/"
+
+
+def _download_gcs_public(prefix: str, dst_dir: str) -> str:
+    """Download all objects under ``prefix`` from the public GCS bucket to ``dst_dir``.
+
+    Uses the public JSON API — no auth required because the bucket has
+    ``allUsers`` with ``roles/storage.objectViewer``.
+    """
+    # List objects via public JSON API
+    list_url = f"https://www.googleapis.com/storage/v1/b/{_GCS_BUCKET}/o?prefix={prefix}"
+    logger.info("Downloading tokenized data from GCS: %s", list_url)
+
+    with urllib.request.urlopen(list_url) as resp:
+        payload = json.loads(resp.read().decode())
+
+    items = payload.get("items", [])
+    if not items:
+        raise RuntimeError(
+            f"No objects found at gs://{_GCS_BUCKET}/{prefix} — "
+            "check that the bucket and prefix are correct."
+        )
+
+    dst_root = Path(dst_dir)
+    dst_root.mkdir(parents=True, exist_ok=True)
+
+    for obj in items:
+        name: str = obj["name"]  # e.g. "tokenized/18e63eac42bb/train/data-00000-of-00001.arrow"
+        media_link: str = obj["mediaLink"]  # public download URL
+
+        # Strip the prefix to get the relative path under dst_dir
+        rel_path = name[len(prefix) :].lstrip("/")
+        if not rel_path:
+            continue
+        dst_file = dst_root / rel_path
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.debug("Downloading %s -> %s", name, dst_file)
+        with urllib.request.urlopen(media_link) as src, dst_file.open("wb") as f:
+            shutil.copyfileobj(src, f)
+
+    actual_data_dir = str(dst_root)
+    logger.info("Downloaded %d files from GCS to %s", len(items), actual_data_dir)
+    return actual_data_dir
+
 
 # ── Repo-relative mounts (via Image.add_local_dir) ──────────────────────────
 
@@ -52,13 +108,7 @@ training_image = (
         "curl",
         "build-essential",
     )
-    .pip_install("packaging>=24.0")  # required by flash-attn setup.py
-    # Install flash-attn from a pre-built wheel (avoids nvcc requirement at build time)
-    # Uses torch 2.6+cu12 wheel — ABI-compatible with our torch 2.11+cu126 at runtime
-    .pip_install(
-        "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/"
-        "flash_attn-2.8.3.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
-    )
+    # Install torch FIRST — must be before xformers/FA so they build/link against it
     .pip_install(
         "torch==2.11.0",
         index_url="https://download.pytorch.org/whl/cu126",
@@ -77,15 +127,18 @@ training_image = (
         "pyyaml>=6.0.1",
         "tqdm>=4.66.0",
         "rich>=13.7.0",
+        "packaging>=24.0",
+        "xformers>=0.0.29",  # for Unsloth fallback attention speedup
     )
     # Unsloth for 2-5x speedup, 60-74% VRAM reduction (installed in Modal image only)
+    # Must be after torch so its deps resolve against the correct CUDA runtime
     .pip_install("unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git")
     # Critical: reduce fragmentation for large models on limited VRAM (A10G)
     .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
-    # Enable Unsloth by default on H100/A100 ( Modal GPU types)
+    # Enable Unsloth by default
     .env({"UNSLOTH_ENABLED": "1"})
-    # Force rebuild v6 - fixes eos_token (<EOS_TOKEN> -> <|endoftext|>), import order
-    .run_commands("echo 'cache-bust-v6'")
+    # Force rebuild v7 - remove broken FA2 wheel for torch 2.6, add xformers
+    .run_commands("echo 'cache-bust-v7'")
     # Copy local source into the image — must be LAST
     .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
     .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)
@@ -93,13 +146,8 @@ training_image = (
 
 # ── Modal volumes ─────────────────────────────────────────────────────────────
 
-# GCS bucket for training data (tokenized .arrow shards) — read-only mount
-# Streams directly from GCS, no local volume storage cost
-gcs_data = modal.CloudBucketMount(
-    bucket_name="swe-qwen-datasets",
-    key_prefix="tokenized/",  # must end with /
-    read_only=True,
-)
+# Tokenized data is downloaded from the public GCS bucket at function start
+# (see _download_gcs_public) — no CloudBucketMount needed.
 
 # Persistent volume for model checkpoints
 models_volume = modal.Volume.from_name("swe-qwen-models", create_if_missing=True)
@@ -115,7 +163,6 @@ models_volume = modal.Volume.from_name("swe-qwen-models", create_if_missing=True
         modal.Secret.from_name("hf-secret"),
     ],
     volumes={
-        "/data": gcs_data,
         "/models": models_volume,
     },
     gpu="A10G:1",  # 14B model fits on A10G 24GB
@@ -138,13 +185,18 @@ def train_qlora(  # noqa: PLR0913, PLR0917
     wandb_entity: str | None = None,
     gpu_type: str | None = None,
     use_unsloth: bool | None = None,
+    max_train_samples: int | None = None,
 ):
     """Run QLoRA training on Modal.
 
+    Tokenized data is downloaded from the public GCS bucket to
+    ``/tmp/data/tokenized`` at function start — no GCS credentials needed
+    since the bucket is publicly readable.
+
     Args:
         model_name: Key from ``models.yaml`` (e.g. ``"qwen3-14b"``).
-        variant: Key from ``qlora_variants.yaml`` (e.g. ``"baseline_14b"``).
-        data_dir: Path within volume to tokenized data.
+        variant: Key from ``qlora_variants.yaml`` (e.g. ``"efficient_14b"``).
+        data_dir: Ignored — tokenized data is always downloaded from GCS.
         output_dir: Path within volume for checkpoints.
         run_name: W&B run name (auto-generated if ``None``).
         resume: Checkpoint path or W&B artifact ref for resume.
@@ -153,6 +205,8 @@ def train_qlora(  # noqa: PLR0913, PLR0917
         gpu_type: Modal GPU spec (e.g. ``"A10G:1"``, ``"A100:1"``, ``"H100:1"``).
                   If None, auto-resolved from model config.
         use_unsloth: Enable Unsloth acceleration (default: from UNSLOTH_ENABLED env var).
+        max_train_samples: Subsample train dataset to this many rows (for quick debugging).
+                           If None, uses all data.
 
     Returns:
         Dict with training results.
@@ -164,6 +218,12 @@ def train_qlora(  # noqa: PLR0913, PLR0917
             "WANDB_API_KEY environment variable not set. "
             "Ensure 'wandb-secret' Modal secret is mounted with WANDB_API_KEY."
         )
+
+    # ── Download tokenized data from public GCS ──────────────────────
+    # The bucket is publicly readable so no credentials needed.
+    # We use stdlib urllib + shutil to avoid adding google-cloud-storage dep.
+    _download_dir = "/tmp/data"
+    data_dir = _download_gcs_public(_GCS_TOKENIZED_PREFIX, _download_dir)
 
     from training.qlora_config import build_model_and_peft, resolve_gpu_type
     from training.qlora_trainer import QLoRATrainer
@@ -201,6 +261,7 @@ def train_qlora(  # noqa: PLR0913, PLR0917
         gpu_type=gpu_type,
         model=model,
         tokenizer=tokenizer,
+        max_train_samples=max_train_samples,
     )
 
     metrics = trainer.train()
@@ -251,6 +312,7 @@ def main(  # noqa: PLR0913, PLR0917
     resume: str | None = None,
     wandb_project: str = "swe-qwen",
     wandb_entity: str | None = None,
+    max_train_samples: int | None = None,
 ):
     """Launch QLoRA training locally (for testing with small models)."""
     print(f"Starting training: model={model_name}, variant={variant}")
@@ -272,6 +334,7 @@ def main(  # noqa: PLR0913, PLR0917
         run_name=run_name,
         resume_from_checkpoint=resume,
         use_flash_attn=False,  # no flash-attn on CPU
+        max_train_samples=max_train_samples,
     )
 
     result = trainer.train()

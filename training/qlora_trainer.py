@@ -71,11 +71,13 @@ class QLoRATrainer:
         hf_id: str | None = None,
         model: Any | None = None,
         tokenizer: PreTrainedTokenizer | None = None,
+        max_train_samples: int | None = None,
     ):
         self.model_name = model_name
         self.variant = variant
         self.hf_id = hf_id
         self.data_dir = Path(data_dir)
+        self.max_train_samples = max_train_samples
         self.output_dir = Path(output_dir)
         self.wandb_project = wandb_project
         self.wandb_entity = wandb_entity
@@ -262,6 +264,17 @@ class QLoRATrainer:
 
         self.train_dataset = dataset_dict.get("train")
         self.eval_dataset = dataset_dict.get("val") or dataset_dict.get("test")
+
+        # Subsample for quick debugging
+        if self.max_train_samples is not None and self.train_dataset is not None:
+            n = min(self.max_train_samples, len(self.train_dataset))
+            logger.info(
+                "Subsampling train dataset: %d -> %d (max_train_samples=%d)",
+                len(self.train_dataset),
+                n,
+                self.max_train_samples,
+            )
+            self.train_dataset = self.train_dataset.select(range(n))
 
         if self.train_dataset is None:
             raise ValueError(f"No 'train' split found in {self.data_dir}")
