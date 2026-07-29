@@ -46,8 +46,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--variants",
         nargs="+",
-        default=["baseline", "higher_rank", "higher_lr"],
-        help="Variants to compare (default: all 3)",
+        default=["baseline_14b", "higher_rank_14b", "higher_lr_14b"],
+        help="Variants to compare (default: all 3 mandatory 14B variants)",
     )
     p.add_argument(
         "--output",
@@ -91,11 +91,13 @@ def launch_modal_training(
 
     print(f"  Launching {variant} on Modal ...")
     # Modal .remote() call — blocks until completion
+    # Use A10G for 14B model (fits on 24GB VRAM)
     wandb_run_id = modal_entrypoint.remote(
-        model_name="qwen3-30b-a3b",
+        model_name="qwen3-14b",
         variant=variant,
-        data_dir=f"data/{run_id}",
+        data_dir="/data/tokenized",
         run_name=run_name,
+        gpu_type="A10G:1",
     )
     return wandb_run_id
 
