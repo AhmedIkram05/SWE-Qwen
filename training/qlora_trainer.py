@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -392,6 +393,8 @@ class QLoRATrainer:
             )
             artifact.add_dir(str(self.output_dir))
             wandb.log_artifact(artifact)
+            artifact.wait()
+            time.sleep(1)
             logger.info("Model artifact logged to W&B")
 
     def resume(self, checkpoint_path: str) -> dict[str, Any]:
