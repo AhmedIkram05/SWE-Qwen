@@ -20,7 +20,7 @@ classifiers = [
 dependencies = [
     # Core ML/AI
     "torch==2.11.0",
-    "transformers>=5.14.0",
+    "transformers>=5.5.0,<5.6.0",
     "peft>=0.19.0",
     "bitsandbytes>=0.49.0",
     "accelerate>=1.14.0",
@@ -67,7 +67,6 @@ dev = [
 ]
 training = [
     "deepspeed>=0.16.0",
-    "flash-attn>=2.7.0",
 ]
 eval = [
     "docker>=7.1.0",
