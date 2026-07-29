@@ -39,7 +39,15 @@ def _upload_jsonl(
     key = f"{prefix}/{name}.jsonl"
     blob = bucket.blob(key)
 
-    lines = [json.dumps(r.model_dump(), default=str) + "\n" for r in records]
+    def to_dict(r: Any) -> dict:
+        """Convert record to dict, handling both Pydantic models and dicts."""
+        if hasattr(r, "model_dump"):
+            return r.model_dump()
+        if hasattr(r, "dict"):
+            return r.dict()
+        return r
+
+    lines = [json.dumps(to_dict(r), default=str) + "\n" for r in records]
     content = "".join(lines)
 
     blob.upload_from_string(content, content_type="application/jsonl")
