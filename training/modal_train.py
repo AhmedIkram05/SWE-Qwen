@@ -109,7 +109,7 @@ def _get_gcs_data_mount() -> modal.CloudBucketMount:
     """Create GCS bucket mount - defined as function to avoid Modal dependency tracking issues."""
     return modal.CloudBucketMount(
         bucket_name="swe-qwen-datasets",
-        key_prefix="tokenized",
+        key_prefix="tokenized/",  # must end with /
         read_only=True,
     )
 
