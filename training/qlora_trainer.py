@@ -36,7 +36,7 @@ class QLoRATrainer:
     """End-to-end QLoRA trainer for SWE-Qwen.
 
     Args:
-        model_name: Key from ``models.yaml`` (e.g. ``"qwen3-30b-a3b"``).
+        model_name: Key from ``models.yaml`` (e.g. ``"qwen3-14b"``).
         variant: Key from ``qlora_variants.yaml`` (e.g. ``"baseline"``).
         data_dir: Path to tokenized ``.arrow`` shards (from ``tokenize.py``).
         output_dir: Local directory for checkpoints (Modal volume mount point).
@@ -46,12 +46,16 @@ class QLoRATrainer:
         resume_from_checkpoint: Path or W&B artifact ref for resume.
         use_flash_attn: Enable Flash Attention 2.
         prompt_template_dir: Override prompt template directory.
+        gpu_type: GPU identifier for training (e.g. ``"A10G:1"``).
+        hf_id: Direct HuggingFace model ID override. When set, skips models.yaml
+               lookup and uses this as the model source. Useful for local testing
+               with tiny models.
     """
 
     def __init__(  # noqa: PLR0913, PLR0917
         self,
-        model_name: str = "qwen3-30b-a3b",
-        variant: str = "baseline",
+        model_name: str = "qwen3-14b",
+        variant: str = "baseline_14b",
         data_dir: str = "data/tokenized",
         output_dir: str = "/tmp/qlora-output",
         wandb_project: str = "swe-qwen",
@@ -60,9 +64,12 @@ class QLoRATrainer:
         resume_from_checkpoint: str | None = None,
         use_flash_attn: bool = True,
         prompt_template_dir: str | None = None,
+        gpu_type: str | None = None,
+        hf_id: str | None = None,
     ):
         self.model_name = model_name
         self.variant = variant
+        self.hf_id = hf_id
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
         self.wandb_project = wandb_project
@@ -71,6 +78,7 @@ class QLoRATrainer:
         self.resume_from_checkpoint = resume_from_checkpoint
         self.use_flash_attn = use_flash_attn
         self.prompt_template_dir = prompt_template_dir
+        self.gpu_type = gpu_type
 
         # Set early — resolved below
         self.model_cfg: dict[str, Any] = {}
@@ -95,12 +103,25 @@ class QLoRATrainer:
 
     def _setup_config(self) -> None:
         """Load model config and build QLoRA config."""
-        self.model_cfg = _get_model_config(self.model_name)
+        # Skip if config already set externally (e.g., by modal_train.py with GPU overrides)
+        if self.lora_config is not None and self.training_args is not None:
+            logger.info("Config already initialized externally, skipping rebuild")
+            # Still need model_cfg for other setup methods
+            self.model_cfg = _get_model_config(self.model_name)
+            return
+
+        # Build model_cfg — use hf_id override if provided (local testing with tiny models)
+        if self.hf_id is not None:
+            self.model_cfg = {"hf_id": self.hf_id}
+        else:
+            self.model_cfg = _get_model_config(self.model_name)
+
         self.lora_config, self.training_args = build_qlora_config(
             variant=self.variant,
             model_name=self.model_name,
             output_dir=str(self.output_dir),
             run_name=self.run_name,
+            gpu_type=self.gpu_type,
         )
         logger.info(
             "Config loaded: model=%s, variant=%s, lora_r=%d",
@@ -147,30 +168,42 @@ class QLoRATrainer:
         logger.info("W&B run initialized: %s", wandb.run.name if wandb.run else "N/A")
 
     def _setup_model_and_tokenizer(self) -> None:
-        """Load 4-bit model, apply PEFT LoRA."""
+        """Load model, apply PEFT LoRA. Uses 4-bit quantization on CUDA, full precision on CPU."""
         model_cfg = self.model_cfg
         hf_id: str = model_cfg["hf_id"]
         compute_dtype = model_cfg.get("compute_dtype", "bfloat16")
         torch_dtype = torch.bfloat16 if compute_dtype == "bfloat16" else torch.float16
 
-        # Quantization config (4-bit NF4)
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch_dtype,
-            bnb_4bit_use_double_quant=True,
-        )
+        # Detect CUDA availability — quantization only works on NVIDIA GPUs
+        use_cuda = torch.cuda.is_available()
 
-        # Use SDPA attention — PyTorch 2.11 has flash-attn built into
-        # scaled_dot_product_attention; avoids transformers v5 init-time
-        # validation that fails when the model is still on CPU.
+        if use_cuda:
+            # Quantization config (4-bit FP4 — NF4 causes CUDA illegal memory access
+            # on A10G with Qwen3-14B, a known bitsandbytes issue with MoE-like
+            # architectures. FP4 trades ~1% perplexity for full stability.)
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="fp4",
+                bnb_4bit_compute_dtype=torch_dtype,
+                bnb_4bit_use_double_quant=False,
+            )
+            device_map = "auto"
+            logger.info("Loading model %s with 4-bit FP4 (CUDA)...", hf_id)
+        else:
+            # CPU/MPS: no quantization, full precision
+            bnb_config = None
+            device_map = None
+            logger.info("Loading model %s in full precision (CPU/MPS)...", hf_id)
+
+        # SDPA — PyTorch native. flash-attn 2 wheel is built for torch 2.6 but
+        # we run torch 2.11+cu126; the ABI mismatch makes it non-callable.
+        # Keep flash-attn as a future optimization when a compatible wheel exists.
         attn_impl = "sdpa" if self.use_flash_attn else "eager"
 
-        logger.info("Loading model %s with 4-bit NF4 (attn=%s)...", hf_id, attn_impl)
         self.model = AutoModelForCausalLM.from_pretrained(
             hf_id,
             quantization_config=bnb_config,
-            device_map="auto",
+            device_map=device_map,
             torch_dtype=torch_dtype,
             trust_remote_code=True,
             attn_implementation=attn_impl,

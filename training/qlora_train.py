@@ -4,8 +4,8 @@
 Enables ``python -m training.qlora_train`` per Master Plan acceptance criteria.
 
 Usage:
-    python -m training.qlora_train --model-name qwen3-30b-a3b \\
-        --variant baseline --data-dir data/tokenized
+    python -m training.qlora_train --model-name qwen3-14b \\
+        --variant baseline_14b --data-dir data/tokenized
 """
 
 from __future__ import annotations
@@ -21,12 +21,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-name",
-        default="qwen3-30b-a3b",
+        default="qwen3-14b",
         help="Model key from models.yaml",
     )
     parser.add_argument(
         "--variant",
-        default="baseline",
+        default="baseline_14b",
         help="QLoRA variant from qlora_variants.yaml",
     )
     parser.add_argument(

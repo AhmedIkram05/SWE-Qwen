@@ -52,15 +52,15 @@ def _get_model_config(model_name: str) -> dict[str, Any]:
 def _get_variant_config(variant: str) -> dict[str, Any]:
     """Load ``qlora_variants.yaml`` and return the entry for *variant*.
 
-    Merges with ``baseline`` so variants only override what they specify.
+    Merges with ``baseline_14b`` so variants only override what they specify.
     """
     data = _load_yaml(_VARIANTS_PATH)
     variants: dict = data.get("variants", {})
     if variant not in variants:
         raise KeyError(f"Unknown variant {variant!r}. Available: {list(variants.keys())}")
 
-    # Start with a deep copy of baseline
-    baseline = copy.deepcopy(variants.get("baseline", {}))
+    # Start with a deep copy of baseline_14b
+    baseline = copy.deepcopy(variants.get("baseline_14b", {}))
     overrides = copy.deepcopy(variants[variant])
 
     # Recursively merge
@@ -79,19 +79,45 @@ def _get_variant_config(variant: str) -> dict[str, Any]:
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 
+# GPU-specific memory settings (from Modal debugging)
+GPU_MEMORY_OVERRIDES: dict[str, dict[str, Any]] = {
+    "A10G:1": {
+        "packing": False,
+        "max_seq_length": 2048,
+        "dataloader_pin_memory": False,
+        "gradient_checkpointing": True,
+    },
+    "A100:1": {
+        "packing": False,
+        "max_seq_length": 8192,
+        "dataloader_pin_memory": False,
+        "gradient_checkpointing": True,
+    },
+    "H100:1": {
+        "packing": True,
+        "max_seq_length": 32768,
+        "dataloader_pin_memory": False,
+        "gradient_checkpointing": True,
+    },
+}
+
+
 def build_qlora_config(
     variant: str,
-    model_name: str = "qwen3-30b-a3b",
+    model_name: str = "qwen3-14b",
     output_dir: str | None = None,
     run_name: str | None = None,
+    gpu_type: str | None = None,
 ) -> tuple[LoraConfig, SFTConfig]:
     """Build ``(LoraConfig, SFTConfig)`` for a given variant + model.
 
     Args:
         variant: Key from ``qlora_variants.yaml`` (e.g. ``"baseline"``).
-        model_name: Key from ``models.yaml`` (e.g. ``"qwen3-30b-a3b"``).
+        model_name: Key from ``models.yaml`` (e.g. ``"qwen3-14b"``).
         output_dir: Override output directory (default ``/tmp/qlora-{variant}``).
         run_name: W&B run name (auto-generated if ``None``).
+        gpu_type: Modal GPU spec (e.g. ``"A10G:1"``, ``"A100:1"``, ``"H100:1"``).
+                  If provided, applies GPU-specific memory overrides.
 
     Returns:
         Tuple of ``(LoraConfig, SFTConfig)`` ready for ``QLoRATrainer``
@@ -112,6 +138,12 @@ def build_qlora_config(
     train_params["output_dir"] = output_dir or f"/tmp/qlora-{variant}"
     if run_name:
         train_params["run_name"] = run_name
+
+    # Apply GPU-specific memory overrides if provided
+    if gpu_type and gpu_type in GPU_MEMORY_OVERRIDES:
+        gpu_overrides = GPU_MEMORY_OVERRIDES[gpu_type]
+        train_params.update(gpu_overrides)
+
     # Remove params that aren't SFTConfig kwargs
     packing = train_params.pop("packing", True)
     max_seq_length = train_params.pop("max_seq_length", 32768)
