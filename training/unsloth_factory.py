@@ -60,6 +60,14 @@ def build_model_and_peft(
             return _build_with_unsloth(model_cfg, variant_cfg, max_seq_length, use_flash_attn)
         except Exception as e:
             logger.warning(f"Unsloth failed ({e}); falling back to standard TRL+PEFT+BnB")
+            # Clean up GPU memory from the failed Unsloth load so the fallback
+            # doesn't pile two models on the same GPU (guaranteed OOM on A10G 24GB).
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            import gc
+
+            gc.collect()
             return _build_fallback(model_cfg, variant_cfg)
     else:
         logger.info("Unsloth disabled; using standard TRL + PEFT + bitsandbytes")
@@ -187,9 +195,11 @@ def _build_with_unsloth(
 
     logger.info(f"Applying Unsloth LoRA: r={r}, alpha={lora_alpha}, targets={target_modules}")
 
-    # Remove ALL keys that we'll pass explicitly to avoid duplicate kwargs
+    # Remove keys that we pass explicitly or that Unsloth handles internally.
+    # task_type is routed by FastLanguageModel.get_peft_model to LoraConfig internally;
+    # keeping it in peft_kwargs causes "multiple values for keyword argument 'task_type'".
     peft_kwargs = dict(lora_params)
-    for key in ["r", "lora_alpha", "lora_dropout", "target_modules", "bias"]:
+    for key in ["r", "lora_alpha", "lora_dropout", "target_modules", "bias", "task_type"]:
         peft_kwargs.pop(key, None)
 
     # Pass everything via peft_kwargs - DO NOT include task_type or padding_free
