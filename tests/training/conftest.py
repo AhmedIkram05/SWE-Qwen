@@ -77,7 +77,7 @@ def mock_variant_config() -> dict[str, Any]:
                 "lora": {
                     "r": 16,
                     "lora_alpha": 32,
-                    "lora_dropout": 0.05,
+                    "lora_dropout": 0.0,
                     "target_modules": None,
                     "bias": "none",
                     "task_type": "CAUSAL_LM",
@@ -114,7 +114,7 @@ def mock_variant_config() -> dict[str, Any]:
                 "lora": {
                     "r": 32,
                     "lora_alpha": 64,
-                    "lora_dropout": 0.05,
+                    "lora_dropout": 0.0,
                     "target_modules": None,
                     "bias": "none",
                     "task_type": "CAUSAL_LM",
@@ -151,7 +151,7 @@ def mock_variant_config() -> dict[str, Any]:
                 "lora": {
                     "r": 16,
                     "lora_alpha": 32,
-                    "lora_dropout": 0.05,
+                    "lora_dropout": 0.0,
                     "target_modules": None,
                     "bias": "none",
                     "task_type": "CAUSAL_LM",
@@ -188,7 +188,7 @@ def mock_variant_config() -> dict[str, Any]:
                 "lora": {
                     "r": 8,
                     "lora_alpha": 16,
-                    "lora_dropout": 0.05,
+                    "lora_dropout": 0.0,
                     "target_modules": None,
                     "bias": "none",
                     "task_type": "CAUSAL_LM",

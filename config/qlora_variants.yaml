@@ -9,7 +9,7 @@ variants:
     lora:
       r: 16
       lora_alpha: 32
-      lora_dropout: 0.05
+      lora_dropout: 0.0            # Zero needed for Unsloth fast patching (2x speed)
       target_modules: null          # resolved from model config at runtime
       bias: "none"
       task_type: "CAUSAL_LM"
@@ -28,12 +28,9 @@ variants:
       logging_steps: 10
       save_strategy: "steps"
       save_steps: 500
-      eval_strategy: "steps"
-      eval_steps: 500
+      eval_strategy: "no"           # Disabled — eval OOMs on A10G. Run as separate step.
       save_total_limit: 3
-      load_best_model_at_end: true
-      metric_for_best_model: "eval_loss"
-      greater_is_better: false
+      load_best_model_at_end: false
       report_to: "wandb"
       ddp_find_unused_parameters: false
       gradient_checkpointing: true
@@ -47,7 +44,7 @@ variants:
     lora:
       r: 32
       lora_alpha: 64
-      lora_dropout: 0.05
+      # lora_dropout inherits from baseline_14b (0.0 — needed for Unsloth fast patching)
       # target_modules, bias, task_type inherit from baseline_14b
     training:
       learning_rate: 2.0e-5
@@ -70,7 +67,7 @@ variants:
     lora:
       r: 8
       lora_alpha: 16
-      lora_dropout: 0.05
+      # lora_dropout inherits from baseline_14b (0.0 — needed for Unsloth fast patching)
       # target_modules, bias, task_type inherit from baseline_14b
     training:
       learning_rate: 5.0e-5
