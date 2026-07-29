@@ -4,18 +4,22 @@ Phase 3 produces JSONL files (``train.jsonl``, ``val.jsonl``, ``test.jsonl``,
 ``golden.jsonl``). This module reads them, renders training prompts via
 ``PromptLoader``, tokenizes with the model's tokenizer, and saves as
 HuggingFace ``DatasetDict`` with ``.arrow`` shards ready for ``SFTTrainer``.
+
+Supports saving to local disk and/or GCS.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any, cast
 
 from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import AutoTokenizer
 
+from data_engineering.config import DataPipelineConfig
 from training.prompt_loader import PromptLoader
 
 logger = logging.getLogger(__name__)
@@ -35,6 +39,46 @@ SPLIT_FILES = {
     "test": "test.jsonl",
     "golden": "golden.jsonl",
 }
+
+
+def _save_dataset_to_gcs(
+    ds: DatasetDict,
+    bucket_name: str,
+    prefix: str,
+) -> dict[str, str]:
+    """Save DatasetDict to GCS as parquet/arrow shards."""
+    try:
+        from google.cloud import storage
+
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        if not bucket.exists():
+            logger.warning(f"GCS bucket {bucket_name} does not exist, skipping GCS save")
+            return {}
+
+        gcs_paths = {}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            # Save locally first (to arrow format)
+            ds.save_to_disk(str(tmp_path))
+
+            # Upload all files
+            for file_path in Path(tmpdir).rglob("*"):
+                if file_path.is_file():
+                    rel_path = file_path.relative_to(tmp_path)
+                    key = f"tokenized/{prefix}/{rel_path}"
+                    blob = bucket.blob(key)
+                    blob.upload_from_filename(str(file_path))
+                    logger.info(f"Uploaded {key} to GCS")
+
+            prefix = f"tokenized/{bucket_name}/{prefix}"
+            gcs_paths["dataset"] = f"gs://{bucket_name}/tokenized/{prefix}"
+
+    except Exception as e:
+        logging.warning(f"GCS save failed (non-fatal): {e}")
+        return {}
+    else:
+        return gcs_paths
 
 
 def load_jsonl_split(path: Path) -> list[dict[str, Any]]:
@@ -220,12 +264,14 @@ def tokenize_split(
     return dataset
 
 
-def tokenize_pipeline(
+def tokenize_pipeline(  # noqa: PLR0913, PLR0917
     data_dir: str | Path,
     output_dir: str | Path,
     model_name: str = "qwen3-30b-a3b",
     max_length: int | None = None,
     prompt_template_dir: str | Path | None = None,
+    config: DataPipelineConfig | None = None,
+    run_id: str | None = None,
 ) -> DatasetDict:
     """Run the full tokenization pipeline: JSONL → .arrow shards.
 
@@ -307,6 +353,12 @@ def tokenize_pipeline(
         out_path,
         {k: len(v) for k, v in full_ds.items()},
     )
+
+    # Upload to GCS if configured
+    if config and config.gcs_bucket:
+        gcs_paths = _save_dataset_to_gcs(full_ds, config.gcs_bucket, run_id or "tokenized")
+        logger.info("Uploaded tokenized data to GCS: %s", gcs_paths)
+
     return full_ds
 
 
@@ -329,3 +381,63 @@ def load_tokenized_shards(
         {k: len(v) for k, v in ds.items()},
     )
     return ds
+
+
+def tokenize_dataset(
+    run_id: str | None = None,
+    model_name: str = "qwen3-14b",
+    max_seq_length: int = 8192,
+    config: DataPipelineConfig | None = None,
+) -> dict[str, Any]:
+    """Tokenize a completed dataset run.
+
+    This is a CLI-friendly wrapper around ``tokenize_pipeline``.
+
+    Args:
+        run_id: The run ID of the dataset to tokenize. If None, uses the latest run.
+        model_name: Model name from models.yaml (default: qwen3-14b).
+        max_seq_length: Maximum sequence length for tokenization.
+        config: Optional pipeline config for GCS upload.
+
+    Returns:
+        Dict with tokenization results and output path.
+    """
+    from data_engineering.config import DataPipelineConfig
+
+    # Use provided config or create default
+    if config is None:
+        config = DataPipelineConfig()
+
+    # Determine run_id
+    if run_id is None:
+        # Find the latest run directory in output_dir
+        runs = sorted(config.output_dir.glob("*/"))
+        if not runs:
+            raise ValueError("No run directories found in output_dir")
+        run_id = runs[-1].name
+        logger.info(f"Using latest run: {run_id}")
+
+    data_dir = config.output_dir / run_id / "swebench"
+    output_dir = config.output_dir / f"{run_id}_tokenized"
+
+    if not data_dir.exists():
+        raise ValueError(f"Run directory not found: {data_dir}")
+
+    logger.info(f"Tokenizing run {run_id} for model {model_name}")
+
+    ds = tokenize_pipeline(
+        data_dir=data_dir,
+        output_dir=output_dir,
+        model_name=model_name,
+        max_length=8192,  # Use context window from model config in qlora_config
+        config=config,
+        run_id=run_id,
+    )
+
+    return {
+        "run_id": run_id,
+        "model_name": model_name,
+        "output_dir": str(output_dir),
+        "splits": {k: len(v) for k, v in ds.items()},
+        "total_examples": sum(len(v) for v in ds.values()),
+    }
