@@ -1,22 +1,23 @@
 # ── QLoRA Variant Configs ─────────────────────────────────────────────────────
-# Three mandatory comparison configs for Phase 4.12.
-# Variants inherit unspecified values from the `baseline` template.
+# PHASE 4 PIVOT: 3 mandatory 14B-optimized comparison variants for qwen3-14b on A10G 24GB.
+# Original 30B variants (baseline, higher_rank, higher_lr) deprecated — see DEPRECATED section below.
+# Variants inherit unspecified values from the `baseline_14b` template.
 # Used by training/qlora_config.py to produce (LoraConfig, TrainingArguments).
 
 variants:
-  baseline:
+  baseline_14b:
     lora:
       r: 16
       lora_alpha: 32
-      lora_dropout: 0
+      lora_dropout: 0.05
       target_modules: null          # resolved from model config at runtime
       bias: "none"
       task_type: "CAUSAL_LM"
     training:
       learning_rate: 2.0e-5
       num_train_epochs: 3
-      per_device_train_batch_size: 1
-      gradient_accumulation_steps: 16
+      per_device_train_batch_size: 2
+      gradient_accumulation_steps: 8
       warmup_ratio: 0.03
       lr_scheduler_type: "cosine"
       weight_decay: 0.01
@@ -39,6 +40,63 @@ variants:
       dataloader_num_workers: 2
       remove_unused_columns: false
       packing: true
+      max_seq_length: 8192
+      dataloader_pin_memory: false
+
+  higher_rank_14b:
+    lora:
+      r: 32
+      lora_alpha: 64
+      lora_dropout: 0.05
+      # target_modules, bias, task_type inherit from baseline_14b
+    training:
+      learning_rate: 2.0e-5
+      per_device_train_batch_size: 1
+      gradient_accumulation_steps: 16
+      # all other training args inherit from baseline_14b
+
+  higher_lr_14b:
+    lora:
+      r: 16
+      lora_alpha: 32
+      lora_dropout: 0.05
+      # target_modules, bias, task_type inherit from baseline_14b
+    training:
+      learning_rate: 5.0e-5
+      # all other training args inherit from baseline_14b
+
+  efficient_14b:
+    lora:
+      r: 8
+      lora_alpha: 16
+      lora_dropout: 0.05
+      # target_modules, bias, task_type inherit from baseline_14b
+    training:
+      learning_rate: 5.0e-5
+      per_device_train_batch_size: 2
+      gradient_accumulation_steps: 8
+      max_seq_length: 8192
+      num_train_epochs: 2
+      # inherits: warmup_ratio, lr_scheduler_type, weight_decay, max_grad_norm, bf16, optim, logging_steps, save_strategy, save_steps, eval_strategy, eval_steps, save_total_limit, load_best_model_at_end, metric_for_best_model, greater_is_better, report_to, ddp_find_unused_parameters, gradient_checkpointing, dataloader_num_workers, remove_unused_columns, packing, dataloader_pin_memory
+
+# ── DEPRECATED: Original Phase 4 30B variants (kept for reference only) ────────
+# These were the mandatory 3-config comparison for Qwen3-30B-A3B on H100 80GB.
+# Phase 4 pivot: 14B-only training. These are NOT used in Phase 4 execution.
+# Retained for historical reference and potential future 30B training runs.
+deprecated_30b_variants:
+  baseline:
+    lora:
+      r: 16
+      lora_alpha: 32
+      lora_dropout: 0
+      target_modules: null
+      bias: "none"
+      task_type: "CAUSAL_LM"
+    training:
+      learning_rate: 2.0e-5
+      num_train_epochs: 3
+      per_device_train_batch_size: 1
+      gradient_accumulation_steps: 16
       max_seq_length: 32768
 
   higher_rank:
@@ -46,17 +104,13 @@ variants:
       r: 32
       lora_alpha: 64
       lora_dropout: 0
-      # target_modules, bias, task_type inherit from baseline
     training:
       learning_rate: 2.0e-5
-      # all other training args inherit from baseline
 
   higher_lr:
     lora:
       r: 16
       lora_alpha: 32
       lora_dropout: 0
-      # target_modules, bias, task_type inherit from baseline
     training:
       learning_rate: 5.0e-5
-      # all other training args inherit from baseline
