@@ -107,7 +107,7 @@ def mock_variant_config() -> dict[str, Any]:
                     "dataloader_num_workers": 2,
                     "remove_unused_columns": False,
                     "packing": True,
-                    "max_seq_length": 8192,
+                    "max_seq_length": 4096,
                 },
             },
             "higher_rank_14b": {
@@ -144,7 +144,7 @@ def mock_variant_config() -> dict[str, Any]:
                     "dataloader_num_workers": 2,
                     "remove_unused_columns": False,
                     "packing": True,
-                    "max_seq_length": 8192,
+                    "max_seq_length": 4096,
                 },
             },
             "higher_lr_14b": {
@@ -181,7 +181,7 @@ def mock_variant_config() -> dict[str, Any]:
                     "dataloader_num_workers": 2,
                     "remove_unused_columns": False,
                     "packing": True,
-                    "max_seq_length": 8192,
+                    "max_seq_length": 4096,
                 },
             },
             "efficient_14b": {
@@ -218,7 +218,7 @@ def mock_variant_config() -> dict[str, Any]:
                     "dataloader_num_workers": 2,
                     "remove_unused_columns": False,
                     "packing": True,
-                    "max_seq_length": 8192,
+                    "max_seq_length": 4096,
                 },
             },
         },

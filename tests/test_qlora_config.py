@@ -120,7 +120,7 @@ class TestBuildQLoraConfig:
         assert training_args.bf16 is True
         assert training_args.fp16 is False
         assert training_args.gradient_checkpointing is True
-        assert training_args.max_length == 8192
+        assert training_args.max_length == 4096
 
     def test_build_higher_rank_14b_config(self):
         """Higher rank: r=32, alpha=64, batch=1, grad_accum=16."""
