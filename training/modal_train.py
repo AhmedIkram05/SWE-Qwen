@@ -17,6 +17,17 @@ from pathlib import Path
 
 import modal
 
+# ── Import Unsloth BEFORE trl, transformers, peft ─────────────────────────────
+# Unsloth must be imported before these libraries to apply its performance
+# patches and avoid a warning + sub-optimal performance.
+# The `_ = None` silences lint about an unused import.
+try:
+    import unsloth  # noqa: F401 — side-effect import (patching)
+
+    _unsloth_patched = True
+except ImportError:
+    _unsloth_patched = False
+
 from training.qlora_config import resolve_gpu_type
 
 logger = logging.getLogger(__name__)
@@ -73,8 +84,8 @@ training_image = (
     .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     # Enable Unsloth by default on H100/A100 ( Modal GPU types)
     .env({"UNSLOTH_ENABLED": "1"})
-    # Force rebuild v5 - fixes duplicate kwargs, max_memory=18GiB, peft_kwargs cleanup
-    .run_commands("echo 'cache-bust-v5'")
+    # Force rebuild v6 - fixes eos_token (<EOS_TOKEN> -> <|endoftext|>), import order
+    .run_commands("echo 'cache-bust-v6'")
     # Copy local source into the image — must be LAST
     .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
     .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)
@@ -82,11 +93,26 @@ training_image = (
 
 # ── Modal volumes ─────────────────────────────────────────────────────────────
 
-# Persistent volume for training data (tokenized .arrow shards)
-data_volume = modal.Volume.from_name("swe-qwen-datasets", create_if_missing=True)
+# GCS bucket for training data (tokenized .arrow shards) — read-only mount
+# Replaces modal.Volume to avoid local staging costs
+gcs_data = modal.CloudBucketMount(
+    bucket_name="swe-qwen-datasets",
+    key_prefix="tokenized",
+    read_only=True,
+)
 
 # Persistent volume for model checkpoints
 models_volume = modal.Volume.from_name("swe-qwen-models", create_if_missing=True)
+
+
+def _get_gcs_data_mount() -> modal.CloudBucketMount:
+    """Create GCS bucket mount - defined as function to avoid Modal dependency tracking issues."""
+    return modal.CloudBucketMount(
+        bucket_name="swe-qwen-datasets",
+        key_prefix="tokenized",
+        read_only=True,
+    )
+
 
 # ── Training function ─────────────────────────────────────────────────────────
 
@@ -98,7 +124,7 @@ models_volume = modal.Volume.from_name("swe-qwen-models", create_if_missing=True
         modal.Secret.from_name("hf-secret"),
     ],
     volumes={
-        "/data": data_volume,
+        "/data": _get_gcs_data_mount(),
         "/models": models_volume,
     },
     gpu="A10G:1",  # 14B model fits on A10G 24GB
@@ -168,8 +194,8 @@ def train_qlora(  # noqa: PLR0913, PLR0917
     model, tokenizer = build_model_and_peft(
         variant=variant,
         model_name=model_name,
-        max_seq_length=8192,  # will be overridden by variant config
         use_flash_attn=True,
+        gpu_type=gpu_type,
     )
 
     trainer = QLoRATrainer(
