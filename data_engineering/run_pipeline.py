@@ -47,6 +47,72 @@ from data_engineering.schema import (
     Splits,
 )
 
+# ─── GCS Streaming Helpers ──────────────────────────────────────────────────
+
+
+def _save_stage_gcs(
+    records: list[Any],
+    config: DataPipelineConfig,
+    run_id: str,
+    repo_id: str,
+    stage: str,
+) -> None:
+    """Save records as JSONL to GCS checkpoint."""
+    if not config.gcs_bucket:
+        return
+    try:
+        from google.cloud import storage
+
+        client = storage.Client()
+        bucket = client.bucket(config.gcs_bucket)
+        if not bucket.exists():
+            return
+        prefix = f"datasets/{run_id}/{repo_id}"
+        key = f"{prefix}/{stage}.jsonl"
+        blob = bucket.blob(key)
+        lines = [json.dumps(r.model_dump(), default=str) + "\n" for r in records]
+        content = "".join(lines)
+        blob.upload_from_string(content, content_type="application/jsonl")
+        logging.info(
+            f"Uploaded {len(records)} records to gs://{config.gcs_bucket}/datasets/{run_id}/{repo_id}/{stage}.jsonl"
+        )
+    except Exception as e:
+        logging.warning(f"GCS save failed for stage {stage} (non-fatal): {e}")
+
+
+def _load_stage_gcs(
+    config: DataPipelineConfig,
+    run_id: str,
+    repo_id: str,
+    stage: str,
+) -> list[dict[str, Any]]:
+    """Load records from GCS checkpoint."""
+    if not config.gcs_bucket:
+        return []
+    try:
+        from google.cloud import storage
+
+        client = storage.Client()
+        bucket = client.bucket(config.gcs_bucket)
+        if not bucket.exists():
+            return []
+        prefix = f"datasets/{run_id}/{repo_id}"
+        key = f"{prefix}/{stage}.jsonl"
+        blob = bucket.blob(key)
+        if not blob.exists():
+            return []
+        content = blob.download_as_text()
+        records = [json.loads(line) for line in content.strip().split("\n") if line.strip()]
+    except Exception as e:
+        logging.warning(f"GCS load failed for stage {stage} (non-fatal): {e}")
+        return []
+    else:
+        logging.info(
+            f"Loaded {len(records)} records from gs://{config.gcs_bucket}/datasets/{run_id}/{stage}.jsonl"
+        )
+        return records
+
+
 logger = logging.getLogger(__name__)
 console = Console()
 
@@ -105,7 +171,8 @@ def _save_stage(
     repo_id: str,
     stage: str,
 ) -> None:
-    """Save records as JSONL checkpoint."""
+    """Save records as JSONL checkpoint locally (for resume) and to GCS (if configured)."""
+    # Local save (for fast resume)
     out_dir = _checkpoint_dir(config, run_id, repo_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{stage}.jsonl"
@@ -116,6 +183,10 @@ def _save_stage(
             else:
                 line = json.dumps(rec, default=str)
             f.write(line + "\n")
+
+    # GCS save (async-style, non-blocking)
+    if config.gcs_bucket:
+        _save_stage_gcs(records, config, run_id, "swebench", stage)
 
 
 def _load_stage(
