@@ -223,9 +223,9 @@ class QLoRATrainer:
             device_map = None
             logger.info("Loading model %s in full precision (CPU/MPS)...", hf_id)
 
-        # SDPA — PyTorch native. flash-attn 2 wheel is built for torch 2.6 but
-        # we run torch 2.11+cu126; the ABI mismatch makes it non-callable.
-        # Keep flash-attn as a future optimization when a compatible wheel exists.
+        # SDPA — PyTorch native. flash-attn 2.8.3 wheel for torch 2.11+cu126+cp311
+        # is installed in Modal image (see modal_train.py). SDPA auto-dispatches to
+        # flash-attn CUDA kernels when they're installed.
         attn_impl = "sdpa" if self.use_flash_attn else "eager"
 
         self.model = AutoModelForCausalLM.from_pretrained(

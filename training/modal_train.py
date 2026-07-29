@@ -130,6 +130,12 @@ training_image = (
         "packaging>=24.0",
         "xformers>=0.0.29",  # for Unsloth fallback attention speedup
     )
+    # FlashAttention-2 for 3-5x attention speedup (cu126+torch2.11 pre-built wheel)
+    # Community wheel — matches torch+cu+py version exactly
+    .pip_install(
+        "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/flash_attn-latest/"
+        "flash_attn-2.8.3+cu126torch2.11-cp311-cp311-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl"
+    )
     # Unsloth for 2-5x speedup, 60-74% VRAM reduction (installed in Modal image only)
     # Must be after torch so its deps resolve against the correct CUDA runtime
     .pip_install("unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git")
@@ -137,8 +143,8 @@ training_image = (
     .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     # Enable Unsloth by default
     .env({"UNSLOTH_ENABLED": "1"})
-    # Force rebuild v7 - remove broken FA2 wheel for torch 2.6, add xformers
-    .run_commands("echo 'cache-bust-v7'")
+    # Force rebuild v8 — add flash-attn 2.8.3 wheel for torch 2.11+cu126+cp311
+    .run_commands("echo 'cache-bust-v8'")
     # Copy local source into the image — must be LAST
     .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
     .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)
