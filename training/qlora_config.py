@@ -30,7 +30,7 @@ _VARIANTS_PATH = _CONFIG_DIR / "qlora_variants.yaml"
 GPU_MAP: dict[str, str] = {
     "a100-40gb": "A100:1",
     "a10g-24gb": "A10G:1",
-    "a100-80gb": "A100:1,size=80GB",
+    "a100-80gb": "A100-80GB",
     "h100-80gb": "H100:1",
 }
 
@@ -105,7 +105,7 @@ GPU_MEMORY_OVERRIDES: dict[str, dict[str, Any]] = {
         "dataloader_pin_memory": False,
         "gradient_checkpointing": True,
     },
-    "A100:1,size=80GB": {
+    "A100-80GB": {
         "packing": True,
         "max_seq_length": 8192,
         "per_device_train_batch_size": 8,

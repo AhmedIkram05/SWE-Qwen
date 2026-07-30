@@ -28,13 +28,13 @@ class TestModelConfig:
         assert cfg["context_window"] == 32768
         assert "target_modules" in cfg
         assert len(cfg["target_modules"]) == 7
-        assert cfg["gpu_mapping"]["primary"] == "a10g-24gb"
+        assert cfg["gpu_mapping"]["primary"] == "a100-80gb"
 
     def test_get_model_config_14b(self):
         """Returns correct config for fallback model."""
         cfg = _get_model_config("qwen3-14b")
         assert cfg["hf_id"] == "Qwen/Qwen3-14B"
-        assert cfg["gpu_mapping"]["primary"] == "a10g-24gb"
+        assert cfg["gpu_mapping"]["primary"] == "a100-80gb"
 
     def test_get_model_config_invalid_raises(self):
         """Raises KeyError for unknown model."""
@@ -205,14 +205,14 @@ class TestResolveGPU:
     """Tests for GPU type resolution."""
 
     def test_primary_gpu_14b(self):
-        """14B model resolves to A10G:1 (primary for Phase 4)."""
+        """14B model resolves to A100 80GB (primary for Phase 4)."""
         gpu = resolve_gpu_type("qwen3-14b")
-        assert gpu == "A10G:1"
+        assert gpu == "A100-80GB"
 
     def test_fallback_gpu_14b(self):
-        """14B model with fallback resolves to A100:1."""
+        """14B model with fallback resolves to A10G:1."""
         gpu = resolve_gpu_type("qwen3-14b", prefer_fallback=True)
-        assert gpu == "A100:1"
+        assert gpu == "A10G:1"
 
     def test_30b_excluded_from_phase4(self):
         """30B model still resolves but is phase4_excluded in config."""

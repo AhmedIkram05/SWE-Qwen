@@ -172,9 +172,9 @@ models_volume = modal.Volume.from_name("swe-qwen-models", create_if_missing=True
     volumes={
         "/models": models_volume,
     },
-    gpu="A10G:1",  # 14B model fits on A10G 24GB
-    memory=32000,  # 32 GB for 14B on A10G
-    timeout=7200,  # 2 hours max
+    gpu="A100-80GB",
+    memory=32000,
+    timeout=18000,  # 5 hours max (full 19K run ~3-4h)
     retries=modal.Retries(
         max_retries=1,
         backoff_coefficient=2.0,
