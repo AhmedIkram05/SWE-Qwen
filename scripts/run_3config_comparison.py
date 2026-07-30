@@ -4,8 +4,8 @@
 Orchestrates training for all 3 QLoRA variants on Modal, computes proxy
 F2P on the golden set, and promotes the champion to the W&B Registry.
 
-Sleep-resilient: uses ``Modal.spawn()`` + persistent state file so training
-continues on Modal even if your laptop goes to sleep. Re-run the same
+Sleep-resilient: launches via ``modal run`` subprocess + polls W&B for completion
+so training continues on Modal servers even if laptop sleeps. Re-run the same
 command to resume from where it left off.
 
 Usage:
@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -31,10 +32,13 @@ from typing import Any
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _GOLDEN_RELPATH = "swebench/golden.jsonl"
 _STATE_PATH = _REPO_ROOT / "scripts" / ".pipeline-state.json"
-
-# Add repo root to sys.path for importing training modules (Modal function refs)
-sys.path.insert(0, str(_REPO_ROOT))
 _POLL_INTERVAL = 60  # seconds between polling for Modal job completion
+
+
+# Known artifact name pattern — deterministic from variant name
+def _artifact_name(variant: str) -> str:
+    return f"model-qwen3-14b-{variant}"
+
 
 # ── GCS buckets (same bucket/dataset as modal_train.py) ──────────────────────
 # golden.jsonl is archived alongside the pipeline data; download at runtime
@@ -197,7 +201,52 @@ def _ensure_golden(run_id: str) -> Path:
 # ── Resilient training launcher (spawn + poll + state) ────────────────────────
 
 
-def launch_modal_training(  # noqa: PLR0913, PLR0917 — 6 justified params for Modal spawn orchestration
+def _build_modal_cmd(variant: str, run_name: str, train_kwargs: dict[str, Any]) -> list[str]:
+    """Build ``modal run`` CLI command for a training variant."""
+    cmd = [
+        "modal",
+        "run",
+        f"{_REPO_ROOT / 'training/modal_train.py'}::train_qlora",
+        "--variant",
+        variant,
+        "--run-name",
+        run_name,
+    ]
+    for key, val in train_kwargs.items():
+        if val is None:
+            continue
+        flag = f"--{key.replace('_', '-')}"
+        if isinstance(val, bool):
+            if val:
+                cmd.append(flag)
+        else:
+            cmd.extend([flag, str(val)])
+    return cmd
+
+
+def _wandb_run_finished(run_name: str) -> dict[str, Any] | None:
+    """Check W&B for a completed run matching *run_name*.
+
+    Returns the run summary (including artifact name and wandb run id)
+    if complete, ``None`` if still running or not found.
+    """
+    import wandb
+
+    api = wandb.Api(timeout=30)
+    try:
+        runs = api.runs("swe-qwen", {"display_name": run_name})
+    except Exception:
+        return None
+    for run in runs:
+        if run.state == "finished":
+            return {
+                "wandb_run_id": run.id,
+                "artifact_name": _artifact_name(run.config.get("variant", "")),
+            }
+    return None
+
+
+def launch_modal_training(  # noqa: PLR0913, PLR0917
     variant: str,
     run_id: str,
     run_name: str,
@@ -205,80 +254,82 @@ def launch_modal_training(  # noqa: PLR0913, PLR0917 — 6 justified params for 
     train_kwargs: dict[str, Any] | None = None,
     dry_run: bool = False,
 ) -> dict[str, str]:
-    """Launch (or resume) a Modal training job for *variant*.
+    """Launch (or resume) a Modal training job.
 
-    Uses ``modal_entrypoint.spawn()`` so the Modal job continues running even
-    if this script is interrupted or the laptop sleeps.  State is persisted to
-    ``.pipeline-state.json`` — re-run the same command to resume.
+    Uses ``subprocess`` to run ``modal run`` — the Modal job continues on
+    Modal servers even if the local process dies (laptop sleep).  Polls W&B
+    for completion.  State persisted to ``.pipeline-state.json`` for resume.
 
     Returns ``{"wandb_run_id": str, "artifact_name": str}``.
     """
     if dry_run:
-        print(f"  [DRY-RUN] Would spawn variant={variant} run_name={run_name}")
+        print(f"  [DRY-RUN] Would launch variant={variant} run_name={run_name}")
         return {
             "wandb_run_id": f"dry-run-{variant}",
-            "artifact_name": f"model-qwen3-14b-{variant}",
+            "artifact_name": _artifact_name(variant),
         }
 
-    # ── Check existing state for a running/spawned job ─────────────────────
     variant_state = state["variants"].get(variant, {})
-    handle_id = variant_state.get("handle_id")
-    existing_status = variant_state.get("status")
+    saved_run_name = variant_state.get("run_name")
 
-    if handle_id and existing_status in ("launched", "running"):
-        from modal import FunctionCall
+    # ── Check W&B for completion (resume after sleep) ────────────────────
+    if saved_run_name and variant_state.get("status") in ("launched", "running"):
+        finished = _wandb_run_finished(saved_run_name)
+        if finished:
+            print(f"  {variant} already complete (verified via W&B).")
+            _mark_completed(state, variant, finished["wandb_run_id"], finished["artifact_name"])
+            return finished
+        print(f"  {variant} W&B run not finished yet. Re-launching ...")
 
-        print(f"  Resuming {variant} from saved handle {handle_id} ...")
-        call = FunctionCall.from_id(handle_id)
-    else:
-        # Spawn a new job using Modal's ephemeral app context (no deploy needed).
-        # The `with app.run():` context hydrates the function without requiring
-        # `modal deploy` — same effect as `modal run` but we keep the handle.
-        from training.modal_train import app, train_qlora
+    # ── Launch new job ────────────────────────────────────────────────────
+    cmd = _build_modal_cmd(variant, run_name, train_kwargs or {})
+    print(f"  Launching: {' '.join(cmd)}")
+    print("  (Job runs on Modal servers — safe to close laptop)")
 
-        print(f"  Spawning {variant} on Modal (A100-80GB) ...")
-        kwargs = dict(train_kwargs) if train_kwargs else {}
-        kwargs["variant"] = variant
-        kwargs["run_name"] = run_name
-        with app.run():
-            call = train_qlora.spawn(**kwargs)
-            handle_id = call.object_id
+    subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
-        # Persist handle immediately so we can resume if interrupted
-        state["variants"][variant] = {
-            "status": "launched",
-            "run_name": run_name,
-            "handle_id": handle_id,
-        }
-        _save_state(state)
-        print(f"  Handle saved: {handle_id}")
-        print(f"  To monitor:   modal app logs {variant}")
+    state["variants"][variant] = {
+        "status": "launched",
+        "run_name": run_name,
+    }
+    _save_state(state)
 
+    # ── Poll W&B for completion ─────────────────────────────────────────
+    print(f"  Polling W&B every {_POLL_INTERVAL}s for run '{run_name}' ...")
     state["variants"][variant]["status"] = "running"
     _save_state(state)
 
-    # ── Poll until completion (sleep-resilient) ────────────────────────────
-    from modal.exception import TimeoutError
-
     while True:
+        finished = _wandb_run_finished(run_name)
+        if finished:
+            print(f"  {variant} complete (detected via W&B).")
+            _mark_completed(state, variant, finished["wandb_run_id"], finished["artifact_name"])
+            return finished
+
+        print(f"  {variant} still training ... ({time.strftime('%H:%M:%S')})")
+        state["variants"][variant]["status"] = "running"
+        _save_state(state)
+
         try:
-            result: dict = call.get(timeout=_POLL_INTERVAL)
-            break  # success — result is the train_qlora() return dict
-        except TimeoutError:
-            print(f"  {variant} still training ... (polled at {time.strftime('%H:%M:%S')})")
-            state["variants"][variant]["status"] = "running"
-            _save_state(state)
-        except Exception as exc:
-            # Likely a connection error (laptop sleep / network blip).
-            # The Modal job keeps running; retry after a brief wait.
-            print(f"  Connection issue: {exc}")
-            print(f"  Retrying in {_POLL_INTERVAL}s (job continues on Modal)...")
             time.sleep(_POLL_INTERVAL)
+        except KeyboardInterrupt:
+            print(f"\n  Interrupted — {variant} continues on Modal servers.")
+            print(f"  Re-run with --run-id {state.get('run_id')} to resume.")
+            _save_state(state)
+            sys.exit(130)
 
-    # ── Training completed ─────────────────────────────────────────────────
-    wandb_run_id = result.get("wandb_run_id")
-    artifact_name = result.get("artifact_name", f"model-qwen3-14b-{variant}")
 
+def _mark_completed(
+    state: dict[str, Any],
+    variant: str,
+    wandb_run_id: str | None,
+    artifact_name: str,
+) -> None:
+    """Update state to completed and persist."""
     state["variants"][variant].update(
         {
             "status": "completed",
@@ -288,11 +339,10 @@ def launch_modal_training(  # noqa: PLR0913, PLR0917 — 6 justified params for 
             },
         }
     )
-    state["completed_variants"].append(variant)
+    if variant not in state["completed_variants"]:
+        state["completed_variants"].append(variant)
     _save_state(state)
-
     print(f"  {variant} complete → W&B run: {wandb_run_id}")
-    return {"wandb_run_id": wandb_run_id, "artifact_name": artifact_name}
 
 
 # ── Download, evaluate, promote ────────────────────────────────────────────────
