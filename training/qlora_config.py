@@ -83,22 +83,33 @@ def _get_variant_config(variant: str) -> dict[str, Any]:
 
 
 # GPU-specific memory settings (from Modal debugging)
+# ── GPU Memory Overrides ──────────────────────────────────────────────────────
+# These override variant config values to fit within GPU VRAM limits.
+# GIGAGPU benchmarking (RTX 4090 24GB, same VRAM as A10G):
+#   Qwen 14B QLoRA, seq=2048, batch=8, rank=32 → 17.4 GB peak
+# A10G uses same 24GB VRAM but ~60% of 4090 memory bandwidth (~600 vs 1008 GB/s).
 GPU_MEMORY_OVERRIDES: dict[str, dict[str, Any]] = {
     "A10G:1": {
-        "packing": False,
-        "max_seq_length": 2048,
+        "packing": True,  # Sequence packing for GPU efficiency
+        "max_seq_length": 2048,  # A10G 24GB max safe context
+        "per_device_train_batch_size": 6,  # Batch fits: 17.4 GB < 24 GB ceiling
+        "gradient_accumulation_steps": 3,  # Effective batch = 6 × 3 = 18
         "dataloader_pin_memory": False,
         "gradient_checkpointing": True,
     },
     "A100:1": {
-        "packing": False,
+        "packing": True,
         "max_seq_length": 8192,
+        "per_device_train_batch_size": 8,  # A100 has 40/80 GB, can fit larger batch
+        "gradient_accumulation_steps": 2,  # Effective batch = 8 × 2 = 16
         "dataloader_pin_memory": False,
         "gradient_checkpointing": True,
     },
     "H100:1": {
         "packing": True,
         "max_seq_length": 32768,
+        "per_device_train_batch_size": 8,
+        "gradient_accumulation_steps": 2,
         "dataloader_pin_memory": False,
         "gradient_checkpointing": True,
     },

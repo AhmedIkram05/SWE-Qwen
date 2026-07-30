@@ -195,8 +195,10 @@ class TestBuildQLoraConfig:
             gpu_type="A10G:1",
         )
         # A10G overrides from GPU_MEMORY_OVERRIDES
-        assert training_args.packing is False
+        assert training_args.packing is True  # GIGAGPU: batch=8 fits in 17.4 GB on 24GB card
         assert training_args.max_length == 2048
+        assert training_args.per_device_train_batch_size == 6
+        assert training_args.gradient_accumulation_steps == 3
 
 
 class TestResolveGPU:
