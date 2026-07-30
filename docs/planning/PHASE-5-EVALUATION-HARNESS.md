@@ -10,10 +10,11 @@
 ## 1. Objective
 
 Build an **execution-based evaluation harness** that:
-- Generates patches from model (baseline + 3 QLoRA variants) on golden eval set (3,019 SWE-bench Verified+Test+Dev)
+- Generates patches from model (baseline + 3 QLoRA variants) on golden eval set (2,056 SWE-bench Verified+Test+Dev)
 - Applies patches to repos at `base_sha`, runs test suites in isolated Modal containers
 - Computes **F2P** (Fail-to-Pass) and **P2P** (Pass-to-Pass) metrics per model
 - Logs per-example + aggregate results to W&B artifacts
+- Re-validates P4 proxy champion (`baseline_14b`) with real F2P (not fresh selection)
 - Runs SWE-bench Verified (500) as secondary benchmark
 - Runs prompt A/B test (2-3 templates) against golden set
 - Supports resume, lightweight CI sampling, full merge evaluation
@@ -24,12 +25,13 @@ Build an **execution-based evaluation harness** that:
 
 | Source | Artifact | Location |
 |--------|----------|----------|
-| Phase 3 | Golden eval set (3,019 records with `FAIL_TO_PASS`/`PASS_TO_PASS`) | `data/tokenized/shards/golden/` (arrow) + `metadata.base_sha`, `metadata.head_sha`, `metadata.test_patch` |
-| Phase 3 | SWE-bench Verified subset (500) | Same location, filter by `metadata.is_verified==true` |
+| Phase 3 | Golden eval set (2,056 records with `FAIL_TO_PASS`/`PASS_TO_PASS`) | GCS `gs://swe-qwen-datasets/datasets/{run_id}/golden.jsonl` + `metadata.base_sha`, `metadata.head_sha`, `metadata.test_patch` |
+| Phase 3 | SWE-bench Verified subset (500) | Same GCS location, filter by `metadata.is_verified==true` |
 | Phase 4 | Tokenized shards for inference | `data/tokenized/shards/test/` |
-| Phase 4 | Trained model checkpoints (3 variants) | W&B Registry artifacts: `model_checkpoint` type |
-| Phase 4 | Baseline model (Qwen3-14b) | HF Hub `Qwen/Qwen3-14b` |
+| Phase 4 | Trained LoRA adapters (3 variants) | W&B artifacts: `model-qwen3-14b-{variant}` (type: `model_checkpoint`) |
+| Phase 4 | Baseline model (Qwen3-14B) | HF Hub `Qwen/Qwen3-14B` |
 | Phase 4 | Prompt templates (4 Jinja2) | `training/prompts/*.j2` |
+| Phase 4 | `f2p_proxy.py` | P4 proxy champion selection (reuse `select_champion()`, re-validate with real F2P) |
 
 ---
 
@@ -38,22 +40,19 @@ Build an **execution-based evaluation harness** that:
 ```
 evaluation/
 ├── __init__.py
-├── schema.py              # Pydantic models: EvalInput, EvalResult, F2PMetrics, P2PMetrics, EvalRun
+├── schema.py              # Pydantic models: EvalInput, EvalResult, F2PMetrics, EvalRun
 ├── config.py              # EvalConfig (Pydantic Settings)
 ├── test_runner.py         # Core: run tests in Modal container, apply patch, collect results
 ├── patch_applier.py       # git apply → unidiff fallback
 ├── metrics.py             # F2P/P2P computation
-├── harness.py             # Orchestrator: iterate examples, call test_runner, aggregate
-├── golden_runner.py       # Golden eval entry point (3,019 examples)
-├── swebench_runner.py     # SWE-bench Verified runner (500 examples)
+├── harness.py             # Orchestrator + entry points (golden, swebench, baseline) + resume + W&B logging
 ├── prompt_ab_test.py      # Prompt A/B testing (2-3 templates)
-├── baseline_runner.py     # Baseline model evaluation
 ├── inference.py           # Batch inference for patch generation (Modal + vLLM + LoRA)
-├── wandb_logger.py        # W&B artifact logging (per-example + aggregate)
-├── comparison.py          # NEW: Champion/Challenger comparison, quality gates
-├── cli.py                 # Typer CLI: run, run-golden, run-swebench, run-prompt-ab, run-baseline
-└── resume.py              # Checkpoint resume per-repo
+├── comparison.py          # Re-validate P4 proxy champion with real F2P
+└── cli.py                 # Typer CLI: run, run-golden, run-swebench, run-prompt-ab, run-baseline
 ```
+
+**Consolidation rationale:** `golden_runner`, `swebench_runner`, `baseline_runner` are thin wrappers around `harness.run_batch()` with different data filters → folded into `harness.py` entry points. `resume.py` and `wandb_logger.py` are single-class modules → folded into `harness.py`. `comparison.py` stays separate (Phase 9 dependency). `prompt_ab_test.py` stays separate (user-facing entry point).
 
 ---
 
@@ -64,14 +63,14 @@ evaluation/
 ```python
 class EvalConfig(BaseSettings):
     # Data
-    golden_shards_dir: Path = Path("data/tokenized/shards/golden")
-    swebench_verified_shards_dir: Path = Path("data/tokenized/shards/test")  # filter is_verified
+    golden_data_path: str = "gs://swe-qwen-datasets/datasets/{run_id}/golden.jsonl"  # GCS source
+    swebench_verified_filter: str = "metadata.is_verified==true"  # filter from golden
 
     # Models
-    baseline_model: str = "Qwen/Qwen3-30B-A3B"
-    wandb_entity: str = ""
-    wandb_project: str = "swe-qwen-eval"
-    model_registry_alias: str = "champion"  # reads from W&B Registry
+    baseline_model: str = "Qwen/Qwen3-14B"
+    wandb_entity: str = "2571642-university-of-dundee"  # override via WANDB_ENTITY env var
+    wandb_project: str = "swe-qwen"
+    lora_artifact_pattern: str = "model-qwen3-14b-{variant}"  # W&B artifact naming
 
     # Modal
     modal_volumes: dict[str, str] = {"repo_cache": "eval-repo-cache", "test_cache": "eval-test-cache"}
@@ -87,9 +86,6 @@ class EvalConfig(BaseSettings):
     # Quality Gates (ADR-005, Master Plan S2)
     min_f2p_threshold: float = 0.15      # Quality floor: minimum F2P to pass
     min_p2p_threshold: float = 0.90      # Regression ceiling: P2P ≥ 90% (no regressions)
-
-    # Cost Tracking
-    cost_per_gpu_hour: float = 1.50      # Modal A10G approximate $/hour
 
     # Sampling
     ci_sample_size: int = 50  # lightweight PR eval
@@ -107,7 +103,7 @@ class EvalConfig(BaseSettings):
     # Comparison
     comparison_run_ids: str = ""         # Comma-separated run IDs for champion selection
 
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="EVAL_")
+    model_config = SettingsConfigDict(env_prefix="EVAL_", env_file=".env")
 ```
 
 ---
@@ -229,16 +225,24 @@ def run_tests_in_container(
     base_sha: str,
     test_patch: str | None,
     generated_patch: str | None,
-    test_dirs: list[str] = ["tests/", "test/"],
-    timeout: int = 30,
-    max_retries: int = 2,
     fail_to_pass: list[str] = [],
     pass_to_pass: list[str] = [],
+    timeout: int = 30,
+    max_retries: int = 2,
 ) -> dict:
     """
     Execute test suite in isolated container.
+    Uses pytest -k "test_name1 or test_name2" to run specific tests from FAIL_TO_PASS/PASS_TO_PASS.
     Returns: {tests_before: [...], tests_after: [...], patch_application: {...}, ground_truth: {...}}
     """
+    # 1. Clone repo to /repo_cache/{repo} if not cached
+    # 2. Checkout base_sha
+    # 3. Run pytest -k "f2p_test1 or f2p_test2 or ..." → tests_before
+    # 4. If test_patch: apply it (ground truth head state)
+    # 5. Run pytest → tests_head (for verification)
+    # 6. If generated_patch: revert to base_sha, apply generated_patch
+    # 7. Run pytest → tests_after
+    # 8. Ground truth verification: compute F2P on test_patch → should be 100%
     # 1. Clone repo to /repo_cache/{repo} if not cached
     # 2. Checkout base_sha
     # 3. Run pytest on test_dirs → tests_before
@@ -317,85 +321,64 @@ def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
 
 ---
 
-### 4.6 `evaluation/harness.py` — **Orchestrator**
+### 4.6 `evaluation/harness.py` — **Orchestrator + Entry Points**
 
 ```python
+class CheckpointManager:
+    """Per-repo checkpoint resume (was resume.py)."""
+    def __init__(self, checkpoint_dir: Path): ...
+    def get_checkpoint_key(self, run_id, repo, model, variant): ...
+    def is_completed(self, key): ...
+    def save_result(self, key, result): ...
+    def load_results(self, run_id): ...
+
+class WandbLogger:
+    """W&B artifact logging (was wandb_logger.py)."""
+    def log_eval_run(run, config): ...
+    def log_per_example(results, run_id): ...
+    def log_aggregate(metrics, run_id): ...
+
 class EvaluationHarness:
     def __init__(self, config: EvalConfig):
         self.config = config
         self.results: list[EvalResult] = []
         self.checkpoint_mgr = CheckpointManager(config.checkpoint_dir)
+        self.logger = WandbLogger(config)
 
     def load_examples(self, split: str = "golden") -> list[EvalInput]:
-        """Load EvalInput from tokenized shards + metadata."""
-        # Read arrow shards, reconstruct EvalInput from metadata
+        """Load EvalInput from GCS golden.jsonl + metadata."""
+        # Read JSONL from GCS, reconstruct EvalInput from metadata
 
     def run_example(self, example: EvalInput, model_name: str, variant: str,
                     prompt_template: str) -> EvalResult:
         """Single example: generate patch → apply → run tests → compute metrics."""
-        # 1. Generate patch via inference (call Modal inference endpoint or local)
-        # 2. Call test_runner.run_tests_in_container.remote()
-        # 3. Compute F2P/P2P via metrics.compute_f2p()
-        # 4. Return EvalResult
 
     def run_batch(self, examples: list[EvalInput], model_name: str, variant: str,
                   prompt_template: str, resume_from: str | None = None) -> list[EvalResult]:
         """Run batch with checkpoint resume per-repo."""
-        # Checkpoint key: {run_id}_{repo}_{model}_{variant}
-        # Skip completed repos
 
     def run_golden(self, models: list[tuple[str, str]],
                    prompt_templates: list[str] = ["chat"]) -> EvalRun:
-        """Main entry: run golden eval on all model/variant/prompt combos."""
-        # Load golden examples
+        """Entry: run golden eval on all model/variant/prompt combos."""
+        # Load golden examples from GCS
         # For each model+variant+prompt: run_batch
         # Aggregate, log to W&B
+
+    def run_swebench_verified(self, models: list[tuple[str, str]]) -> EvalRun:
+        """Entry: filter golden by is_verified, run same harness."""
+
+    def run_baseline(self, model: str = "Qwen/Qwen3-14B") -> EvalRun:
+        """Entry: evaluate unfine-tuned base model (no LoRA)."""
 ```
 
 ---
 
-### 4.7 `evaluation/golden_runner.py`
-
-```python
-@app.local_entrypoint()
-def run_golden(
-    models: str = "qwen3-30b-a3b:baseline,qwen3-30b-a3b:higher_rank,qwen3-30b-a3b:higher_lr",
-    prompts: str = "chat",
-    sample: int = 0,  # 0 = all
-    resume: str | None = None,
-):
-    """CLI entry: modal run evaluation.golden_runner --models '...'"""
-    # Parse models: "model:variant,model:variant"
-    # Load config
-    # Instantiate harness
-    # Run
-```
-
----
-
-### 4.8 `evaluation/swebench_runner.py`
-
-```python
-@app.local_entrypoint()
-def run_swebench_verified(
-    models: str = "qwen3-30b-a3b:baseline,qwen3-30b-a3b:higher_rank,qwen3-30b-a3b:higher_lr",
-    sample: int = 0,
-    resume: str | None = None,
-):
-    """SWE-bench Verified (500) — same harness, filtered dataset."""
-    # Filter examples where metadata.is_verified == true
-    # Run same harness
-    # Log to separate W&B artifact: "eval-swebench-verified"
-```
-
----
-
-### 4.9 `evaluation/prompt_ab_test.py`
+### 4.7 `evaluation/prompt_ab_test.py`
 
 ```python
 @app.local_entrypoint()
 def run_prompt_ab_test(
-    model: str = "qwen3-30b-a3b:baseline",
+    model: str = "qwen3-14b:baseline_14b",
     templates: str = "system,user,assistant,chat",  # or subset
     sample: int = 200,
 ):
@@ -408,24 +391,7 @@ def run_prompt_ab_test(
 
 ---
 
-### 4.10 `evaluation/baseline_runner.py`
-
-```python
-@app.local_entrypoint()
-def run_baseline(
-    model: str = "Qwen/Qwen3-30B-A3B",
-    sample: int = 200,
-):
-    """Evaluate unfine-tuned base model on golden set."""
-    # Load base model via HF (no LoRA)
-    # Run inference on golden examples
-    # Compute F2P/P2P
-    # Log to W&B: "eval-baseline"
-```
-
----
-
-### 4.11 `evaluation/inference.py` — **Batch Inference for Patch Generation**
+### 4.8 `evaluation/inference.py` — **Batch Inference for Patch Generation**
 
 ```python
 # Modal function for vLLM + LoRA batch inference
@@ -462,9 +428,12 @@ def generate_patches_batch(
 
 ---
 
-### 4.12 `evaluation/wandb_logger.py`
+### 4.12 `evaluation/wandb_logger.py` — **W&B Logging (inline in harness.py)**
+
+*Note: WandbLogger class is now inline in `harness.py` (see §4.6). This section documents the logging interface.*
 
 ```python
+# Methods on WandbLogger class in harness.py:
 def log_eval_run(run: EvalRun, config: EvalConfig):
     """Log EvalRun to W&B as artifact + summary metrics."""
     # 1. Per-example: JSONL artifact "eval-results-{run_id}"
@@ -477,59 +446,43 @@ def log_per_example(results: list[EvalResult], run_id: str):
 
 def log_aggregate(metrics: list[F2PMetrics], run_id: str):
     """Log summary scalars to W&B run."""
-
-def log_cost_usd(run: EvalRun, config: EvalConfig):
-    """Compute and log evaluation cost in USD."""
-    total_gpu_hours = sum(r.latency_seconds for r in run.results) / 3600
-    cost_usd = total_gpu_hours * config.cost_per_gpu_hour
-    wandb.run.summary["eval/cost_usd"] = cost_usd
-    wandb.run.summary["eval/gpu_hours"] = total_gpu_hours
-    # Distribute cost proportionally to aggregate metrics
-    for m in run.aggregate:
-        m.cost_usd = cost_usd * (m.total_examples / run.config.total_examples)
 ```
 
 ---
 
-### 4.13 `evaluation/comparison.py` — **NEW: Champion/Challenger Comparison**
+### 4.13 `evaluation/comparison.py` — **Re-validate P4 Proxy Champion**
 
 ```python
 """
-Champion/Challenger comparison framework.
-Loads all eval runs, ranks by F2P, applies P2P floor, promotes champion to W&B Registry.
+Re-validate P4 proxy champion with real F2P.
+Imports select_champion from scripts.f2p_proxy (P4 artifact).
 """
 
 from evaluation.schema import F2PMetrics, EvalRun
 from evaluation.config import EvalConfig
+from scripts.f2p_proxy import select_champion, compute_proxy_f2p_scores  # P4 reuse
 import wandb
 
 
 def load_all_eval_runs(run_ids: list[str]) -> list[EvalRun]:
     """Download and parse EvalRun from W&B artifacts."""
-    runs = []
-    for run_id in run_ids:
-        artifact = wandb.use_artifact(f"eval-aggregate-{run_id}:latest")
-        # Parse JSONL into EvalRun
-    return runs
-
 
 def extract_model_metrics(runs: list[EvalRun]) -> dict[str, F2PMetrics]:
     """Aggregate per-model metrics across runs."""
-    # Group by model_name:variant:prompt
-    # Return best run per model (highest F2P)
 
-
-def select_champion(
+def revalidate_champion(
     metrics: dict[str, F2PMetrics],
+    proxy_champion: str,  # from P4: "baseline_14b"
     min_f2p: float,
     min_p2p: float,
 ) -> tuple[str, F2PMetrics] | None:
     """
-    Champion selection:
+    Re-validate P4 proxy champion with real F2P:
     1. Filter: P2P >= min_p2p (regression ceiling - ADR-005)
     2. Filter: F2P >= min_f2p (quality floor)
     3. Rank remaining by F2P descending
-    4. Return top model + metrics
+    4. If proxy_champion is still #1 → confirmed
+    5. If another model is #1 → proxy was wrong, promote new champion
     """
     candidates = [
         (model, m) for model, m in metrics.items()
@@ -539,61 +492,6 @@ def select_champion(
         return None
     candidates.sort(key=lambda x: x[1].f2p_rate, reverse=True)
     return candidates[0]
-
-
-def promote_champion(
-    champion_model: str,
-    champion_metrics: F2PMetrics,
-    config: EvalConfig,
-    run_id: str,
-):
-    """Write champion to W&B Registry with alias."""
-    api = wandb.Api()
-    # Get model checkpoint artifact from training run
-    # Link eval artifact lineage
-    # Set alias "champion" on model registry
-
-
-@app.local_entrypoint()
-def run_comparison(
-    run_ids: str = "run1,run2,run3,run4",  # baseline + 3 variants
-    min_f2p: float = 0.15,
-    min_p2p: float = 0.90,
-):
-    """CLI: modal run evaluation.comparison --run-ids '...'"""
-    config = EvalConfig()
-    runs = load_all_eval_runs(run_ids.split(","))
-    metrics = extract_model_metrics(runs)
-    result = select_champion(metrics, min_f2p, min_p2p)
-    if result:
-        model, m = result
-        promote_champion(model, m, config, run_id)
-        print(f"CHAMPION: {model} (F2P={m.f2p_rate:.2%}, P2P={m.p2p_rate:.2%})")
-    else:
-        print("NO CHAMPION - all models failed quality gates")
-```
-
----
-
-### 4.14 `evaluation/resume.py`
-
-```python
-class CheckpointManager:
-    def __init__(self, checkpoint_dir: Path):
-        self.checkpoint_dir = checkpoint_dir
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    def get_checkpoint_key(self, run_id: str, repo: str, model: str, variant: str) -> str:
-        return f"{run_id}_{repo}_{model}_{variant}"
-
-    def is_completed(self, key: str) -> bool:
-        return (self.checkpoint_dir / f"{key}.json").exists()
-
-    def save_result(self, key: str, result: EvalResult):
-        (self.checkpoint_dir / f"{key}.json").write_text(result.model_dump_json())
-
-    def load_results(self, run_id: str) -> list[EvalResult]:
-        # Load all checkpoints for run_id
 ```
 
 ---
@@ -603,7 +501,7 @@ class CheckpointManager:
 ```python
 @app.command()
 def run(
-    models: str = typer.Option("qwen3-30b-a3b:baseline,qwen3-30b-a3b:higher_rank,qwen3-30b-a3b:higher_lr"),
+    models: str = typer.Option("qwen3-14b:baseline_14b,qwen3-14b:higher_rank_14b,qwen3-14b:higher_lr_14b"),
     split: str = typer.Option("golden", help="golden|swebench_verified|test"),
     prompts: str = typer.Option("chat"),
     sample: int = typer.Option(0, help="0 = all"),
@@ -640,36 +538,26 @@ def compare(
 
 | Step | Task | File(s) | Estimate | Dependencies |
 |------|------|---------|----------|--------------|
-| 5.0 | Verify Phase 3/4 artifacts exist | — | 15 min | Phase 3, 4 |
+| 5.0 | Verify P3/P4 artifacts + extend `swebench_ingest.py` | swebench_ingest.py | 45 min | P3, P4 |
 | 5.1 | Create `evaluation/config.py` | config.py | 30 min | 5.0 |
 | 5.2 | Create `evaluation/schema.py` | schema.py | 45 min | 5.1 |
 | 5.3 | Create `evaluation/patch_applier.py` | patch_applier.py | 1 hr | 5.1 |
 | 5.4 | Create `evaluation/test_runner.py` (Modal function) | test_runner.py | 3 hrs | 5.1, 5.3 |
 | 5.5 | Create `evaluation/metrics.py` | metrics.py | 45 min | 5.2 |
-| 5.6 | Create `evaluation/resume.py` | resume.py | 30 min | 5.2 |
-| 5.7 | Create `evaluation/harness.py` | harness.py | 2 hrs | 5.2, 5.4, 5.5, 5.6 |
-| 5.8 | Create `evaluation/wandb_logger.py` | wandb_logger.py | 1 hr | 5.2, 5.7 |
-| 5.9 | Create `evaluation/golden_runner.py` | golden_runner.py | 1 hr | 5.7, 5.8 |
-| 5.10 | Create `evaluation/swebench_runner.py` | swebench_runner.py | 45 min | 5.7, 5.8 |
-| 5.11 | Create `evaluation/baseline_runner.py` | baseline_runner.py | 1 hr | 5.7, 5.8 |
-| 5.12 | Create `evaluation/prompt_ab_test.py` | prompt_ab_test.py | 1.5 hrs | 5.7, 5.8 |
-| 5.13 | Create `evaluation/inference.py` | inference.py | 2 hrs | 5.4, 5.7 |
-| 5.14 | Create `evaluation/comparison.py` | comparison.py | 1.5 hrs | 5.8 |
-| 5.15 | Create `evaluation/cli.py` | cli.py | 1 hr | 5.9-5.14 |
-| 5.16 | Unit tests: schema, metrics, patch_applier | test_eval_schema.py, test_eval_metrics.py, test_eval_patch.py | 1.5 hrs | 5.2, 5.3, 5.5 |
-| 5.17 | Integration test: harness mock | test_eval_harness_mock.py | 1 hr | 5.7 |
-| 5.18 | Modal smoke test: test_runner on 1 repo | test_eval_smoke.py (GPU) | 1 hr | 5.4 |
-| 5.19 | CI lightweight test (sample 50) | CI workflow update | 45 min | 5.15 |
-| 5.20 | Baseline model evaluation run | Manual Modal run | 2 hrs | 5.11 |
-| 5.21 | Golden eval: all 3 variants | Manual Modal run | 4 hrs | 5.9 |
-| 5.22 | SWE-bench Verified eval | Manual Modal run | 1 hr | 5.10 |
-| 5.23 | Prompt A/B test run | Manual Modal run | 2 hrs | 5.12 |
-| 5.24 | Compare results, select champion, update W&B alias | Manual | 30 min | 5.21-5.23 |
-| 5.25 | Update check_eval_gate.py with P2P ceiling | scripts/check_eval_gate.py | 15 min | 5.14 |
-| 5.26 | Add ground truth verify to test_runner | test_runner.py | 30 min | 5.4 |
-| 5.27 | Add cost tracking to wandb_logger | wandb_logger.py | 30 min | 5.8 |
+| 5.6 | Create `evaluation/harness.py` | harness.py | 2.5 hrs | 5.2, 5.4, 5.5 |
+| 5.7 | Create `evaluation/prompt_ab_test.py` | prompt_ab_test.py | 1.5 hrs | 5.6 |
+| 5.8 | Create `evaluation/inference.py` | inference.py | 2 hrs | 5.4, 5.6 |
+| 5.9 | Create `evaluation/comparison.py` | comparison.py | 1 hr | 5.6 |
+| 5.10 | Create `evaluation/cli.py` | cli.py | 45 min | 5.6-5.9 |
+| 5.11 | Unit tests: schema, metrics, patch_applier | test_eval_unit.py | 1.5 hrs | 5.2, 5.3, 5.5 |
+| 5.12 | Integration test: harness mock + smoke test | test_eval_integration.py | 1.5 hrs | 5.6 |
+| 5.13 | Baseline model evaluation run | Manual Modal run | 2 hrs | 5.10 |
+| 5.14 | Golden eval: all 3 variants | Manual Modal run | 4 hrs | 5.10 |
+| 5.15 | SWE-bench Verified eval | Manual Modal run | 1 hr | 5.10 |
+| 5.16 | Prompt A/B test run | Manual Modal run | 2 hrs | 5.7 |
+| 5.17 | Re-validate P4 proxy champion | Manual | 30 min | 5.14-5.16 |
 
-**Total: ~30 hours**
+**Total: ~24 hours** (reduced from 30 via consolidation, removed CI/cost tracking)
 
 ---
 
@@ -730,6 +618,7 @@ git apply --check (dry run)
 ## 7. Inference for Patch Generation
 
 **Decision:** Build lightweight inference Modal function in Phase 5 (Option B).
+**Engine:** vLLM (confirmed per ADR & Vision requirement — CV/resume targeting for AI engineering roles).
 
 ```python
 # evaluation/inference.py (new module)
@@ -773,8 +662,6 @@ def generate_patches_batch(
 - `eval/latency_p50`, `eval/latency_p95`
 - `eval/flaky_rate`
 - `eval/successful_patches` / `eval/total_examples`
-- `eval/cost_usd` — total evaluation cost in USD
-- `eval/gpu_hours` — GPU hours consumed
 
 **Lineage:** Each eval artifact references:
 - Model checkpoint artifact (from Phase 4)
@@ -783,79 +670,27 @@ def generate_patches_batch(
 
 ---
 
-## 9. CI Integration
-
-**GitHub Actions workflow (`.github/workflows/eval.yml`):**
-
-```yaml
-name: Evaluation Gate
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-  push:
-    branches: [main]
-
-jobs:
-  eval-sample:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run lightweight eval (50 examples)
-        run: |
-          modal run evaluation.cli run --models "qwen3-30b-a3b:baseline" \
-            --sample 50 --ci-mode
-        env:
-          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      - name: Check F2P gate
-        run: |
-          python scripts/check_eval_gate.py --min-f2p 0.15 --run-id ${{ steps.eval.outputs.run_id }}
-
-  eval-full:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run full golden eval
-        run: modal run evaluation.golden_runner
-      - name: Run SWE-bench Verified eval
-        run: modal run evaluation.swebench_runner
-      - name: Promote if champion
-        run: python scripts/promote_if_champion.py
-```
-
-**Quality gate script (`scripts/check_eval_gate.py`):**
-- Downloads latest eval artifact from W&B
-- Checks if F2P > threshold (configurable, start at 0.15)
-- Exits 1 if fails → blocks PR merge
-
----
-
-## 10. Acceptance Criteria (Phase Exit Gate)
+## 9. Acceptance Criteria (Phase Exit Gate)
 
 | # | Criterion | Verification |
 |---|-----------|--------------|
 | 1 | `evaluation/` package exists with all 15 modules (includes `comparison.py`) | `ls evaluation/` |
-| 2 | `python -m evaluation.cli run --models "qwen3-30b-a3b:baseline" --sample 10` runs without error | Manual test |
-| 3 | Golden eval completes on all 3 variants (3,019 examples each) | Modal run logs |
+| 2 | `python -m evaluation.cli run --models "qwen3-14b:baseline_14b" --sample 10` runs without error | Manual test |
+| 3 | Golden eval completes on all 3 variants (2,056 examples each) | Modal run logs |
 | 4 | F2P/P2P metrics computed and logged to W&B per model/variant | W&B dashboard |
 | 5 | Per-example results artifact exists in W&B with `eval_results` type | W&B UI |
 | 6 | SWE-bench Verified (500) eval runs and logs separate artifact | W&B UI |
 | 7 | Baseline model eval runs and logs artifact | W&B UI |
 | 8 | Prompt A/B test runs (2-3 templates) and logs comparison | W&B UI |
 | 9 | Resume works: interrupt + `--resume run_id` continues from last repo | Manual test |
-| 10 | CI lightweight eval (50 samples) runs in < 10 min | GitHub Actions |
-| 11 | Quality gate script blocks PR if F2P < threshold **OR P2P < 90%** | GitHub Actions |
-| 12 | Unit tests pass: `pytest tests/test_eval_*.py` | CI |
+| 10 | `swebench_ingest.py` populates `metadata.base_sha`, `metadata.test_patch` | Unit test |
+| 11 | Unit tests pass: `pytest tests/test_eval_unit.py` | CI |
+| 12 | Integration tests pass: `pytest tests/test_eval_integration.py` | CI |
 | 13 | Patch application: git apply → unidiff fallback verified on real patches | Unit test |
 | 14 | Flaky detection marks inconsistent tests correctly | Unit test |
-| 15 | `evaluation/comparison.py` selects champion from 4 runs, enforces P2P ≥ 90% | Manual test |
-| 16 | Quality gate blocks PR if any model has P2P < 90% (regression ceiling) | GitHub Actions |
-| 17 | Ground truth verification runs and logs warning if F2P < 100% | Modal run logs |
-| 18 | Cost (USD) logged to W&B per eval run | W&B dashboard |
-| 19 | Champion written to W&B Registry with `champion` alias | W&B Registry |
+| 15 | `evaluation/comparison.py` re-validates P4 proxy champion | Manual test |
+| 16 | Ground truth verification runs and logs warning if F2P < 100% | Modal run logs |
+| 17 | `scripts.f2p_proxy.select_champion` imported (not re-implemented) | Code review |
 
 ---
 
@@ -868,22 +703,21 @@ jobs:
 | vLLM + LoRA loading fails in inference function | Medium | High | Test inference function separately (Step 5.0 infra check) |
 | Generated patches have syntax errors | High | Medium | Patch validation in `patch_applier` catches; log, continue |
 | F2P rates very low (< 5%) on all variants | Medium | High | Baseline establishes floor; if all low, data/training issue |
-| CI timeout on eval sample | Low | Medium | 50 samples × 30s/test × 2 repos ≈ 5 min; well under timeout |
-| W&B artifact download fails in CI | Low | Medium | Retry logic in gate script; cache locally |
+| W&B artifact download fails | Low | Medium | Retry logic in artifact loader; cache locally |
 
 ---
 
 ## 12. Definition of Done
 
-1. All 27 implementation steps complete
-2. All 19 acceptance criteria verified
-3. `pytest tests/test_eval_*.py` passes (≥ 25 test cases)
+1. All 17 implementation steps complete
+2. All 17 acceptance criteria verified
+3. `pytest tests/test_eval_unit.py` and `tests/test_eval_integration.py` pass (≥ 25 test cases)
 4. Golden eval run ID recorded, W&B artifacts visible
 5. SWE-bench Verified run ID recorded
 6. Baseline eval run ID recorded
 7. Prompt A/B run ID recorded
-8. Quality gate script tested on PR
-9. Champion model identified from real F2P (not proxy) → W&B Registry `champion` alias updated
+8. Champion model identified from real F2P (not proxy) → W&B Registry `champion` alias updated
+9. `swebench_ingest.py` extended with `base_sha` and `test_patch` population
 
 ---
 
@@ -912,28 +746,20 @@ swe-qwen/
 │   ├── patch_applier.py
 │   ├── test_runner.py
 │   ├── metrics.py
-│   ├── harness.py
-│   ├── golden_runner.py
-│   ├── swebench_runner.py
+│   ├── harness.py              # includes: runners, resume, wandb_logger
 │   ├── prompt_ab_test.py
-│   ├── baseline_runner.py
-│   ├── inference.py          # NEW: batch inference for patch gen
-│   ├── wandb_logger.py
-│   ├── comparison.py         # NEW: Champion/Challenger comparison
-│   ├── resume.py
-│   └── cli.py
+│   ├── inference.py            # batch inference for patch gen
+│   ├── comparison.py           # re-validate P4 proxy champion
+│   └── cli.py                  # Typer CLI entrypoint
+├── data_engineering/
+│   ├── swebench_ingest.py      # extended: base_sha, test_patch
 ├── scripts/
-│   ├── check_eval_gate.py    # NEW: CI quality gate (F2P + P2P gates)
-│   └── promote_if_champion.py # NEW: Phase 9 prep
+│   ├── f2p_proxy.py            # P4 artifact (imported by comparison.py)
+│   └── run_3config_comparison.py
 ├── tests/
-│   ├── test_eval_schema.py
-│   ├── test_eval_metrics.py
-│   ├── test_eval_patch.py
-│   ├── test_eval_harness_mock.py
-│   └── test_eval_smoke.py
-├── .github/workflows/
-│   └── eval.yml              # NEW: CI evaluation gate
-└── data/eval_checkpoints/    # Created at runtime
+│   ├── test_eval_unit.py       # schema, metrics, patch_applier
+│   └── test_eval_integration.py  # harness mock, smoke test
+└── data/eval_checkpoints/      # Created at runtime
 ```
 
 ---
@@ -946,17 +772,17 @@ swe-qwen/
 | Q2: Patch application | C — git apply → unidiff fallback | Faithful to real workflow, robust fallback |
 | Q3: Flaky test handling | A — Retry 2x, mark flaky | Balance of rigor and speed |
 | Q4: Timeout strategy | A — Per-test 30s, per-repo 5min | Prevents hangs |
-| Q5: Golden eval scope | B — Verified+Test+Dev (3,019) | Execution-verifiable ground truth |
+| Q5: Golden eval scope | B — Verified+Test+Dev (2,056) | Execution-verifiable ground truth |
 | Q6: SWE-bench Verified secondary | A — Yes | Enables comparison to published results |
 | Q7: Baseline evaluation | A — Run actual baseline model | Real F2P for Champion/Challenger |
-| Q8: Fine-tuned evaluation | B — All 3 variants | Proxy-based champion needs re-validation |
+| Q8: Fine-tuned evaluation | B — All 3 variants | Re-validate P4 proxy champion (`baseline_14b`) with real F2P |
 | Q9: Output format | C — Both per-example + aggregate | Debugging + dashboards |
 | Q10: W&B integration | A — Read from Registry `champion` alias | Clean separation, enables Phase 9 |
 | Q11: Prompt A/B testing | A — Yes | MASTER-PLAN 4.3 requirement |
 | Q12: SWE-bench runner | A — Same harness, filtered data | DRY, consistent metrics |
 | Q13: Module structure | A — Flat like data_engineering/ | Proven pattern |
 | Q14: Resume support | A — Yes, per-repo checkpoints | Long runs need resilience |
-| Q15: CI integration | C — Lightweight sample on PR, full on merge | Prevents CI timeout |
+| Q15: Cost tracking | DEFERRED | Not needed for P5; add when eval runs become cost-significant |
 
 ---
 
@@ -966,11 +792,11 @@ The following 7 gaps were identified during plan review against Master Plan/ADR 
 
 | Gap | Fix | Location |
 |-----|-----|----------|
-| 1. Missing comparison framework for champion selection (Master Plan 4.12, 5.8) | Added `evaluation/comparison.py` with `select_champion()`, `promote_champion()`, CLI entry | Section 4.13, Step 5.14 |
-| 2. Missing P2P ≥ 90% regression ceiling gate (ADR-005, S2) | Added `min_p2p_threshold` to config; updated `check_eval_gate.py` to check both F2P and P2P | Section 4.1, Step 5.25 |
-| 3. Missing ground truth test_patch verification | Added ground truth verification in `test_runner.py` — computes F2P on test_patch, warns if < 100% | Section 4.4, Step 5.26 |
-| 4. Missing cost tracking | Added `cost_usd` logging in `wandb_logger.py` using GPU hours × $1.50/hr | Section 4.12, Step 5.27 |
-| 5. Golden set size discrepancy (3,019 vs 8-12k) | Clarified: Golden = 3,019 (Verified+Test+Dev, execution-verifiable); Training = ~10,882 (includes Train split) | Below |
+| 1. Missing comparison framework for champion selection (Master Plan 4.12, 5.8) | Added `evaluation/comparison.py` — reuses P4 `f2p_proxy.py` `select_champion()`, re-validates proxy champion with real F2P | Section 4.13, Step 5.9 |
+| 2. Missing P2P ≥ 90% regression ceiling gate (ADR-005, S2) | Added `min_p2p_threshold` to config; enforced in `comparison.py` | Section 4.1, Section 4.13 |
+| 3. Missing ground truth test_patch verification | Added ground truth verification in `test_runner.py` — computes F2P on test_patch, warns if < 100% | Section 4.4 |
+| 4. Missing cost tracking | DEFERRED — not needed for P5; add when eval runs become cost-significant | N/A |
+| 5. Golden set size discrepancy (2,056 vs 8-12k) | Clarified: Golden = 2,056 (Verified+Test+Dev, execution-verifiable); Training = ~10,882 (includes Train split) | Below |
 | 6. Execution feedback deferral undocumented | Documented: deferred to v2 (Phase 11+); Phase 5 uses single-turn issue→patch→evaluate | Below |
 | 7. Docker caching strategy underspecified | Specified: pre-built base image with common deps; per-repo pip cache in Modal volume | Section 6 |
 
@@ -978,11 +804,11 @@ The following 7 gaps were identified during plan review against Master Plan/ADR 
 
 | Split | Source | Count | Purpose |
 |-------|--------|-------|---------|
-| **Golden (eval)** | SWE-bench Verified + Test + Dev | **3,019** | Execution-verifiable F2P evaluation |
+| **Golden (eval)** | SWE-bench Verified + Test + Dev | **2,056** | Execution-verifiable F2P evaluation |
 | **Training** | SWE-bench Train (Python) + Verified + Test + Dev | **~10,882** | Model training (issue→patch) |
 | **SWE-bench Verified (benchmark)** | SWE-bench Verified only | **500** | Published benchmark comparison |
 
-**Master Plan "8-12k" = training set. Phase 5 golden = 3,019.** Discrepancy resolved.
+**Master Plan "8-12k" = training set. Phase 5 golden = 2,056.** Discrepancy resolved.
 
 ### Execution Feedback Deferral
 

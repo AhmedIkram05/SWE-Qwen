@@ -55,7 +55,7 @@ The platform demonstrates the complete lifecycle of developing, evaluating, depl
 
 | Decision | Value | Source |
 |----------|-------|--------|
-| Foundation model | Qwen3-30B-A3B (MoE, 3B active), fallback Qwen3-14B | Conversation decision |
+| Foundation model | Qwen3-14B (primary), Qwen3-30B-A3B (future) | Conversation decision + P4 pivot |
 | GPU platform | Modal (standardized, Baseten removed) | Conversation decision |
 | Training platform | Modal | Conversation decision |
 | Cloud provider | GCP only | Conversation decision |
@@ -98,7 +98,7 @@ The project is successful when **all** of the following are true:
 | Workstream | Primary Metric | Gate |
 |------------|---------------|------|
 | Data Pipeline | All records pass schema validation + dedup + F2P heuristics | Zero duplicates, no invalid records after cleaning |
-| Fine-Tuning | QLoRA convergence without OOM | Training completes within Modal GPU budget (A100 40GB for 30B MoE) |
+| Fine-Tuning | QLoRA convergence without OOM | Training completes within Modal GPU budget (A10G 24GB for 14B QLoRA) |
 | Evaluation | F2P rate measured on golden set | Golden set results logged to W&B per run |
 | Inference | OpenAI-compatible API responds to chat completions | Integration test passes against running endpoint |
 | Infrastructure | Terraform plan applies cleanly | Zero manual interventions required |
@@ -233,10 +233,16 @@ swe-qwen/
 │   └── callbacks.py       # W&B logging callbacks
 ├── evaluation/
 │   ├── __init__.py
-│   ├── harness.py         # F2P evaluation engine
-│   ├── test_runner.py     # Execute test suites against patches
-│   ├── metrics.py         # F2P, P2P computation
-│   └── golden_set.py      # Golden test set management
+│   ├── config.py
+│   ├── schema.py
+│   ├── patch_applier.py
+│   ├── test_runner.py
+│   ├── metrics.py
+│   ├── harness.py                  ← F2P engine (includes runners, resume, W&B logging)
+│   ├── prompt_ab_test.py
+│   ├── inference.py                ← batch inference for patch gen
+│   ├── comparison.py               ← re-validate P4 proxy champion
+│   └── cli.py                      ← Typer CLI entrypoint
 ├── models/
 │   └── checkpoints/       # LoRA adapter storage (gitignored)
 ├── .github/workflows/
@@ -626,14 +632,16 @@ swe-qwen/
 | 5.2 | Build test suite execution engine (run pytest against repo with patch applied) | `evaluation/test_runner.py` |
 | 5.3 | Implement F2P computation (failing tests before fix that pass after) | `evaluation/metrics.py` |
 | 5.4 | Implement P2P computation (passing tests that stay passing — regression safety) | Regression safety calc |
-| 5.5 | Add golden eval subset runner (apply model-generated patch to each golden example, run tests) | `evaluation/golden_runner.py` |
-| 5.6 | **Add SWE-bench Verified subset evaluation runner** (download SWE-bench Verified, run model on subset, log results as secondary benchmark alongside golden set) | `evaluation/swebench_runner.py` |
-| 5.7 | Implement W&B evaluation artifact logging (metrics, examples, diffs) | W&B integration |
-| 5.8 | Build comparison framework (baseline model vs. fine-tuned model on same golden set) | Comparison reports |
+| 5.5 | Add golden eval subset runner (apply model-generated patch to each golden example, run tests) | `evaluation/harness.py` (consolidated) |
+| 5.6 | **Add SWE-bench Verified subset evaluation runner** (download SWE-bench Verified, run model on subset, log results as secondary benchmark alongside golden set) | `evaluation/harness.py` (consolidated) |
+| 5.7 | Implement W&B evaluation artifact logging (metrics, examples, diffs) | `evaluation/harness.py` (inline) |
+| 5.8 | Build comparison framework (baseline model vs. fine-tuned model on same golden set) | `evaluation/comparison.py` |
 | 5.9 | Run evaluation on baseline (unfine-tuned) model | Baseline metrics |
 | 5.10 | Run evaluation on fine-tuned model | Fine-tuned metrics |
-| 5.11 | Write unit + integration tests for evaluation modules | `tests/test_evaluation.py` |
-| 5.11 | **SWE-bench Verified subset integration**: add SWE-bench Verified as an additional evaluation tier; run baseline + fine-tuned on SWE-bench Verified subset for external benchmark comparability | `evaluation/swebench.py`, SWE-bench results in W&B |
+| 5.11 | Write unit + integration tests for evaluation modules | `tests/test_eval_unit.py`, `tests/test_eval_integration.py` |
+| 5.12 | **Re-validate P4 proxy champion** with real F2P (not fresh selection) | Champion re-validation |
+
+> **Note:** Golden, SWE-bench, and baseline runners are consolidated into `evaluation/harness.py` for brevity. W&B logging and resume logic are inline in `harness.py`. See `PHASE-5-EVALUATION-HARNESS.md` for module details.
 
 **Dependencies:** Phase 4 complete (model checkpoint required). Phase 3 complete (golden eval subset required).
 
@@ -970,7 +978,7 @@ swe-qwen/
 | 11.2 | Add retry logic with exponential backoff to GitHub API calls | Updated ingest.py |
 | 11.3 | Add retry logic to Modal API calls | Updated modal_train.py, modal_serve.py |
 | 11.4 | Add input validation hardening to inference API | Updated openai_compat.py |
-| 11.5 | Implement model fallback chain (Qwen3-30B-A3B → Qwen3-14B) | Fallback logic |
+| 11.5 | Implement model fallback chain (Qwen3-14B → Qwen3-30B-A3B) | Fallback logic |
 | 11.6 | Add circuit breaker for GitHub API (fail fast if rate limited) | Circuit breaker |
 | 11.7 | Expand edge case test coverage (malformed patches, empty repos, missing test suites) | Expanded tests |
 | 11.8 | Validate error messages are actionable and logged | Error message audit |
@@ -1225,7 +1233,7 @@ Phase 13 (requires Phase 12) ◄────────────────
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|------|-----------|--------|-----------|
-| R1 | Qwen3-30B-A3B exceeds available VRAM on Modal | Medium | High | Baseline evaluation in Phase 4; fallback to Qwen3-14B if budget is tight; use QLoRA 4-bit to reduce memory (~15GB for weights). A100 40GB is sufficient |
+| R1 | Qwen3-30B-A3B exceeds available VRAM on Modal | ~~Medium~~ Resolved | ~~High~~ N/A | **Phase 4 pivot: 14B-only, 30B excluded.** Qwen3-14B on A10G 24GB works. 30B config retained for future phases |
 | R2 | Dataset yield is lower than expected (fewer valid issue-PR pairs than 8k) | Medium | Medium | Start with larger candidate pool (up to 20 repos); accept smaller dataset if quality is high; synthetic examples only as last resort |
 | R3 | Modal costs unexpectedly high for training runs | Low-Medium | Medium | Use Modal's scale-to-zero for training; benchmark cost per hour pre-committed; set budget alerts; document cost per experiment |
 | R4 | vLLM cold start latency too high for production feel | Medium | Low | Acceptable for V1 (scale-to-zero tradeoff); optimization deferred to v2. Document as known limitation |
@@ -1271,7 +1279,7 @@ tests/
 ### Key Test Cases
 
 1. **Data Pipeline:** Given 10 repos with issues and PRs, produce ≥8k validated examples with schema compliance ≥95%
-2. **Training:** Given a dataset, training completes without OOM within Modal GPU budget (A100 40GB for 30B MoE; A10G 24GB for 14B dense)
+2. **Training:** Given a dataset, training completes without OOM within Modal GPU budget (A10G 24GB for 14B dense)
 3. **Evaluation:** Given a fine-tuned model and golden set, F2P rate is computed and logged to W&B
 4. **Inference:** Given an OpenAI-compatible request, the endpoint returns a valid completion in <500ms p50
 5. **Promotion:** Given a candidate model better than champion by threshold, promotion triggers deployment
@@ -1489,7 +1497,7 @@ This section maps every implementation decision in this Master Plan back to the 
 
 | Master Plan Decision | ADR / Conversation Ref | Status |
 |----------------------|----------------------|--------|
-| Foundation model: Qwen3-30B-A3B (MoE), fallback Qwen3-14B | Conversation decision | Locked |
+| Foundation model: Qwen3-14B (primary), Qwen3-30B-A3B (future) | Conversation decision + P4 pivot | Locked |
 | GPU platform: Modal only (Baseten removed) | Conversation decision + ADR-010 update | Locked |
 | Training on Modal | Conversation decision | Locked |
 | GCP only for cloud | Conversation decision | Locked |
@@ -1618,7 +1626,7 @@ modal_config:
   # Training
   training:
     image: "python:3.11-slim"
-    gpu: "A100"       # 40GB VRAM, fits Qwen3-30B-A3B QLoRA 4-bit
+    gpu: "A10G"      # 24GB VRAM, fits Qwen3-14B QLoRA 4-bit (P4 pivot: 14B-only)
     timeout: 3600      # 1 hour max per training job
     volumes:
       - /models       # Persistent storage for checkpoints
@@ -1698,11 +1706,16 @@ swe-qwen/
 │   └── schema.py
 ├── evaluation/                        ← WS-4: evaluation harness
 │   ├── __init__.py
-│   ├── harness.py
+│   ├── config.py
+│   ├── schema.py
+│   ├── patch_applier.py
 │   ├── test_runner.py
 │   ├── metrics.py
-│   ├── golden_set.py
-│   └── schema.py
+│   ├── harness.py                  ← F2P engine (includes runners, resume, W&B logging)
+│   ├── prompt_ab_test.py
+│   ├── inference.py                ← batch inference for patch gen
+│   ├── comparison.py               ← re-validate P4 proxy champion
+│   └── cli.py                      ← Typer CLI entrypoint
 ├── promotion/                         ← WS-5: Champion/Challenger
 │   ├── __init__.py
 │   ├── gate.py
