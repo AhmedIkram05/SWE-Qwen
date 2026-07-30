@@ -231,6 +231,7 @@ wandb/
 
 # Modal
 .modal/
+models/
 
 # Service account keys (GCP)
 *-sa-key.json
