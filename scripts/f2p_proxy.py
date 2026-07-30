@@ -1,9 +1,8 @@
 """Proxy F2P (Fail-to-Pass) scorer for Phase 4 champion selection.
 
 True F2P evaluation runs a generated patch against the real test suite
-(Phase 5).  This proxy computes a heuristic score using test-file overlap
-and fix keywords — enough to rank variants for champion selection, not a
-substitute for the real harness.
+(Phase 5).  This proxy uses W&B training loss as a heuristic — lower loss
+indicates better learning.  Not a substitute for the real harness.
 
 The proxy DOES NOT need a GPU or a model adapter.
 """
@@ -11,95 +10,61 @@ The proxy DOES NOT need a GPU or a model adapter.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
-
-
-def score_proxy_f2p(
-    record: dict[str, Any],
-    generated_patch: str = "",
-) -> float:
-    """Compute a heuristic proxy F2P score for one record.
-
-    When *generated_patch* is empty (no model output yet) the function
-    returns ``0.0`` — all ``patch_present`` tests will score zero, which
-    is correct for pre-training comparison.
-
-    Scoring components (each 0-1):
-      - ``patch_present``   — non-empty patch diff exists           (33 %)
-      - ``test_match``      — generated patch touches test files    (33 %)
-      - ``fix_keywords``    — issue body contains fix indicators    (33 %)
-
-    Returns:
-        Score in ``[0.0, 1.0]``.
-    """
-    score = 0.0
-
-    # 1. Patch presence (33 %)
-    if generated_patch.strip():
-        score += 1 / 3
-
-    # 2. Test-file match (33 %)
-    test_files: list[str] = record.get("test_files_changed") or []
-    if (
-        test_files and test_files[0] and generated_patch.strip()
-    ):  # at least one real test file + patch
-        for tf in test_files:
-            fname = Path(tf).name
-            if fname in generated_patch:
-                score += 1 / 3
-                break
-
-    # 3. Fix keywords in issue body (33 %)
-    body: str = record.get("issue_body") or ""
-    fix_patterns = [
-        r"\bfix\b",
-        r"\bbug\b",
-        r"\berror\b",
-        r"\bfail",
-        r"\bcrash\b",
-        r"\bincorrect\b",
-        r"\bwrong\b",
-        r"\bbroken\b",
-    ]
-    for pat in fix_patterns:
-        if re.search(pat, body, re.IGNORECASE):
-            score += 1 / (3 * len(fix_patterns))
-
-    return round(min(score, 1.0), 4)
 
 
 def compute_proxy_f2p_scores(
     golden_path: Path,
     variant_adapter_map: dict[str, str],
 ) -> dict[str, dict[str, Any]]:
-    """Compute mean proxy F2P for each variant.
+    """Compute mean proxy F2P for each variant using W&B training loss.
 
-    Args:
-        golden_path: Path to ``golden.jsonl``.
-        variant_adapter_map: ``{variant_name: /path/to/adapter_or_empty}``.
+    In Phase 4 we don't have model-generated patches, so the proxy scores
+    variants by their W&B training loss (lower loss → higher score).
+    The golden_path is read to confirm it's valid but not used for scoring.
 
     Returns:
-        ``{variant: {"mean_f2p": float, "count": int, "warnings": [str]}}``.
+        ``{variant: {"mean_f2p": float, "count": int}}``
+        Higher mean_f2p = better (inverted from loss).
     """
+    # Confirm golden set is valid
     with golden_path.open() as f:
         records = [json.loads(line) for line in f if line.strip()]
 
-    results: dict[str, dict[str, Any]] = {}
-    for variant, adapter_path in variant_adapter_map.items():
-        total = 0.0
-        count = len(records)
-        for rec in records:
-            # In Phase 4, we don't have model-generated patches yet,
-            # so pass empty string — proxy evaluates ground-truth signals
-            total += score_proxy_f2p(rec, adapter_path if adapter_path else "")
+    import wandb
 
-        mean_f2p = total / count if count > 0 else 0.0
+    api = wandb.Api(timeout=30)
+    results: dict[str, dict[str, Any]] = {}
+    for variant in variant_adapter_map:
+        # Find the W&B run for this variant
+        runs = api.runs("swe-qwen", {"config.variant": variant})
+        if not runs:
+            results[variant] = {
+                "mean_f2p": 0.0,
+                "count": len(records),
+                "warning": "no W&B run found",
+            }
+            continue
+
+        # Use the most recent run
+        run = sorted(runs, key=lambda r: r.created_at, reverse=True)[0]
+        train_loss = run.summary.get("train_loss", None)
+        if train_loss is None:
+            results[variant] = {
+                "mean_f2p": 0.0,
+                "count": len(records),
+                "warning": "no train_loss in summary",
+            }
+            continue
+
+        # Invert loss: lower loss → higher score. Scale to ~[0, 1] range.
+        # Typical train_loss for QLoRA is ~0.8-1.2, so 2 - loss gives ~0.8-1.2 → clamp to [0, 1]
+        score = max(0.0, min(1.0, 2.0 - train_loss))
         results[variant] = {
-            "mean_f2p": round(mean_f2p, 4),
-            "count": count,
-            "patch_present": adapter_path != "",
+            "mean_f2p": round(score, 4),
+            "count": len(records),
+            "train_loss": round(train_loss, 4),
         }
 
     return results
@@ -109,5 +74,5 @@ def select_champion(
     scores: dict[str, dict[str, Any]],
 ) -> str:
     """Return the variant name with the highest mean F2P."""
-    best = max(scores, key=lambda v: scores[v]["mean_f2p"])
+    best = max(scores, key=lambda v: scores[v].get("mean_f2p", 0.0))
     return best
