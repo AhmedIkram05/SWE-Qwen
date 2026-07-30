@@ -51,7 +51,7 @@ jobs:
             venv-${{ runner.os }}-
 
       - name: Install dependencies
-        run: uv sync --group dev
+        run: uv sync --extra dev
 
       - name: Run Ruff (lint)
         run: ruff check data_engineering/ src/ tests/
