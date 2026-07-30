@@ -28,7 +28,7 @@ Build an **execution-based evaluation harness** that:
 | Phase 3 | SWE-bench Verified subset (500) | Same location, filter by `metadata.is_verified==true` |
 | Phase 4 | Tokenized shards for inference | `data/tokenized/shards/test/` |
 | Phase 4 | Trained model checkpoints (3 variants) | W&B Registry artifacts: `model_checkpoint` type |
-| Phase 4 | Baseline model (Qwen3-30B-A3B) | HF Hub `Qwen/Qwen3-30B-A3B` |
+| Phase 4 | Baseline model (Qwen3-14b) | HF Hub `Qwen/Qwen3-14b` |
 | Phase 4 | Prompt templates (4 Jinja2) | `training/prompts/*.j2` |
 
 ---
