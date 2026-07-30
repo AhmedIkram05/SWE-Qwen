@@ -54,17 +54,17 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run Ruff (lint)
-        run: ruff check data_engineering/ src/ tests/
+        run: uv run ruff check data_engineering/ src/ tests/
 
       - name: Run Ruff (format check)
-        run: ruff format --check data_engineering/ src/ tests/
+        run: uv run ruff format --check data_engineering/ src/ tests/
 
       - name: Run MyPy
-        run: mypy data_engineering/ src/
+        run: uv run mypy data_engineering/ src/
 
       - name: Run pytest with coverage
         run: |
-          pytest tests/ -v --tb=short -x \
+          uv run pytest tests/ -v --tb=short -x \
             -m "not requires_credentials" \
             --cov=data_engineering --cov=src --cov-report=xml
 
