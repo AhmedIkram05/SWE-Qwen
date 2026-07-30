@@ -989,3 +989,80 @@ Each Phase follows this structure:
 ---
 
 *Update this log during implementation. Do not retroactively edit past phases after completion — append clarifications as new entries if needed.*
+
+## Phase 3b (Extension): GCS Fix + Synthetic Disable + Tokenization Integration — 2026-07-30
+
+### Deviation Log
+
+| Task | Planned | Actual | Reason | Impact |
+|------|---------|--------|--------|--------|
+| 3b.25 | Fix GCS save bug | Fixed `_save_stage_gcs` to handle dict vs Pydantic model | `model_dump()` called on dict caused `'dict' object has no attribute 'model_dump'` | High |
+| 3b.26 | Disable synthetic augmentation by default | `augment_codecontests=False`, `augment_codealpaca=False` in config + CLI | Pure SWE-bench pipeline for primary experiment; avoids distribution shift | High |
+| 3b.27 | Change golden_source_split to "test" | Config default from "all" → "test" | Held-out eval set from test split only; zero leakage from train/val | High |
+| 3b.28 | Integrate tokenization into pipeline | New `tokenize` stage runs automatically at end | End-to-end: JSONL → .arrow shards → GCS in single pipeline run | High |
+| 3b.29 | Add tokenize stage to pipeline orchestrator | `_STAGE_MAP` + `_stage_enabled()` + CLI flags | Tokenization now part of standard pipeline flow | Medium |
+| 3b.30 | Add tokenize config fields | `tokenize_model`, `tokenize_max_length` in DataPipelineConfig | Configurable model + sequence length for tokenization | Low |
+| 3b.31 | Add tokenize CLI flags | `--tokenize-model`, `--tokenize-max-length` | User override without editing config | Low |
+| 3b.32 | Add tokenized_paths to PipelineResult | Schema extended with tokenized_paths dict | Downstream consumers (training) get tokenized data location | Low |
+
+### Decisions Made
+
+| Decision | Context | Alternatives Considered | Rationale |
+|----------|---------|------------------------|-----------|
+| Fix GCS save with hasattr check | `records` can be list of dicts or Pydantic models | Force all records to Pydantic before save | Minimal change; handles both checkpoint load (dicts) and fresh pipeline (models) |
+| Disable synthetic by default | Primary experiment should use pure SWE-bench | Keep enabled, document caveats | Cleaner baseline; ablation can re-enable via flags; avoids competitive programming distribution shift |
+| golden_source_split = "test" | MASTER-PLAN says golden from test split; earlier implementation used "all" | Keep "all" with Train+Test+Dev | "test" ensures held-out eval; Train has no test patches (no F2P); Dev small |
+| Tokenize as final pipeline stage | Phase 4 expects .arrow shards; manual step is error-prone | Separate script, manual invocation | Automated end-to-end pipeline; GCS upload built-in; reproducible |
+| Keep synthetic code in repo | Code works, tested, may be useful for ablation | Delete synthetic_augment.py | Stronger portfolio story: "clean baseline + ablation available"; git history preserves work |
+
+### Blockers & Resolutions
+
+| Blocker | Discovered | Resolved | Resolution | Time Lost |
+|---------|------------|----------|------------|-----------|
+| GCS save: `'dict' object has no attribute 'model_dump'` | 2026-07-30 | 2026-07-30 | `_save_stage_gcs`: check `hasattr(r, "model_dump")` before calling; fallback to `json.dumps(r)` | 10 min |
+| Synthetic augmentation running despite config=False | 2026-07-30 | 2026-07-30 | CLI defaults were `True` while config defaults were `False`; aligned both to `False` | 5 min |
+| Golden set included Train split (leakage risk) | 2026-07-30 | 2026-07-30 | Changed `golden_source_split` default from "all" → "test" | 5 min |
+
+### Technical Details (For Future Phases)
+
+| Area | Detail | Why It Matters |
+|------|--------|----------------|
+| GCS save fix | `_save_stage_gcs` now handles both `IssueRecord` (has model_dump) and `dict` (from checkpoint load) | Pipeline resume loads JSONL as dicts; fresh run passes Pydantic models; both must serialize |
+| Tokenization integration | `tokenize_pipeline()` called after archive/card; uses `tokenize_model` + `tokenize_max_length` from config | Single command produces JSONL + .arrow + GCS uploads for both |
+| Tokenized GCS path | `gs://swe-qwen-datasets/tokenized/{run_id}/{train,val,test,golden}/data-*.arrow` | Phase 4 `modal_train.py` loads via `load_tokenized_shards()` from local or GCS |
+| PipelineResult.tokenized_paths | Dict with keys: train, val, test, golden, dataset_dict pointing to local dirs | Downstream scripts can programmatically locate tokenized data |
+
+### Scope Changes
+
+| Change | Added/Removed/Modified | Justification |
+|--------|------------------------|---------------|
+| `_save_stage_gcs` hasattr fix | Modified | Bug fix: dict vs model serialization |
+| `config.py` defaults: `augment_codecontests=False`, `augment_codealpaca=False` | Modified | Pure SWE-bench baseline |
+| `config.py` default: `golden_source_split="test"` | Modified | Held-out eval, no leakage |
+| `config.py` fields: `tokenize_model`, `tokenize_max_length` | Added | Tokenization config |
+| `cli.py` flags: `--tokenize-model`, `--tokenize-max-length` | Added | User override |
+| `run_pipeline.py`: tokenize stage + `_STAGE_MAP` entry | Added | Automated tokenization |
+| `schema.py`: `PipelineResult.tokenized_paths` | Added | Return tokenized data locations |
+| `run_pipeline.py`: `--stages` includes `tokenize` by default | Modified | End-to-end default |
+
+### Metrics / Observations
+
+- **Run 92621d209d01** (resume from cleaned): 2,056 cleaned → 1,115 train / 95 val / 846 test / 846 golden — **no synthetic, golden from test only** ✅
+- **Run e7107c3bd883** (full with tokenize): 2,056 cleaned → 1,561 train / 118 val / 377 test / 377 golden + **tokenized .arrow shards uploaded to GCS** ✅
+- **GCS artifacts**: Both `datasets/{run_id}/` (JSONL) and `tokenized/{run_id}/` (.arrow) present
+- **W&B artifacts**: 8 dataset artifacts per run + proper lineage
+- **All 183 data engineering tests pass** (including new synthetic + SWE-bench tests)
+- **Tokenization stats**: train 1115/1561 examples, avg 961/942 tokens (max_length=4096), labels masked with -100 for prompt portion
+
+---
+
+## Phase 5: Evaluation Harness — YYYY-MM-DD
+
+### Deviation Log
+
+| Task | Planned | Actual | Reason | Impact |
+|------|---------|--------|--------|--------|
+| 5.1 | Evaluation schema | | | |
+| 5.2 | Test runner | | | |
+| 5.3 | F2P computation | | | |
+| 5.4 | P2P computation | | | |
