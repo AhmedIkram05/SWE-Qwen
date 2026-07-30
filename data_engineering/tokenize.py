@@ -135,7 +135,7 @@ def format_training_prompt(record: dict[str, Any], prompt_loader: PromptLoader) 
 
 def tokenize_split(
     records: list[dict[str, Any]],
-    tokenizer: AutoTokenizer,
+    tokenizer: Any,
     prompt_loader: PromptLoader,
     max_length: int,
     split_name: str = "train",
@@ -341,8 +341,7 @@ def tokenize_pipeline(  # noqa: PLR0913, PLR0917
         )
 
     # Build DatasetDict
-    # type: ignore[arg-type] — DatasetDict accepts dict[str, Dataset] at runtime
-    full_ds = DatasetDict(dataset_dict)  # type: ignore[arg-type]
+    full_ds = DatasetDict(dataset_dict)  # type: ignore[operator]
 
     # Save to disk
     out_path.mkdir(parents=True, exist_ok=True)

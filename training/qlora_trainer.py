@@ -97,7 +97,7 @@ class QLoRATrainer:
         self.lora_config: LoraConfig | None = None
         self.training_args: TrainingArguments | None = None
         self.model: Any = None
-        self.tokenizer: PreTrainedTokenizer | None = None
+        self.tokenizer: Any = None
         self.train_dataset: Any = None
         self.eval_dataset: Any = None
         self.trainer: SFTTrainer | None = None
@@ -343,6 +343,7 @@ class QLoRATrainer:
                 logger.warning("Resume path not found, starting from scratch")
 
         logger.info("Starting training (variant=%s, model=%s)...", self.variant, self.model_name)
+        assert self.trainer is not None
         train_result = self.trainer.train(resume_from_checkpoint=resume_path)
 
         # Save final model

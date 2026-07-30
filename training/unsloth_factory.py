@@ -279,7 +279,7 @@ def _build_fallback(
     # Apply PEFT LoRA
     lora_params = variant_cfg.get("lora", {})
     lora_config = LoraConfig(**lora_params)
-    model = get_peft_model(model, lora_config)
+    model = get_peft_model(model, lora_config)  # type: ignore[assignment]
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True)

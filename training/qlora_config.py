@@ -40,7 +40,7 @@ GPU_MAP: dict[str, str] = {
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f)  # type: ignore[no-any-return]
 
 
 def _get_model_config(model_name: str) -> dict[str, Any]:

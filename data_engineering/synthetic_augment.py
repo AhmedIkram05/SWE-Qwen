@@ -12,6 +12,7 @@ from typing import Any
 from datasets import load_dataset
 from unidiff import PatchSet
 
+from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import IssueRecord, ParsedHunk, TestResults
 
 
@@ -102,7 +103,7 @@ def parse_hunks_from_diff(patch_diff: str) -> list[dict[str, Any]]:
 PYTHON_LANGUAGE = 3
 
 
-def load_codecontests(config) -> list[IssueRecord]:
+def load_codecontests(config: DataPipelineConfig) -> list[IssueRecord]:
     """
     Load CodeContests dataset, convert to IssueRecord with valid unified diffs.
     CodeContests uses parallel arrays: solutions = {"solution": [...], "language": [...]}
@@ -164,7 +165,7 @@ def load_codecontests(config) -> list[IssueRecord]:
     return records
 
 
-def load_codealpaca(config) -> list[IssueRecord]:
+def load_codealpaca(config: DataPipelineConfig) -> list[IssueRecord]:
     """
     Load CodeAlpaca dataset, convert to IssueRecord with valid unified diffs.
     Filters to Python-relevant examples.
@@ -220,7 +221,7 @@ def load_codealpaca(config) -> list[IssueRecord]:
 
 def augment_training_data(
     swe_bench_train: list[IssueRecord],
-    config,
+    config: DataPipelineConfig,
 ) -> list[IssueRecord]:
     """
     Merge SWE-bench train + synthetic, deduplicate, cap at max_train_examples.

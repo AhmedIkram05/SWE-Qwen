@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from typing import Any
 
 import wandb
 from transformers import TrainerCallback, TrainingArguments
@@ -29,13 +30,14 @@ class WandbCheckpointCallback(TrainerCallback):
         args: TrainingArguments,
         state: TrainerState,
         _control: TrainerControl,
-        **_kwargs: object,
+        **_kwargs: Any,
     ) -> None:
         """Called after a checkpoint is saved."""
         if wandb.run is None:
             return
 
         # Determine the latest checkpoint directory
+        assert args.output_dir is not None
         checkpoint_dir = Path(args.output_dir)
         if not checkpoint_dir.exists():
             return
@@ -84,7 +86,7 @@ class WandbCheckpointCallback(TrainerCallback):
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
-        **kwargs: object,
+        **_kwargs: Any,
     ) -> None:
         """Final cleanup when training ends."""
         pass
@@ -103,7 +105,7 @@ class WandbLoggingCallback(TrainerCallback):
         _control: TrainerControl,
         _model: object = None,
         logs: dict[str, float] | None = None,
-        **_kwargs: object,
+        **_kwargs: Any,
     ) -> None:
         """Log metrics to W&B."""
         if wandb.run is None or not logs:
@@ -121,7 +123,7 @@ class WandbLoggingCallback(TrainerCallback):
         args: TrainingArguments,
         _state: TrainerState,
         _control: TrainerControl,
-        **_kwargs: object,
+        **_kwargs: Any,
     ) -> None:
         """Log training configuration at the start."""
         if wandb.run is None:

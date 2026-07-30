@@ -80,7 +80,7 @@ def resolve_checkpoint_path(  # noqa: PLR0911, PLR0912
     except Exception as exc:
         logger.warning("Failed to resolve W&B artifact %s: %s", resume_spec, exc)
     else:
-        return dl_path
+        return dl_path  # type: ignore[no-any-return]
 
     # ── Strategy 3: Latest from current run ────────────────────────────────────
     if resume_spec.lower() == "latest":
@@ -113,7 +113,7 @@ def resolve_checkpoint_path(  # noqa: PLR0911, PLR0912
                 latest = max(checkpoint_artifacts, key=lambda a: a.created_at)
                 dl_path = latest.download()
                 logger.info("Resolved latest checkpoint from W&B: %s", dl_path)
-                return dl_path
+                return dl_path  # type: ignore[no-any-return]
 
             logger.warning("No model_checkpoint artifacts found for run %s", run_path)
         except Exception as exc:

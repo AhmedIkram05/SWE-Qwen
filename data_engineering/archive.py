@@ -39,7 +39,7 @@ def _upload_jsonl(
     key = f"{prefix}/{name}.jsonl"
     blob = bucket.blob(key)
 
-    def to_dict(r: Any) -> dict:
+    def to_dict(r: Any) -> Any:
         """Convert record to dict, handling both Pydantic models and dicts."""
         if hasattr(r, "model_dump"):
             return r.model_dump()
