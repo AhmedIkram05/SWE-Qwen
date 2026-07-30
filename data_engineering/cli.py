@@ -136,12 +136,12 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         help="Enable BigQuery augmentation (v2 feature)",
     ),
     augment_codecontests: bool = typer.Option(
-        True,
+        False,
         "--augment-codecontests/--no-augment-codecontests",
         help="Augment training with CodeContests (13k Python solutions)",
     ),
     augment_codealpaca: bool = typer.Option(
-        True,
+        False,
         "--augment-codealpaca/--no-augment-codealpaca",
         help="Augment training with CodeAlpaca-20k (filtered to ~8k Python)",
     ),

@@ -70,7 +70,13 @@ def _save_stage_gcs(
         prefix = f"datasets/{run_id}/{repo_id}"
         key = f"{prefix}/{stage}.jsonl"
         blob = bucket.blob(key)
-        lines = [json.dumps(r.model_dump(), default=str) + "\n" for r in records]
+        lines = []
+        for r in records:
+            if hasattr(r, "model_dump"):
+                line = json.dumps(r.model_dump(), default=str)
+            else:
+                line = json.dumps(r, default=str)
+            lines.append(line + "\n")
         content = "".join(lines)
         blob.upload_from_string(content, content_type="application/jsonl")
         logging.info(

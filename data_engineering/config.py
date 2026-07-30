@@ -29,7 +29,7 @@ class DataPipelineConfig(BaseSettings):
     wandb_entity: str | None = None  # optional, defaults to user default
 
     # Splits
-    golden_source_split: str = "all"  # SWE-bench has F2P in verified+test+dev
+    golden_source_split: str = "test"  # SWE-bench has F2P in verified+test+dev
     train_ratio: float = 0.8
     val_ratio: float = 0.1
     test_ratio: float = 0.1
@@ -41,8 +41,8 @@ class DataPipelineConfig(BaseSettings):
     bigquery_project: str = ""  # GCP project for BigQuery
 
     # Synthetic augmentation
-    augment_codecontests: bool = True  # +13k Python solutions from CodeContests
-    augment_codealpaca: bool = True  # +20k instruction-following (filtered to ~8k Python)
+    augment_codecontests: bool = False  # +13k Python solutions from CodeContests
+    augment_codealpaca: bool = False  # +20k instruction-following (filtered to ~8k Python)
     max_train_examples: int = 30000  # Cap total training size after augmentation
 
     # Stage control
