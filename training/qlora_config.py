@@ -100,8 +100,16 @@ GPU_MEMORY_OVERRIDES: dict[str, dict[str, Any]] = {
     "A100:1": {
         "packing": True,
         "max_seq_length": 8192,
-        "per_device_train_batch_size": 8,  # A100 has 40/80 GB, can fit larger batch
+        "per_device_train_batch_size": 8,
         "gradient_accumulation_steps": 2,  # Effective batch = 8 × 2 = 16
+        "dataloader_pin_memory": False,
+        "gradient_checkpointing": True,
+    },
+    "A100:1,size=80GB": {
+        "packing": True,
+        "max_seq_length": 8192,
+        "per_device_train_batch_size": 8,
+        "gradient_accumulation_steps": 2,
         "dataloader_pin_memory": False,
         "gradient_checkpointing": True,
     },

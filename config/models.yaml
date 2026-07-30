@@ -13,8 +13,8 @@ models:
     quantization: "nf4"
     compute_dtype: "bfloat16"
     gpu_mapping:
-      primary: "a10g-24gb"
-      fallback: "a100-40gb"
+      primary: "a100-80gb"
+      fallback: "a10g-24gb"
     context_window: 32768
     target_modules:
       - "q_proj"
