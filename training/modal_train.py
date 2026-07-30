@@ -43,7 +43,11 @@ logger = logging.getLogger(__name__)
 # policy (iam.disableServiceAccountKeyCreation).
 
 _GCS_BUCKET = "swe-qwen-datasets"
-_GCS_TOKENIZED_PREFIX = "tokenized/18e63eac42bb/"
+
+
+def _tokenized_prefix(run_id: str) -> str:
+    """Construct GCS prefix for tokenized data given a pipeline run ID."""
+    return f"tokenized/{run_id}/"
 
 
 def _download_gcs_public(prefix: str, dst_dir: str) -> str:
@@ -184,6 +188,7 @@ models_volume = modal.Volume.from_name("swe-qwen-models", create_if_missing=True
 def train_qlora(  # noqa: PLR0913, PLR0917
     model_name: str = "qwen3-14b",
     variant: str = "baseline_14b",
+    run_id: str = "expanded-repos",
     data_dir: str = "/data/tokenized",
     output_dir: str = "/models/qlora-output",
     run_name: str | None = None,
@@ -203,6 +208,7 @@ def train_qlora(  # noqa: PLR0913, PLR0917
     Args:
         model_name: Key from ``models.yaml`` (e.g. ``"qwen3-14b"``).
         variant: Key from ``qlora_variants.yaml`` (e.g. ``"efficient_14b"``).
+        run_id: Phase 3 pipeline run ID, Determines which tokenized dataset to use.
         data_dir: Ignored — tokenized data is always downloaded from GCS.
         output_dir: Path within volume for checkpoints.
         run_name: W&B run name (auto-generated if ``None``).
@@ -230,7 +236,7 @@ def train_qlora(  # noqa: PLR0913, PLR0917
     # The bucket is publicly readable so no credentials needed.
     # We use stdlib urllib + shutil to avoid adding google-cloud-storage dep.
     _download_dir = "/tmp/data"
-    data_dir = _download_gcs_public(_GCS_TOKENIZED_PREFIX, _download_dir)
+    data_dir = _download_gcs_public(_tokenized_prefix(run_id), _download_dir)
 
     from training.qlora_config import build_model_and_peft, resolve_gpu_type
     from training.qlora_trainer import QLoRATrainer
