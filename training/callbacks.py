@@ -29,8 +29,8 @@ class WandbCheckpointCallback(TrainerCallback):
         self,
         args: TrainingArguments,
         state: TrainerState,
-        _control: TrainerControl,
-        **_kwargs: Any,
+        control: TrainerControl,
+        **kwargs: Any,
     ) -> Any:
         """Called after a checkpoint is saved."""
         if wandb.run is None:
@@ -86,7 +86,7 @@ class WandbCheckpointCallback(TrainerCallback):
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> Any:
         """Final cleanup when training ends."""
         pass
@@ -100,14 +100,13 @@ class WandbLoggingCallback(TrainerCallback):
 
     def on_log(
         self,
-        _args: TrainingArguments,
+        args: TrainingArguments,
         state: TrainerState,
-        _control: TrainerControl,
-        _model: object = None,
-        logs: dict[str, float] | None = None,
-        **_kwargs: Any,
+        control: TrainerControl,
+        **kwargs: Any,
     ) -> Any:
         """Log metrics to W&B."""
+        logs: dict[str, float] | None = kwargs.get("logs")
         if wandb.run is None or not logs:
             return
 
@@ -121,9 +120,9 @@ class WandbLoggingCallback(TrainerCallback):
     def on_train_begin(
         self,
         args: TrainingArguments,
-        _state: TrainerState,
-        _control: TrainerControl,
-        **_kwargs: Any,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs: Any,
     ) -> Any:
         """Log training configuration at the start."""
         if wandb.run is None:

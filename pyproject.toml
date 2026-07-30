@@ -139,7 +139,8 @@ select = [
 ignore = [
     "S101",  # assert used (allowed in tests)
     "TRY003", # avoid specifying long messages outside the exception class
-    "ARG001", # unused argument (common in callbacks)
+    "ARG001", # unused function argument (common in callbacks)
+    "ARG002", # unused method argument (common in callbacks)
     "PLC0415", # import at top-level — lazy imports in Modal functions are intentional
 ]
 [tool.ruff.lint.per-file-ignores]

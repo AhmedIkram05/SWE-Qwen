@@ -48,7 +48,7 @@ def _save_dataset_to_gcs(
 ) -> dict[str, str]:
     """Save DatasetDict to GCS as parquet/arrow shards."""
     try:
-        from google.cloud import storage
+        from google.cloud import storage  # type: ignore[attr-defined]
 
         client = storage.Client()
         bucket = client.bucket(bucket_name)

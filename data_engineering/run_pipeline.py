@@ -61,7 +61,7 @@ def _save_stage_gcs(
     if not config.gcs_bucket:
         return
     try:
-        from google.cloud import storage
+        from google.cloud import storage  # type: ignore[attr-defined]
 
         client = storage.Client()
         bucket = client.bucket(config.gcs_bucket)
@@ -96,7 +96,7 @@ def _load_stage_gcs(
     if not config.gcs_bucket:
         return []
     try:
-        from google.cloud import storage
+        from google.cloud import storage  # type: ignore[attr-defined]
 
         client = storage.Client()
         bucket = client.bucket(config.gcs_bucket)
