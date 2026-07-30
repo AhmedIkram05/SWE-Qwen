@@ -151,6 +151,18 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         help="Cap total training size after augmentation",
         min=1000,
     ),
+    tokenize_model: str = typer.Option(
+        "qwen3-14b",
+        "--tokenize-model",
+        help="Model name from models.yaml for tokenization",
+    ),
+    tokenize_max_length: int = typer.Option(
+        4096,
+        "--tokenize-max-length",
+        help="Maximum sequence length for tokenization",
+        min=512,
+        max=32768,
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -180,6 +192,8 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         augment_codecontests=augment_codecontests,
         augment_codealpaca=augment_codealpaca,
         max_train_examples=max_train_examples,
+        tokenize_model=tokenize_model,
+        tokenize_max_length=tokenize_max_length,
     )
 
     try:

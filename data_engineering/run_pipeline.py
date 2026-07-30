@@ -142,6 +142,7 @@ _STAGE_MAP = {
     "version": "version",
     "archive": "archive",
     "card": "card",
+    "tokenize": "tokenize",
 }
 
 # Reverse map: human-readable -> file-stage name
@@ -603,6 +604,35 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         except Exception as exc:
             logger.warning("GCS card re-upload failed (non-fatal): %s", exc)
 
+    # Tokenize (optional, runs if model_name provided)
+    tokenized_paths: dict[str, str] = {}
+    if _stage_enabled(config, "tokenize"):
+        try:
+            from data_engineering.tokenize import tokenize_pipeline
+
+            model_name = getattr(config, "tokenize_model", "qwen3-14b")
+            max_seq_length = getattr(config, "tokenize_max_length", 4096)
+
+            tokenized_dir = config.output_dir / f"{run_id}_tokenized"
+            ds = tokenize_pipeline(
+                data_dir=config.output_dir / run_id / "swebench",
+                output_dir=tokenized_dir,
+                model_name=model_name,
+                max_length=max_seq_length,
+                config=config,
+                run_id=run_id,
+            )
+            tokenized_paths = {
+                "train": str(tokenized_dir / "train"),
+                "val": str(tokenized_dir / "val"),
+                "test": str(tokenized_dir / "test"),
+                "golden": str(tokenized_dir / "golden"),
+                "dataset_dict": str(tokenized_dir / "dataset_dict.json"),
+            }
+            logger.info(f"Tokenized dataset saved to {tokenized_dir}")
+        except Exception as exc:
+            logger.warning("Tokenization failed (non-fatal): %s", exc)
+
     # Print summary
     console.print("\n[bold green]Pipeline Complete![/bold green]")
     table = Table(title=f"Run {run_id[:8]} Summary")
@@ -622,6 +652,7 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         stats=stats,
         gcs_paths=gcs_paths,
         wandb_artifacts=wandb_artifacts,
+        tokenized_paths=tokenized_paths,
     )
 
 
