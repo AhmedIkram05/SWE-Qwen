@@ -282,8 +282,9 @@ class TestInfrastructureGraph:
 
 
 @pytest.mark.integration
+@pytest.mark.requires_credentials
 class TestTerraformPlan:
-    """Test terraform plan execution (requires GCP credentials)."""
+    """Test terraform plan execution (requires GCP credentials + terraform binary)."""
 
     def test_terraform_plan_dry_run(self):
         """Terraform plan should execute without errors (dry run)."""
