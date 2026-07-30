@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import signal
 import subprocess
 import sys
@@ -27,12 +28,40 @@ import time
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _GOLDEN_RELPATH = "swebench/golden.jsonl"
 _STATE_PATH = _REPO_ROOT / "scripts" / ".pipeline-state.json"
 _POLL_INTERVAL = 60  # seconds between polling for Modal job completion
+_POLL_TIMEOUT = 6 * 3600  # 6 hours max poll time (Modal function timeout is 5h)
+_MIN_POLL_WAIT = 120  # seconds before declaring a launch failed (W&B init takes time)
+
+
+# ── W&B entity resolution ────────────────────────────────────────────────────
+
+
+def _resolve_wandb_entity() -> str:
+    """Resolve W&B entity from API credentials."""
+    import wandb
+
+    api = wandb.Api(timeout=30)
+    entity = api.default_entity
+    if not entity:
+        raise RuntimeError("W&B entity not found. Run `wandb login` to set credentials.")
+    return entity
+
+
+def _wandb_project_entity() -> str:
+    """Return 'entity/project' for W&B API calls."""
+    return f"{_resolve_wandb_entity()}/swe-qwen"
 
 
 # Known artifact name pattern — deterministic from variant name
@@ -82,9 +111,128 @@ def _save_state(state: dict[str, Any]) -> None:
 
 
 def _cleanup_state(*_args: Any) -> None:
-    """Remove state file on clean exit (Ctrl+C or completion)."""
+    """Remove state file on clean exit (successful completion only)."""
     if _STATE_PATH.exists():
         _STATE_PATH.unlink(missing_ok=True)
+
+
+def _reconcile_state_with_wandb(  # noqa: PLR0915
+    state: dict[str, Any],
+    requested_variants: list[str] | None = None,
+) -> dict[str, Any]:
+    """Reconcile local state with W&B to recover from interrupted sessions.
+
+    Scans W&B for runs matching known variant names and updates state accordingly.
+    Also detects crashed runs and marks them for re-launch.
+
+    When *requested_variants* is provided, also scans for variants not yet in
+    state (fresh start after state file deletion) — avoids re-training completed variants.
+    """
+    import wandb
+
+    api = wandb.Api(timeout=30)
+    project = _wandb_project_entity()
+
+    try:
+        all_runs = api.runs(project)
+    except Exception as e:
+        logger.warning("Failed to fetch W&B runs for reconciliation: %s", e)
+        return state
+
+    # Build index: variant -> list of runs (sorted by creation time, newest first)
+    variant_runs: dict[str, list[Any]] = {}
+    for run in all_runs:
+        variant = run.config.get("variant")
+        if not variant:
+            continue
+        if variant not in variant_runs:
+            variant_runs[variant] = []
+        variant_runs[variant].append(run)
+
+    # Sort each variant's runs by creation time (newest first)
+    for runs in variant_runs.values():
+        runs.sort(key=lambda r: r.created_at, reverse=True)
+
+    # Collect all variants to reconcile: existing state + requested variants
+    variants_to_check = set(state["variants"].keys())
+    if requested_variants:
+        variants_to_check.update(requested_variants)
+
+    def _match_and_update(variant: str) -> None:  # noqa: PLR0912
+        """Find best W&B run for variant and update state."""
+        if variant not in variant_runs:
+            return
+
+        runs = variant_runs[variant]
+        variant_state = state["variants"].get(variant, {})
+        run_name = variant_state.get("run_name", "")
+
+        # Try exact match first (saved run_name or saved wandb_run_id)
+        matched_run = None
+        for r in runs:
+            if r.name == run_name or r.id == (variant_state.get("result", {}) or {}).get(
+                "wandb_run_id"
+            ):
+                matched_run = r
+                break
+
+        if matched_run is None:
+            # Fallback: latest 3config- run for this variant
+            for r in runs:
+                if r.name.startswith("3config-"):
+                    matched_run = r
+                    break
+            if matched_run is None:
+                matched_run = runs[0]
+
+        if matched_run:
+            if matched_run.state == "finished":
+                if variant not in state["completed_variants"]:
+                    state["completed_variants"].append(variant)
+                state["variants"][variant] = {
+                    "status": "completed",
+                    "run_name": matched_run.name,
+                    "result": {
+                        "wandb_run_id": matched_run.id,
+                        "artifact_name": _artifact_name(variant),
+                    },
+                }
+                logger.info("  Reconciled %s: finished (W&B run %s)", variant, matched_run.id)
+            elif matched_run.state == "crashed":
+                state["variants"][variant] = {
+                    "status": "failed",
+                    "run_name": matched_run.name,
+                }
+                logger.warning("  %s: W&B run %s crashed — will re-launch", variant, matched_run.id)
+            elif matched_run.state == "running":
+                if "train_loss" in matched_run.summary:
+                    if variant not in state["completed_variants"]:
+                        state["completed_variants"].append(variant)
+                    state["variants"][variant] = {
+                        "status": "completed",
+                        "run_name": matched_run.name,
+                        "result": {
+                            "wandb_run_id": matched_run.id,
+                            "artifact_name": _artifact_name(variant),
+                        },
+                    }
+                    logger.info(
+                        "  Reconciled %s: training complete (Modal killed before wandb.finish)",
+                        variant,
+                    )
+                else:
+                    state["variants"][variant] = {
+                        "status": "running",
+                        "run_name": matched_run.name,
+                    }
+                    logger.info(
+                        "  %s: still running on Modal (W&B run %s)", variant, matched_run.id
+                    )
+
+    for variant in variants_to_check:
+        _match_and_update(variant)
+
+    return state
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -122,6 +270,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Path for summary JSON (default: comparison-report.json in repo root)",
     )
+    p.add_argument(
+        "--skip-eval",
+        action="store_true",
+        help="Skip F2P evaluation and champion selection (training only)",
+    )
     return p.parse_args(argv)
 
 
@@ -130,6 +283,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _variant_run_name(variant: str) -> str:
     return f"3config-{variant}-{time.strftime('%Y%m%d-%H%M%S')}"
+
+
+def _tail_log(path: Path, n: int = 50) -> str:
+    """Return last N lines of a log file (safe for partially-written files)."""
+    try:
+        lines = path.read_text().splitlines()
+        return "\n".join(lines[-n:])
+    except Exception:
+        return "(unable to read log)"
 
 
 def _golden_path(run_id: str) -> Path:
@@ -229,14 +391,17 @@ def _wandb_run_finished(run_name: str) -> dict[str, Any] | None:
 
     Returns the run summary (including artifact name and wandb run id)
     if complete, ``None`` if still running or not found.
+    Raises ``RuntimeError`` if the run is found but crashed.
     """
     import wandb
 
     api = wandb.Api(timeout=30)
+    project = _wandb_project_entity()
     try:
-        runs = api.runs("swe-qwen", {"display_name": run_name})
+        runs = api.runs(project, {"display_name": run_name})
     except Exception:
         return None
+
     for run in runs:
         if run.state == "finished":
             return {
@@ -251,10 +416,15 @@ def _wandb_run_finished(run_name: str) -> dict[str, Any] | None:
                 "wandb_run_id": run.id,
                 "artifact_name": _artifact_name(run.config.get("variant", "")),
             }
+        # Surface crashed runs so caller can re-launch
+        if run.state == "crashed":
+            raise RuntimeError(
+                f"W&B run '{run_name}' ({run.id}) crashed. Will re-launch with new run name."
+            )
     return None
 
 
-def launch_modal_training(  # noqa: PLR0913, PLR0917
+def launch_modal_training(  # noqa: PLR0913, PLR0915, PLR0917
     variant: str,
     run_id: str,
     run_name: str,
@@ -267,6 +437,9 @@ def launch_modal_training(  # noqa: PLR0913, PLR0917
     Uses ``subprocess`` to run ``modal run`` — the Modal job continues on
     Modal servers even if the local process dies (laptop sleep).  Polls W&B
     for completion.  State persisted to ``.pipeline-state.json`` for resume.
+
+    Includes timeout to detect stuck launches (Modal job failed before W&B init).
+    Captures Modal stdout/stderr to a log file for debugging.
 
     Returns ``{"wandb_run_id": str, "artifact_name": str}``.
     """
@@ -282,39 +455,81 @@ def launch_modal_training(  # noqa: PLR0913, PLR0917
 
     # ── Check W&B for completion (resume after sleep) ────────────────────
     if saved_run_name and variant_state.get("status") in ("launched", "running"):
-        finished = _wandb_run_finished(saved_run_name)
+        try:
+            finished = _wandb_run_finished(saved_run_name)
+        except RuntimeError as e:
+            # Previous run crashed — will re-launch below
+            logger.warning("  %s: %s", variant, e)
+            finished = None
         if finished:
             print(f"  {variant} already complete (verified via W&B).")
             _mark_completed(state, variant, finished["wandb_run_id"], finished["artifact_name"])
             return finished
         print(f"  {variant} W&B run not finished yet. Re-launching ...")
 
+    # ── Check if variant was marked failed from reconciliation ────────────
+    if variant_state.get("status") == "failed":
+        logger.warning("  %s: marked failed from previous run, re-launching ...", variant)
+
     # ── Launch new job ────────────────────────────────────────────────────
     cmd = _build_modal_cmd(variant, run_name, train_kwargs or {})
+    log_path = _REPO_ROOT / "logs" / f"modal-{variant}-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
     print(f"  Launching: {' '.join(cmd)}")
+    print(f"  Log file:  {log_path}")
     print("  (Job runs on Modal servers — safe to close laptop)")
 
-    subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    with log_path.open("w") as log_file:
+        process = subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
 
     state["variants"][variant] = {
         "status": "launched",
         "run_name": run_name,
+        "log_file": str(log_path),
+        "pid": process.pid,
     }
     _save_state(state)
 
-    # ── Poll W&B for completion ─────────────────────────────────────────
+    # ── Poll W&B for completion (with timeout) ──────────────────────────
     print(f"  Polling W&B every {_POLL_INTERVAL}s for run '{run_name}' ...")
     state["variants"][variant]["status"] = "running"
     _save_state(state)
 
+    start_time = time.time()
     while True:
-        finished = _wandb_run_finished(run_name)
+        elapsed = time.time() - start_time
+
+        # Hard timeout — if W&B run doesn't appear after _MIN_POLL_WAIT,
+        # check Modal process exit code to detect silent failures
+        if elapsed > _MIN_POLL_WAIT:
+            retcode = process.poll()
+            if retcode is not None and retcode != 0:
+                raise RuntimeError(
+                    f"Modal process exited with code {retcode} for variant '{variant}'. "
+                    f"Check log: {log_path}\n"
+                    f"Last 50 lines:\n"
+                    f"{_tail_log(log_path, 50)}"
+                )
+            if elapsed > _POLL_TIMEOUT:
+                raise RuntimeError(
+                    f"Poll timeout ({_POLL_TIMEOUT}s) exceeded for variant '{variant}'. "
+                    f"W&B run '{run_name}' never appeared. "
+                    f"Check log: {log_path}"
+                )
+
+        try:
+            finished = _wandb_run_finished(run_name)
+        except RuntimeError as e:
+            # Run crashed on W&B — fail fast
+            raise RuntimeError(f"Variant '{variant}': {e}") from e
+
         if finished:
-            print(f"  {variant} complete (detected via W&B).")
+            print(f"  {variant} complete (detected via W&B, {elapsed:.0f}s).")
             _mark_completed(state, variant, finished["wandb_run_id"], finished["artifact_name"])
             return finished
 
@@ -370,7 +585,8 @@ def download_adapter(
     import wandb
 
     api = wandb.Api()
-    artifact = api.artifact(f"swe-qwen/{artifact_name}:latest")
+    project = _wandb_project_entity()
+    artifact = api.artifact(f"{project}/{artifact_name}:latest")
     local_dir = str(output_dir / artifact_name)
     artifact.download(root=local_dir)
     return local_dir
@@ -392,6 +608,8 @@ def evaluate_proxy_f2p(
         "f2p_proxy",
         _REPO_ROOT / "scripts" / "f2p_proxy.py",
     )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Failed to load f2p_proxy.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
@@ -418,7 +636,8 @@ def promote_champion(
     import wandb
 
     api = wandb.Api()
-    artifact = api.artifact(f"swe-qwen/{champion_artifact_name}:latest")
+    project = _wandb_project_entity()
+    artifact = api.artifact(f"{project}/{champion_artifact_name}:latest")
     artifact.aliases.append("champion")
     artifact.save()
     print(f"  Promoted {champion_variant} ({champion_artifact_name}) → champion alias")
@@ -427,7 +646,7 @@ def promote_champion(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
-def main() -> None:  # noqa: PLR0915 — 63 stmts for sequential orchestration logic
+def main() -> None:  # noqa: PLR0912, PLR0915 — 63 stmts for sequential orchestration logic
     args = parse_args()
 
     golden_path = _ensure_golden(args.run_id)
@@ -440,17 +659,29 @@ def main() -> None:  # noqa: PLR0915 — 63 stmts for sequential orchestration l
     print(f"  State:     {_STATE_PATH}")
     print()
 
-    # Register signal handlers for graceful Ctrl-C
-    signal.signal(signal.SIGINT, lambda *_: (_cleanup_state(), sys.exit(130)))
-    signal.signal(signal.SIGTERM, lambda *_: (_cleanup_state(), sys.exit(143)))
+    # Register signal handlers for graceful Ctrl-C (preserve state for resume)
+    signal.signal(
+        signal.SIGINT,
+        lambda *_: (print("\nInterrupted — state preserved for resume."), sys.exit(130)),
+    )
+    signal.signal(
+        signal.SIGTERM,
+        lambda *_: (print("\nTerminated — state preserved for resume."), sys.exit(143)),
+    )
 
     output_dir = _REPO_ROOT / "models" / "comparisons" / args.run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Load or init state ────────────────────────────────────────────────
     state = _load_state(args.run_id)
+
+    # ── Reconcile with W&B (recover from interrupted sessions) ────────────
+    if not args.dry_run:
+        print("  Reconciling state with W&B ...")
+        state = _reconcile_state_with_wandb(state, requested_variants=args.variants)
+        _save_state(state)
     if state.get("completed_variants"):
-        print(f"  Resuming — already completed: {', '.join(state['completed_variants'])}")
+        print(f"  Completed: {', '.join(state['completed_variants'])}")
     print()
 
     # Common kwargs passed to every train_qlora call
@@ -467,52 +698,83 @@ def main() -> None:  # noqa: PLR0915 — 63 stmts for sequential orchestration l
 
     # ── Step 1: Train all variants sequentially ───────────────────────────
     results: dict[str, dict[str, Any]] = {}
+    failed_variants: dict[str, str] = {}  # variant -> error message
+
     for variant in args.variants:
         if variant in state.get("completed_variants", []):
             print(f"[{variant}] Already completed, skipping. ✓")
             previous_result = state["variants"].get(variant, {}).get("result", {})
-            results[variant] = {"wandb_run_id": previous_result.get("wandb_run_id")}
+            results[variant] = {
+                "wandb_run_id": previous_result.get("wandb_run_id"),
+                "artifact_name": previous_result.get("artifact_name", _artifact_name(variant)),
+            }
             continue
 
         print(f"[{variant}]")
         run_name = _variant_run_name(variant)
 
-        launch_info = launch_modal_training(
-            variant, args.run_id, run_name, state, train_kwargs, args.dry_run
-        )
-        wandb_run_id = launch_info["wandb_run_id"]
-        artifact_name = launch_info["artifact_name"]
+        try:
+            launch_info = launch_modal_training(
+                variant, args.run_id, run_name, state, train_kwargs, args.dry_run
+            )
+            wandb_run_id = launch_info["wandb_run_id"]
+            artifact_name = launch_info["artifact_name"]
 
-        adapter_path = download_adapter(artifact_name, output_dir, args.dry_run)
-        f2p_result = evaluate_proxy_f2p(variant, golden_path, adapter_path, args.dry_run)
+            adapter_path = download_adapter(artifact_name, output_dir, args.dry_run)
+            f2p_result = evaluate_proxy_f2p(variant, golden_path, adapter_path, args.dry_run)
 
-        results[variant] = {
-            "run_name": run_name,
-            "wandb_run_id": wandb_run_id,
-            "artifact_name": artifact_name,
-            "adapter_path": adapter_path,
-            **f2p_result,
-        }
-        print(f"  mean_f2p={f2p_result['mean_f2p']}")
+            results[variant] = {
+                "run_name": run_name,
+                "wandb_run_id": wandb_run_id,
+                "artifact_name": artifact_name,
+                "adapter_path": adapter_path,
+                **f2p_result,
+            }
+            print(f"  mean_f2p={f2p_result['mean_f2p']}")
+            print(f"  ✓ {variant} complete")
+        except Exception as e:
+            error_msg = str(e)
+            print(f"  ✗ {variant} failed: {error_msg}")
+            failed_variants[variant] = error_msg
+            # Don't abort — try remaining variants
+        print()
+
+    # Report failures before proceeding
+    if failed_variants:
+        print("Failed variants:")
+        for v, err in failed_variants.items():
+            print(f"  {v}: {err[:200]}")
         print()
 
     # ── Step 2: Select champion ────────────────────────────────────────────
-    import importlib.util
+    if args.skip_eval:
+        print("  Skipping evaluation and champion selection (--skip-eval).")
+        champion = None
+        champion_artifact_name = None
+    elif not results:
+        print("No completed variants — cannot select champion.")
+        champion = None
+        champion_artifact_name = None
+    else:
+        import importlib.util
 
-    _spec = importlib.util.spec_from_file_location(
-        "f2p_proxy",
-        _REPO_ROOT / "scripts" / "f2p_proxy.py",
-    )
-    _mod = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    select_champion = _mod.select_champion
+        _spec = importlib.util.spec_from_file_location(
+            "f2p_proxy",
+            _REPO_ROOT / "scripts" / "f2p_proxy.py",
+        )
+        if _spec is None or _spec.loader is None:
+            raise RuntimeError("Failed to load f2p_proxy.py")
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        select_champion = _mod.select_champion
 
-    champion = select_champion(results)
-    champion_artifact_name = results[champion]["artifact_name"]
-    print(f"Champion: {champion} (F2P={results[champion]['mean_f2p']})")
+        champion = select_champion(results)
+        champion_artifact_name = results[champion]["artifact_name"]
+        print(f"Champion: {champion} (F2P={results[champion]['mean_f2p']})")
 
     # ── Step 3: Promote champion ───────────────────────────────────────────
-    promote_champion(champion, champion_artifact_name, args.dry_run)
+    if champion and champion_artifact_name:
+        promote_champion(champion, champion_artifact_name, args.dry_run)
 
     # ── Step 4: Output summary ─────────────────────────────────────────────
     summary = {
@@ -520,8 +782,9 @@ def main() -> None:  # noqa: PLR0915 — 63 stmts for sequential orchestration l
         "dry_run": args.dry_run,
         "golden_path": str(golden_path),
         "variants": results,
+        "failed_variants": failed_variants,
         "champion": champion,
-        "champion_f2p": results[champion]["mean_f2p"],
+        "champion_f2p": results[champion]["mean_f2p"] if champion else None,
     }
     out_path = args.output or (_REPO_ROOT / "comparison-report.json")
     with out_path.open("w") as f:

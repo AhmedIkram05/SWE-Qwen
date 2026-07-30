@@ -14,6 +14,17 @@ from pathlib import Path
 from typing import Any
 
 
+def _wandb_project_entity() -> str:
+    """Return 'entity/project' for W&B API calls."""
+    import wandb
+
+    api = wandb.Api(timeout=30)
+    entity = api.default_entity
+    if not entity:
+        raise RuntimeError("W&B entity not found. Run `wandb login`.")
+    return f"{entity}/swe-qwen"
+
+
 def compute_proxy_f2p_scores(
     golden_path: Path,
     variant_adapter_map: dict[str, str],
@@ -35,10 +46,11 @@ def compute_proxy_f2p_scores(
     import wandb
 
     api = wandb.Api(timeout=30)
+    project = _wandb_project_entity()
     results: dict[str, dict[str, Any]] = {}
     for variant in variant_adapter_map:
         # Find the W&B run for this variant
-        runs = api.runs("swe-qwen", {"config.variant": variant})
+        runs = api.runs(project, {"config.variant": variant})
         if not runs:
             results[variant] = {
                 "mean_f2p": 0.0,

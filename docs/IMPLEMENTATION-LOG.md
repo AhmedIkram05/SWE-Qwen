@@ -489,8 +489,10 @@ Each Phase follows this structure:
 | 4I | Training execution | Pending (manual) | Requires `modal deploy` + `modal run` with GPU quota; user-owned action | Low |
 | 4.10 | Baseline training (100 ex) | Handled by scripts/run_3config_comparison.py | Orchestrator launches 3 variants, waits for completion, promotes champion | Low |
 | 4.11 | Full training | Deferred to Modal run | Training orchestration code complete; actual H100 run depends on Modal creds/quota | Low |
-| 4.12 | 3-config QLoRA comparison | Completed (scripts/run_3config_comparison.py) | bash-based: launch→watch→eval→promote champion via W&B tags | Low |
-| — | F2P proxy script | Added (scripts/f2p_proxy.py) | Heuristic F2P from patch presence + test file overlap + fix keywords | Low |
+| 4.12 | 3-config QLoRA comparison | Completed (scripts/run_3config_comparison.py) | Python-based: launch→poll W&B→eval→promote champion via W&B tags | Low |
+| 4.13 | Training execution (expanded-repos) | Partial (2/3 configs complete) | `higher_rank_14b` and `higher_lr_14b` finished on Modal A100-80GB; `baseline_14b` crashed on first launch | Medium |
+| 4.14 | Orchestration hardening | Fixed infinite polling, state reconciliation, per-variant error isolation | `run_3config_comparison.py` rewritten: W&B entity auto-resolved, `_reconcile_state_with_wandb()` recovers from interrupted sessions, 6h polling timeout, Modal logs captured, per-variant try/except | High |
+| — | F2P proxy script | Completed (scripts/f2p_proxy.py) | W&B training loss proxy (lower loss → higher score); W&B entity auto-resolved | Low |
 
 ### Decisions Made
 
@@ -500,7 +502,11 @@ Each Phase follows this structure:
 | Jinja2 for prompt templates | Dynamic prompt composition | f-strings, string.Template, Mako | Jinja2 is standard, has inheritance, well-known; separates prompt design from code |
 | SFTTrainer handles tokenization | TRL SFTTrainer has built-in tokenization + packing | Manual tokenizer call + DataCollatorForSeq2Seq | SFTTrainer's tokenize + pack is simpler, same result; saves one pipeline stage |
 | W&B artifact for checkpoint storage | Persist checkpoints across Modal runs | Cloud storage (GCS), NFS volume | W&B artifacts have versioning, registry, UI; pairs with existing W&B infrastructure |
-| 3-variant orchestration via bash script | Simple orchestration for 3 independent Modal runs | Python subprocess, Makefile, GitHub Actions | bash is zero-dependency, readable, works with Modal CLI directly |
+| 3-variant orchestration via bash script | Simple orchestration for 3 independent Modal runs | Python subprocess, Makefile, GitHub Actions | bash was replaced by Python script — bash couldn't handle sleep-resilient state, W&B polling, or per-variant error isolation |
+| Python orchestration script | Sleep-resilient training across laptop sleep cycles | bash, Makefile, GitHub Actions | Python `subprocess.Popen` + W&B polling + JSON state file enables resume from any point; Modal jobs continue on servers even if laptop sleeps |
+| W&B entity auto-resolution | W&B API calls need entity/project | Hardcode entity, env var | `wandb.Api().default_entity` resolves from credentials; no config drift when entity changes |
+| State reconciliation on startup | Recover from interrupted sessions (state file deleted, laptop sleep) | Skip reconciliation, rely on state file only | Scans W&B for ALL requested variants on startup; detects finished/crashed/running runs; avoids re-training completed variants |
+| Per-variant error isolation | One variant crash should not kill the rest | Global try/except, sequential abort | Per-variant try/except in main loop; failed variants reported but remaining variants continue |
 | transformers eval_strategy fix | transformers v5.14.1 renamed evaluation_strategy | Hardcode old name, pin old transformers | v5.14.1 is latest; explicit eval_strategy + save_strategy in YAML configs |
 | qlora_train.py as CLI wrapper | Simple argparse wrapper around QLoRATrainer | Typer, click | argparse is stdlib, zero-dependency for entry-point script |
 | nf4 quantization default | QLoRA standard is 4-bit NormalFloat | int4, fp4, bf16-only | nf4 is optimal for QLoRA per QLoRA paper; bf16 compute dtype default |
@@ -514,6 +520,14 @@ Each Phase follows this structure:
 | peft/transformers not in system Python (require .venv) | 2026-07-28 | 2026-07-28 | Use ./.venv/bin/python for all test/runtime commands; update Makefile/pyproject aliases | 20 min |
 | re.compile deprecation in importlib.resources | 2026-07-28 | 2026-07-28 | Used importlib.resources.files() instead of deprecated .contents() in PromptLoader | 5 min |
 | W&B artifact resolution requires active run inside Modal | 2026-07-28 | 2026-07-28 | resolve_checkpoint_path returns None for "latest"/artifact:// when no run active; local path fallback works independently | 0 min |
+| W&B project auto-deleted | 2026-07-30 | 2026-07-30 | W&B project `swe-qwen` auto-deleted after inactivity; all run telemetry lost; local adapter configs preserved | 30 min |
+| Infinite polling loop in orchestrator | 2026-07-30 | 2026-07-30 | `run_3config_comparison.py` stuck polling for `baseline_14b` — Modal job crashed before W&B init, no timeout, no process exit code check. Added 6h polling timeout + 2min early failure detection + Modal process monitoring | 45 min |
+| State file lost, `completed_variants` empty | 2026-07-30 | 2026-07-30 | `.pipeline-state.json` untracked, deleted on re-run. Added `_reconcile_state_with_wandb()` to scan W&B on startup and recover completed variants | 20 min |
+| W&B entity hardcoded as `"swe-qwen"` | 2026-07-30 | 2026-07-30 | `api.runs("swe-qwen", ...)` relied on implicit entity resolution. Added `_resolve_wandb_entity()` → `api.default_entity` | 10 min |
+| Modal failures silent (DEVNULL) | 2026-07-30 | 2026-07-30 | `subprocess.DEVNULL` on stdout/stderr made crashes invisible. Now captures to `logs/modal-{variant}-{timestamp}.log` with last-50-lines error report | 15 min |
+| One variant crash kills all | 2026-07-30 | 2026-07-30 | No per-variant error handling. Added try/except per variant; failed variants reported, remaining continue | 10 min |
+| Signal handler deletes state on Ctrl+C | 2026-07-30 | 2026-07-30 | `_cleanup_state()` on SIGINT destroyed resume capability. Signal handler now preserves state; `_cleanup_state()` only on successful completion | 5 min |
+| `baseline_14b` crashed on Modal | 2026-07-30 | 2026-07-30 | First `baseline_14b` run crashed (W&B state: crashed). Reconciliation detects crash, auto re-launches with new timestamp | 0 min (auto) |
 
 ### Technical Details (For Future Phases)
 
@@ -530,6 +544,15 @@ Each Phase follows this structure:
 | models.yaml default | Qwen/Qwen3-30B-A3B is default, qwen3-14b also defined | 30B = primary training target; 14B = ablation/toy runs |
 | qlora_variants.yaml variants | baseline (r=16, lr=2e-5), higher_rank (r=32, lr=1e-5), higher_lr (r=16, lr=5e-5) | Covers rank scaling and LR sensitivity in one comparison |
 | GPU tier mapping | "h100:80gb" → 30B models; "a100-80gb:80gb" → 14B models | resolve_gpu() picks the minimum GPU tier for each model |
+| Orchestration script | `scripts/run_3config_comparison.py` (Python, not bash) | Sleep-resilient: spawns `modal run` via subprocess, polls W&B every 60s, persists state to `.pipeline-state.json` |
+| State reconciliation | `_reconcile_state_with_wandb()` scans ALL requested variants on startup | Detects finished/crashed/running W&B runs; recovers from state file deletion, laptop sleep, or interrupted sessions |
+| Polling timeout | 6h hard timeout + 2min early failure detection | After 2min without W&B run, checks Modal process exit code; after 6h, raises with log file path |
+| Modal log capture | `logs/modal-{variant}-{YYYYMMDD-HHMMSS}.log` | stdout+stderr captured to file; last 50 lines included in error messages on failure |
+| W&B entity resolution | `_resolve_wandb_entity()` → `wandb.Api().default_entity` | Auto-resolves from credentials; `_wandb_project_entity()` returns `"entity/swe-qwen"` for all API calls |
+| Per-variant error isolation | try/except in main loop | One variant failure reported but remaining variants continue; `failed_variants` dict in summary JSON |
+| F2P proxy | `scripts/f2p_proxy.py` uses W&B `train_loss` (lower loss → higher score) | No GPU needed; score = `max(0, min(1, 2.0 - train_loss))`; W&B entity auto-resolved |
+| `--skip-eval` flag | Added to orchestrator | Trains all variants, skips F2P eval + champion selection; useful for training-only runs |
+| Training results (expanded-repos) | `higher_rank_14b`: finished (W&B g32uj7tq), `higher_lr_14b`: finished (W&B gn9fj108, loss 0.87), `baseline_14b`: crashed on first launch, re-launch pending | All on A100-80GB; 16 steps, ~17min per run |
 
 ### Scope Changes
 
@@ -537,6 +560,8 @@ Each Phase follows this structure:
 |--------|------------------------|---------------|
 | scripts/f2p_proxy.py | Added | Heuristic F2P for Phase 3b golden extraction; replaced by SWE-bench ground truth |
 | scripts/run_3config_comparison.py | Added | Orchestrates comparison runs without manual launching |
+| scripts/run_3config_comparison.py | **Hardened** | **8 systemic fixes: W&B entity auto-resolution, state reconciliation, polling timeout, Modal log capture, per-variant error isolation, signal handler preserves state, crash detection, `--skip-eval` flag** |
+| scripts/f2p_proxy.py | **Fixed** | **W&B entity auto-resolved (same pattern as orchestrator)** |
 | .venv GPU deps note | Added (documentation) | CI/CD must use venv python for peft/transformers/trl imports |
 
 ### Metrics / Observations
@@ -546,9 +571,15 @@ Each Phase follows this structure:
 - **4 smoke tests** collected (GPU-only, skipped in unit test runs)
 - **3 YAML config files**: models.yaml (2 models), qlora_variants.yaml (3 variants), default prompt templates
 - **4 Jinja2 templates**: system, user, assistant, chat
-- **3 training variants**: baseline (r=16, lr=2e-5), higher_rank (r=32, lr=1e-5), higher_lr (r=16, lr=5e-5)
+- **3 training variants**: baseline (r=16, lr=2e-5), higher_rank (r=32, lr=2e-5), higher_lr (r=16, lr=5e-5)
 - **Phase 4 code complete**: Code, configs, templates, tests all written
-- **Remaining**: execute `modal run` to begin actual training (requires GPU quota, user-owned action)
+- **Training execution (expanded-repos)**: 2/3 configs complete on Modal A100-80GB
+- **higher_lr_14b**: 16 steps, 17:16 runtime, train_loss=0.87, W&B run gn9fj108
+- **higher_rank_14b**: finished, W&B run g32uj7tq
+- **baseline_14b**: crashed on first launch (W&B state: crashed), auto re-launch pending
+- **Orchestration hardening**: 8 systemic issues fixed (infinite polling, silent failures, state loss, W&B entity, per-variant isolation, signal handler, log capture, crash detection)
+- **W&B project**: `swe-qwen` was auto-deleted after inactivity; re-created automatically on next run
+- **Remaining**: re-run `python3 scripts/run_3config_comparison.py --run-id expanded-repos` to complete `baseline_14b` and select champion
 
 ---
 
