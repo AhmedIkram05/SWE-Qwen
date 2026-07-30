@@ -3,7 +3,11 @@
 Supersedes ``src/swe_qwen/modal_app.py::train_swe_qwen``.
 
 Usage:
-    modal run training/modal_train.py --model-name qwen3-14b --variant baseline_14b
+    # Production training (A100-80GB):
+    modal run training/modal_train.py::train_qlora --model-name qwen3-14b --variant baseline_14b
+
+    # Local testing with tiny model:
+    modal run training/local_cli.py --model-name qwen3-14b --variant baseline_14b
 
 Env vars:
     UNSLOTH_ENABLED=1  # Enable Unsloth acceleration (default: 1 on H100/A100)
@@ -326,44 +330,3 @@ def get_gpu_for_model(model_name: str = "qwen3-14b") -> str:
 
 # Export train_qlora as modal_entrypoint for compatibility with orchestration
 modal_entrypoint = train_qlora
-
-# ── CLI entrypoint ────────────────────────────────────────────────────────────
-
-
-@app.local_entrypoint()
-def main(  # noqa: PLR0913, PLR0917
-    model_name: str = "qwen3-14b",
-    variant: str = "baseline_14b",
-    data_dir: str = "/data/tokenized",
-    output_dir: str = "/models/qlora-output",
-    run_name: str | None = None,
-    resume: str | None = None,
-    wandb_project: str = "swe-qwen",
-    wandb_entity: str | None = None,
-    max_train_samples: int | None = None,
-):
-    """Launch QLoRA training locally (for testing with small models)."""
-    print(f"Starting training: model={model_name}, variant={variant}")
-    print(f"Data: {data_dir}, Output: {output_dir}")
-
-    # For local testing, use tiny model
-    local_model = "hf-internal-testing/tiny-random-LlamaForCausalLM"
-
-    from training.qlora_trainer import QLoRATrainer
-
-    trainer = QLoRATrainer(
-        model_name=model_name,
-        variant=variant,
-        hf_id=local_model,  # override hf_id for local testing
-        data_dir=data_dir,
-        output_dir=output_dir,
-        wandb_project=wandb_project,
-        wandb_entity=wandb_entity,
-        run_name=run_name,
-        resume_from_checkpoint=resume,
-        use_flash_attn=False,  # no flash-attn on CPU
-        max_train_samples=max_train_samples,
-    )
-
-    result = trainer.train()
-    print(f"Training result: {result}")
