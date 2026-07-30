@@ -77,50 +77,61 @@ def launch_modal_training(
     run_id: str,
     run_name: str,
     dry_run: bool = False,
-) -> str:
+) -> dict[str, str]:
     """Launch a Modal training job for *variant*.
 
-    Returns the W&B run ID (mocked in dry-run mode).
+    Returns ``{"wandb_run_id": str, "artifact_name": str}``
+    (mocked in dry-run mode).
     """
     if dry_run:
         print(f"  [DRY-RUN] Would launch variant={variant} run_name={run_name}")
-        return f"dry-run-{variant}"
+        return {
+            "wandb_run_id": f"dry-run-{variant}",
+            "artifact_name": f"model-qwen3-14b-{variant}",
+        }
 
     # Import only when actually running on Modal
     from training.modal_train import modal_entrypoint
 
     print(f"  Launching {variant} on Modal ...")
-    # Modal .remote() call — blocks until completion
-    # Use A10G for 14B model (fits on 24GB VRAM)
-    wandb_run_id = modal_entrypoint.remote(
+    # Modal .remote() call — blocks until completion.
+    # Returns dict from train_qlora(): {wandb_run_id, artifact_name, ...}
+    result: dict = modal_entrypoint.remote(
         model_name="qwen3-14b",
         variant=variant,
         data_dir="/data/tokenized",
         run_name=run_name,
         gpu_type="A10G:1",
     )
-    return wandb_run_id
+    return {
+        "wandb_run_id": result["wandb_run_id"],
+        "artifact_name": result["artifact_name"],
+    }
 
 
 def download_adapter(
-    wandb_run_id: str,
+    artifact_name: str,
     output_dir: Path,
     dry_run: bool = False,
 ) -> str:
     """Download the trained adapter from W&B Artifacts.
 
+    Args:
+        artifact_name: W&B artifact name (e.g. ``"model-qwen3-14b-baseline_14b"``).
+        output_dir: Local directory to download into.
+
     Returns the local path to the adapter directory.
     """
     if dry_run:
-        local_path = str(output_dir / f"adapter-{wandb_run_id}")
-        print(f"  [DRY-RUN] Would download adapter to {local_path}")
+        local_path = str(output_dir / artifact_name)
+        print(f"  [DRY-RUN] Would download W&B artifact {artifact_name} to {local_path}")
         return local_path
 
     import wandb
 
     api = wandb.Api()
-    artifact = api.artifact(f"swe-qwen/adapter-{wandb_run_id}:latest")
-    local_dir = str(output_dir / f"adapter-{wandb_run_id}")
+    artifact = api.artifact(f"swe-qwen/{artifact_name}:latest")
+    local_dir = str(output_dir / artifact_name)
     artifact.download(root=local_dir)
     return local_dir
 
@@ -156,13 +167,13 @@ def evaluate_proxy_f2p(
 
 def promote_champion(
     champion_variant: str,
-    champion_wandb_run_id: str,
+    champion_artifact_name: str,
     dry_run: bool = False,
 ) -> None:
     """Tag the champion adapter as ``champion`` in W&B Registry."""
     if dry_run:
         print(
-            f"  [DRY-RUN] Would promote {champion_variant} ({champion_wandb_run_id}) "
+            f"  [DRY-RUN] Would promote {champion_variant} ({champion_artifact_name}) "
             "to W&B Registry champion alias"
         )
         return
@@ -170,10 +181,10 @@ def promote_champion(
     import wandb
 
     api = wandb.Api()
-    artifact = api.artifact(f"swe-qwen/adapter-{champion_wandb_run_id}:latest")
+    artifact = api.artifact(f"swe-qwen/{champion_artifact_name}:latest")
     artifact.aliases.append("champion")
     artifact.save()
-    print(f"  Promoted {champion_variant} ({champion_wandb_run_id}) → champion alias")
+    print(f"  Promoted {champion_variant} ({champion_artifact_name}) → champion alias")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -212,13 +223,17 @@ def main() -> None:
         print(f"[{variant}]")
         run_name = _variant_run_name(variant)
 
-        wandb_run_id = launch_modal_training(variant, args.run_id, run_name, args.dry_run)
-        adapter_path = download_adapter(wandb_run_id, output_dir, args.dry_run)
+        launch_info = launch_modal_training(variant, args.run_id, run_name, args.dry_run)
+        wandb_run_id = launch_info["wandb_run_id"]
+        artifact_name = launch_info["artifact_name"]
+
+        adapter_path = download_adapter(artifact_name, output_dir, args.dry_run)
         f2p_result = evaluate_proxy_f2p(variant, golden_path, adapter_path, args.dry_run)
 
         results[variant] = {
             "run_name": run_name,
             "wandb_run_id": wandb_run_id,
+            "artifact_name": artifact_name,
             "adapter_path": adapter_path,
             **f2p_result,
         }
@@ -237,11 +252,11 @@ def main() -> None:
     select_champion = _mod.select_champion
 
     champion = select_champion(results)
-    champion_wandb_run_id = results[champion]["wandb_run_id"]
+    champion_artifact_name = results[champion]["artifact_name"]
     print(f"Champion: {champion} (F2P={results[champion]['mean_f2p']})")
 
     # Step 3: Promote champion
-    promote_champion(champion, champion_wandb_run_id, args.dry_run)
+    promote_champion(champion, champion_artifact_name, args.dry_run)
 
     # Step 4: Output summary
     summary = {
