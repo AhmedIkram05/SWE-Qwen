@@ -19,6 +19,7 @@ import urllib.request
 from pathlib import Path
 
 import modal
+import wandb
 
 # ── Import Unsloth BEFORE trl, transformers, peft ─────────────────────────────
 # Unsloth must be imported before these libraries to apply its performance
@@ -272,6 +273,10 @@ def train_qlora(  # noqa: PLR0913, PLR0917
 
     metrics = trainer.train()
 
+    # Capture W&B run info before trainer cleanup
+    wandb_run_id = wandb.run.id if wandb and wandb.run else None
+    artifact_name = f"model-{model_name}-{variant}"
+
     # Gracefully shut down torch compile workers before Modal kills the container.
     # Prevents harmless-but-ugly "Exception ignored in atexit callback" traceback.
     try:
@@ -283,6 +288,8 @@ def train_qlora(  # noqa: PLR0913, PLR0917
 
     return {
         "status": "completed",
+        "wandb_run_id": wandb_run_id,
+        "artifact_name": artifact_name,
         "model_name": model_name,
         "variant": variant,
         "output_dir": output_dir,
