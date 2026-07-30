@@ -40,8 +40,11 @@ _POLL_INTERVAL = 60  # seconds between polling for Modal job completion
 # golden.jsonl is archived alongside the pipeline data; download at runtime
 # so we don't need to manage a local copy.
 _GCS_BUCKET = "swe-qwen-datasets"
-_GCS_DATASET_RUN_ID = "18e63eac42bb"  # matches _GCS_TOKENIZED_PREFIX in modal_train.py
-_GCS_GOLDEN_PREFIX = f"datasets/{_GCS_DATASET_RUN_ID}/"
+
+
+def _gcs_golden_prefix(run_id: str) -> str:
+    """Construct GCS prefix for golden data given a pipeline run ID."""
+    return f"datasets/{run_id}/"
 
 
 # ── State persistence (sleep-resilient) ────────────────────────────────────────
@@ -140,7 +143,8 @@ def _ensure_golden(run_id: str) -> Path:
     if dst.is_file():
         return dst
 
-    print(f"  Downloading golden.jsonl from GCS (gs://{_GCS_BUCKET}/{_GCS_GOLDEN_PREFIX}) ...")
+    golden_prefix = _gcs_golden_prefix(run_id)
+    print(f"  Downloading golden.jsonl from GCS (gs://{_GCS_BUCKET}/{golden_prefix}) ...")
     import json
     import shutil
     import urllib.request
@@ -148,16 +152,14 @@ def _ensure_golden(run_id: str) -> Path:
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     # List objects under the datasets prefix (should only be golden.jsonl)
-    list_url = (
-        f"https://www.googleapis.com/storage/v1/b/{_GCS_BUCKET}/o?prefix={_GCS_GOLDEN_PREFIX}"
-    )
+    list_url = f"https://www.googleapis.com/storage/v1/b/{_GCS_BUCKET}/o?prefix={golden_prefix}"
     with urllib.request.urlopen(list_url) as resp:
         payload = json.loads(resp.read().decode())
 
     items = payload.get("items", [])
     if not items:
         print(
-            f"Error: no files found at gs://{_GCS_BUCKET}/{_GCS_GOLDEN_PREFIX}\n"
+            f"Error: no files found at gs://{_GCS_BUCKET}/{golden_prefix}\n"
             "       Check that the bucket and dataset run ID are correct.",
             file=sys.stderr,
         )
@@ -165,7 +167,7 @@ def _ensure_golden(run_id: str) -> Path:
 
     for obj in items:
         name: str = obj["name"]
-        rel_path = name[len(_GCS_GOLDEN_PREFIX) :].lstrip("/")
+        rel_path = name[len(golden_prefix) :].lstrip("/")
         if not rel_path:
             continue
         dst_file = dst.parent / rel_path
@@ -183,7 +185,7 @@ def _ensure_golden(run_id: str) -> Path:
 
     if not dst.is_file():
         print(
-            f"Error: golden.jsonl not found in GCS at prefix {_GCS_GOLDEN_PREFIX}",
+            f"Error: golden.jsonl not found in GCS at prefix {golden_prefix}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -396,6 +398,7 @@ def main() -> None:  # noqa: PLR0915 — 63 stmts for sequential orchestration l
     # Common kwargs passed to every train_qlora call
     train_kwargs = {
         "model_name": "qwen3-14b",
+        "run_id": args.run_id,
         "data_dir": "/data/tokenized",
         "gpu_type": None,  # auto-resolve from models.yaml → A100-80GB
     }
