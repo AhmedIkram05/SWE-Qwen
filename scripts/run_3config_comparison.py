@@ -31,7 +31,17 @@ from typing import Any
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _GOLDEN_RELPATH = "swebench/golden.jsonl"
 _STATE_PATH = _REPO_ROOT / "scripts" / ".pipeline-state.json"
+
+# Add repo root to sys.path for importing training modules (Modal function refs)
+sys.path.insert(0, str(_REPO_ROOT))
 _POLL_INTERVAL = 60  # seconds between polling for Modal job completion
+
+# ── GCS buckets (same bucket/dataset as modal_train.py) ──────────────────────
+# golden.jsonl is archived alongside the pipeline data; download at runtime
+# so we don't need to manage a local copy.
+_GCS_BUCKET = "swe-qwen-datasets"
+_GCS_DATASET_RUN_ID = "18e63eac42bb"  # matches _GCS_TOKENIZED_PREFIX in modal_train.py
+_GCS_GOLDEN_PREFIX = f"datasets/{_GCS_DATASET_RUN_ID}/"
 
 
 # ── State persistence (sleep-resilient) ────────────────────────────────────────
@@ -119,46 +129,67 @@ def _golden_path(run_id: str) -> Path:
     return _REPO_ROOT / "data" / run_id / _GOLDEN_RELPATH
 
 
-def _resolve_golden_path(run_id: str) -> Path:
-    """Resolve golden eval set for *run_id*.
+def _ensure_golden(run_id: str) -> Path:
+    """Ensure golden.jsonl is available at ``data/{run_id}/swebench/golden.jsonl``.
 
-    Checks three locations in order:
-    1. ``data/{run_id}/swebench/golden.jsonl`` (exact match)
-    2. ``data/{run_id}/swebench/cleaned.jsonl`` (fallback within exact dir)
-    3. Any existing ``data/*/swebench/golden.jsonl`` (golden is same for all runs)
-
-    Exits with an error message if none are found.
+    Downloads from the public GCS bucket if not already present locally.
+    The golden set is the same for all training runs — it's the benchmark eval
+    set archived alongside the pipeline data on GCS.
     """
-    # 1. Exact match
-    exact = _golden_path(run_id)
-    if exact.is_file():
-        return exact
+    dst = _golden_path(run_id)
+    if dst.is_file():
+        return dst
 
-    # 2. Fallback within exact dir
-    exact_dir = _REPO_ROOT / "data" / run_id
-    fallback = exact_dir / "swebench/cleaned.jsonl"
-    if fallback.is_file():
-        print(f"  (using cleaned.jsonl under {exact_dir})")
-        return fallback
+    print(f"  Downloading golden.jsonl from GCS (gs://{_GCS_BUCKET}/{_GCS_GOLDEN_PREFIX}) ...")
+    import json
+    import shutil
+    import urllib.request
 
-    # 3. Scan any existing data dir with golden.jsonl
-    data_root = _REPO_ROOT / "data"
-    for candidate in sorted(data_root.iterdir()):
-        if not candidate.is_dir():
-            continue
-        candidate_golden = candidate / _GOLDEN_RELPATH
-        if candidate_golden.is_file():
-            print(f"  Run dir {exact_dir} not found; using golden from {candidate_golden}")
-            return candidate_golden
+    dst.parent.mkdir(parents=True, exist_ok=True)
 
-    print(
-        f"Error: no golden eval set found under {data_root}/<run_id>/swebench/.\n"
-        "       Generate the dataset first with Phase 2/3 pipeline, or "
-        "symlink an existing run:\n"
-        f"         mkdir -p data/{run_id} && ln -s ../<existing>/swebench data/{run_id}/swebench",
-        file=sys.stderr,
+    # List objects under the datasets prefix (should only be golden.jsonl)
+    list_url = (
+        f"https://www.googleapis.com/storage/v1/b/{_GCS_BUCKET}/o?prefix={_GCS_GOLDEN_PREFIX}"
     )
-    sys.exit(1)
+    with urllib.request.urlopen(list_url) as resp:
+        payload = json.loads(resp.read().decode())
+
+    items = payload.get("items", [])
+    if not items:
+        print(
+            f"Error: no files found at gs://{_GCS_BUCKET}/{_GCS_GOLDEN_PREFIX}\n"
+            "       Check that the bucket and dataset run ID are correct.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    for obj in items:
+        name: str = obj["name"]
+        rel_path = name[len(_GCS_GOLDEN_PREFIX) :].lstrip("/")
+        if not rel_path:
+            continue
+        dst_file = dst.parent / rel_path
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+
+        media_link: str = obj.get("mediaLink") or obj.get("selfLink", "")
+        print(f"  Downloading {name} -> {dst_file} ...")
+        with urllib.request.urlopen(media_link) as src:
+            if rel_path.endswith(".jsonl"):
+                content = src.read().decode()
+                dst_file.write_text(content)
+            else:
+                with dst_file.open("wb") as f:
+                    shutil.copyfileobj(src, f)
+
+    if not dst.is_file():
+        print(
+            f"Error: golden.jsonl not found in GCS at prefix {_GCS_GOLDEN_PREFIX}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"  Golden: {dst} ({dst.stat().st_size / 1_000_000:.0f} MB)")
+    return dst
 
 
 # ── Resilient training launcher (spawn + poll + state) ────────────────────────
@@ -198,19 +229,20 @@ def launch_modal_training(  # noqa: PLR0913, PLR0917 — 6 justified params for 
         print(f"  Resuming {variant} from saved handle {handle_id} ...")
         call = FunctionCall.from_id(handle_id)
     else:
-        # Look up the Modal function (must have been built with `modal run` at least once).
-        # Spawn a new job — does NOT block.
-        from modal import Function
+        # Spawn a new job using Modal's ephemeral app context (no deploy needed).
+        # The `with app.run():` context hydrates the function without requiring
+        # `modal deploy` — same effect as `modal run` but we keep the handle.
+        from training.modal_train import app, train_qlora
 
         print(f"  Spawning {variant} on Modal (A100-80GB) ...")
-        f = Function.from_name("swe-qwen-training-v2", "train_qlora")
         kwargs = dict(train_kwargs) if train_kwargs else {}
         kwargs["variant"] = variant
         kwargs["run_name"] = run_name
-        call = f.spawn(**kwargs)
+        with app.run():
+            call = train_qlora.spawn(**kwargs)
+            handle_id = call.object_id
 
         # Persist handle immediately so we can resume if interrupted
-        handle_id = call.object_id
         state["variants"][variant] = {
             "status": "launched",
             "run_name": run_name,
@@ -218,7 +250,7 @@ def launch_modal_training(  # noqa: PLR0913, PLR0917 — 6 justified params for 
         }
         _save_state(state)
         print(f"  Handle saved: {handle_id}")
-        print(f"  To monitor:   modal app logs swe-qwen-training-{variant}")
+        print(f"  To monitor:   modal app logs {variant}")
 
     state["variants"][variant]["status"] = "running"
     _save_state(state)
@@ -338,7 +370,7 @@ def promote_champion(
 def main() -> None:  # noqa: PLR0915 — 63 stmts for sequential orchestration logic
     args = parse_args()
 
-    golden_path = _resolve_golden_path(args.run_id)
+    golden_path = _ensure_golden(args.run_id)
 
     print("Phase 4H: 3-Config Comparison (sleep-resilient mode)")
     print(f"  Run ID:    {args.run_id}")
