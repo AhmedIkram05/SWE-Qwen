@@ -15,6 +15,7 @@ Env vars:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -296,6 +297,12 @@ def train_qlora(  # noqa: PLR0913, PLR0917
         torch._inductor.async_compile.shutdown_compile_workers()
     except Exception:
         pass
+
+    # Finish W&B run explicitly so the orchestration script can detect completion.
+    # Without this, Modal kills the container before wandb's atexit handler runs,
+    # leaving the run stuck in "running" state forever.
+    with contextlib.suppress(Exception):
+        wandb.finish()
 
     return {
         "status": "completed",

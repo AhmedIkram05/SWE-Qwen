@@ -243,6 +243,14 @@ def _wandb_run_finished(run_name: str) -> dict[str, Any] | None:
                 "wandb_run_id": run.id,
                 "artifact_name": _artifact_name(run.config.get("variant", "")),
             }
+        # Catch runs where training completed but Modal killed the container
+        # before wandb.finish() was called (state stays "running" indefinitely).
+        # Presence of train_loss in the summary confirms training finished.
+        if run.state == "running" and "train_loss" in run.summary:
+            return {
+                "wandb_run_id": run.id,
+                "artifact_name": _artifact_name(run.config.get("variant", "")),
+            }
     return None
 
 
