@@ -23,6 +23,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.11"
+  HF_XET_DISABLE: "1"  # avoids hf_xet Rust panic on global trace subscriber conflict
 
 jobs:
   lint-and-test:
