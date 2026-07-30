@@ -272,8 +272,8 @@ class TestCli:
 
     # ── Augmentation flags ────────────────────────────────────────────────
 
-    def test_augmentation_flags_default_on(self) -> None:
-        """Default: both augmentation flags are True."""
+    def test_augmentation_flags_default_off(self) -> None:
+        """Default: both augmentation flags are False."""
         mock_result = PipelineResult(
             run_id="s",
             manifest_hash="h",
@@ -283,8 +283,8 @@ class TestCli:
         with mock.patch("data_engineering.cli.run_pipeline", return_value=mock_result) as m:
             runner.invoke(app, ["run"])
             cfg = m.call_args[0][0]
-            assert cfg.augment_codecontests is True
-            assert cfg.augment_codealpaca is True
+            assert cfg.augment_codecontests is False
+            assert cfg.augment_codealpaca is False
             assert cfg.max_train_examples == 30000
 
     def test_augmentation_flags_disable_codecontests(self) -> None:
