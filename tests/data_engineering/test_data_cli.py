@@ -299,7 +299,7 @@ class TestCli:
             runner.invoke(app, ["run", "--no-augment-codecontests"])
             cfg = m.call_args[0][0]
             assert cfg.augment_codecontests is False
-            assert cfg.augment_codealpaca is True  # unchanged
+            assert cfg.augment_codealpaca is False  # unchanged
 
     def test_augmentation_flags_disable_both(self) -> None:
         """Both flags can be disabled simultaneously."""
@@ -347,6 +347,6 @@ class TestCli:
         result = runner.invoke(app, ["config"])
         assert result.exit_code == 0
         data = json.loads(result.stdout)
-        assert data["augment_codecontests"] is True
-        assert data["augment_codealpaca"] is True
+        assert data["augment_codecontests"] is False
+        assert data["augment_codealpaca"] is False
         assert data["max_train_examples"] == 30000

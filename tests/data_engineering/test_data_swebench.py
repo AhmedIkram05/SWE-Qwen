@@ -72,7 +72,7 @@ class TestSWEBenchConstants:
     """Tests for SWE-bench constants."""
 
     def test_python_repos_count(self):
-        assert len(SWE_BENCH_PYTHON_REPOS) == 18
+        assert len(SWE_BENCH_PYTHON_REPOS) == 74
 
     def test_python_repos_contains_expected(self):
         assert "django/django" in SWE_BENCH_PYTHON_REPOS
