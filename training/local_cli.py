@@ -24,7 +24,7 @@ def main(  # noqa: PLR0913, PLR0917
     wandb_project: str = "swe-qwen",
     wandb_entity: str | None = None,
     max_train_samples: int | None = None,
-):
+) -> None:
     """Launch QLoRA training locally (for testing with small models)."""
     print(f"Starting training: model={model_name}, variant={variant}")
     print(f"Data: {data_dir}, Output: {output_dir}")

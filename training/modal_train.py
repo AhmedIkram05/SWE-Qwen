@@ -21,6 +21,7 @@ import os
 import shutil
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import modal
 import wandb
@@ -202,7 +203,7 @@ def train_qlora(  # noqa: PLR0913, PLR0917
     gpu_type: str | None = None,
     use_unsloth: bool | None = None,
     max_train_samples: int | None = None,
-):
+) -> dict[str, Any]:
     """Run QLoRA training on Modal.
 
     Tokenized data is downloaded from the public GCS bucket to
