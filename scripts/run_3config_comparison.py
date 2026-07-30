@@ -4,6 +4,10 @@
 Orchestrates training for all 3 QLoRA variants on Modal, computes proxy
 F2P on the golden set, and promotes the champion to the W&B Registry.
 
+Sleep-resilient: uses ``Modal.spawn()`` + persistent state file so training
+continues on Modal even if your laptop goes to sleep. Re-run the same
+command to resume from where it left off.
+
 Usage:
     # Dry-run (validate orchestration logic, no Modal)
     python scripts/run_3config_comparison.py --dry-run --run-id 25d3f8fd0ccb
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 import time
 from pathlib import Path
@@ -25,13 +30,52 @@ from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _GOLDEN_RELPATH = "swebench/golden.jsonl"
+_STATE_PATH = _REPO_ROOT / "scripts" / ".pipeline-state.json"
+_POLL_INTERVAL = 60  # seconds between polling for Modal job completion
+
+
+# ── State persistence (sleep-resilient) ────────────────────────────────────────
+
+
+def _load_state(run_id: str) -> dict[str, Any]:
+    """Load pipeline state, returning a fresh state if none exists or run_id changed."""
+    if _STATE_PATH.exists():
+        with _STATE_PATH.open("r") as f:
+            state = json.load(f)
+        if state.get("run_id") == run_id:
+            return state
+        print(f"  State file found for different run_id ({state.get('run_id')}), starting fresh.")
+    return _new_state(run_id)
+
+
+def _new_state(run_id: str) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "completed_variants": [],
+        "variants": {},  # variant_name -> {status, run_name, handle_id, result}
+        "last_poll": 0.0,
+    }
+
+
+def _save_state(state: dict[str, Any]) -> None:
+    state["last_poll"] = time.time()
+    with _STATE_PATH.open("w") as f:
+        json.dump(state, f, indent=2)
+    _STATE_PATH.chmod(0o644)
+
+
+def _cleanup_state(*_args: Any) -> None:
+    """Remove state file on clean exit (Ctrl+C or completion)."""
+    if _STATE_PATH.exists():
+        _STATE_PATH.unlink(missing_ok=True)
+
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="3-Config QLoRA comparison runner",
+        description="3-Config QLoRA comparison runner (sleep-resilient)",
     )
     p.add_argument(
         "--run-id",
@@ -48,6 +92,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="+",
         default=["baseline_14b", "higher_rank_14b", "higher_lr_14b"],
         help="Variants to compare (default: all 3 mandatory 14B variants)",
+    )
+    p.add_argument(
+        "--max-train-samples",
+        type=int,
+        default=None,
+        help="Subsample to N rows per variant (for smoke-testing the pipeline)",
     )
     p.add_argument(
         "--output",
@@ -69,44 +119,149 @@ def _golden_path(run_id: str) -> Path:
     return _REPO_ROOT / "data" / run_id / _GOLDEN_RELPATH
 
 
-# ── Training launcher ─────────────────────────────────────────────────────────
+def _resolve_golden_path(run_id: str) -> Path:
+    """Resolve golden eval set for *run_id*.
+
+    Checks three locations in order:
+    1. ``data/{run_id}/swebench/golden.jsonl`` (exact match)
+    2. ``data/{run_id}/swebench/cleaned.jsonl`` (fallback within exact dir)
+    3. Any existing ``data/*/swebench/golden.jsonl`` (golden is same for all runs)
+
+    Exits with an error message if none are found.
+    """
+    # 1. Exact match
+    exact = _golden_path(run_id)
+    if exact.is_file():
+        return exact
+
+    # 2. Fallback within exact dir
+    exact_dir = _REPO_ROOT / "data" / run_id
+    fallback = exact_dir / "swebench/cleaned.jsonl"
+    if fallback.is_file():
+        print(f"  (using cleaned.jsonl under {exact_dir})")
+        return fallback
+
+    # 3. Scan any existing data dir with golden.jsonl
+    data_root = _REPO_ROOT / "data"
+    for candidate in sorted(data_root.iterdir()):
+        if not candidate.is_dir():
+            continue
+        candidate_golden = candidate / _GOLDEN_RELPATH
+        if candidate_golden.is_file():
+            print(f"  Run dir {exact_dir} not found; using golden from {candidate_golden}")
+            return candidate_golden
+
+    print(
+        f"Error: no golden eval set found under {data_root}/<run_id>/swebench/.\n"
+        "       Generate the dataset first with Phase 2/3 pipeline, or "
+        "symlink an existing run:\n"
+        f"         mkdir -p data/{run_id} && ln -s ../<existing>/swebench data/{run_id}/swebench",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
-def launch_modal_training(
+# ── Resilient training launcher (spawn + poll + state) ────────────────────────
+
+
+def launch_modal_training(  # noqa: PLR0913, PLR0917 — 6 justified params for Modal spawn orchestration
     variant: str,
     run_id: str,
     run_name: str,
+    state: dict[str, Any],
+    train_kwargs: dict[str, Any] | None = None,
     dry_run: bool = False,
 ) -> dict[str, str]:
-    """Launch a Modal training job for *variant*.
+    """Launch (or resume) a Modal training job for *variant*.
 
-    Returns ``{"wandb_run_id": str, "artifact_name": str}``
-    (mocked in dry-run mode).
+    Uses ``modal_entrypoint.spawn()`` so the Modal job continues running even
+    if this script is interrupted or the laptop sleeps.  State is persisted to
+    ``.pipeline-state.json`` — re-run the same command to resume.
+
+    Returns ``{"wandb_run_id": str, "artifact_name": str}``.
     """
     if dry_run:
-        print(f"  [DRY-RUN] Would launch variant={variant} run_name={run_name}")
+        print(f"  [DRY-RUN] Would spawn variant={variant} run_name={run_name}")
         return {
             "wandb_run_id": f"dry-run-{variant}",
             "artifact_name": f"model-qwen3-14b-{variant}",
         }
 
-    # Import only when actually running on Modal
-    from training.modal_train import modal_entrypoint
+    # ── Check existing state for a running/spawned job ─────────────────────
+    variant_state = state["variants"].get(variant, {})
+    handle_id = variant_state.get("handle_id")
+    existing_status = variant_state.get("status")
 
-    print(f"  Launching {variant} on Modal ...")
-    # Modal .remote() call — blocks until completion.
-    # Returns dict from train_qlora(): {wandb_run_id, artifact_name, ...}
-    result: dict = modal_entrypoint.remote(
-        model_name="qwen3-14b",
-        variant=variant,
-        data_dir="/data/tokenized",
-        run_name=run_name,
-        gpu_type=None,  # auto-resolve from models.yaml → A100-80GB
+    if handle_id and existing_status in ("launched", "running"):
+        from modal import FunctionCall
+
+        print(f"  Resuming {variant} from saved handle {handle_id} ...")
+        call = FunctionCall.from_id(handle_id)
+    else:
+        # Look up the Modal function (must have been built with `modal run` at least once).
+        # Spawn a new job — does NOT block.
+        from modal import Function
+
+        print(f"  Spawning {variant} on Modal (A100-80GB) ...")
+        f = Function.from_name("swe-qwen-training-v2", "train_qlora")
+        kwargs = dict(train_kwargs) if train_kwargs else {}
+        kwargs["variant"] = variant
+        kwargs["run_name"] = run_name
+        call = f.spawn(**kwargs)
+
+        # Persist handle immediately so we can resume if interrupted
+        handle_id = call.object_id
+        state["variants"][variant] = {
+            "status": "launched",
+            "run_name": run_name,
+            "handle_id": handle_id,
+        }
+        _save_state(state)
+        print(f"  Handle saved: {handle_id}")
+        print(f"  To monitor:   modal app logs swe-qwen-training-{variant}")
+
+    state["variants"][variant]["status"] = "running"
+    _save_state(state)
+
+    # ── Poll until completion (sleep-resilient) ────────────────────────────
+    from modal.exception import TimeoutError
+
+    while True:
+        try:
+            result: dict = call.get(timeout=_POLL_INTERVAL)
+            break  # success — result is the train_qlora() return dict
+        except TimeoutError:
+            print(f"  {variant} still training ... (polled at {time.strftime('%H:%M:%S')})")
+            state["variants"][variant]["status"] = "running"
+            _save_state(state)
+        except Exception as exc:
+            # Likely a connection error (laptop sleep / network blip).
+            # The Modal job keeps running; retry after a brief wait.
+            print(f"  Connection issue: {exc}")
+            print(f"  Retrying in {_POLL_INTERVAL}s (job continues on Modal)...")
+            time.sleep(_POLL_INTERVAL)
+
+    # ── Training completed ─────────────────────────────────────────────────
+    wandb_run_id = result.get("wandb_run_id")
+    artifact_name = result.get("artifact_name", f"model-qwen3-14b-{variant}")
+
+    state["variants"][variant].update(
+        {
+            "status": "completed",
+            "result": {
+                "wandb_run_id": wandb_run_id,
+                "artifact_name": artifact_name,
+            },
+        }
     )
-    return {
-        "wandb_run_id": result["wandb_run_id"],
-        "artifact_name": result["artifact_name"],
-    }
+    state["completed_variants"].append(variant)
+    _save_state(state)
+
+    print(f"  {variant} complete → W&B run: {wandb_run_id}")
+    return {"wandb_run_id": wandb_run_id, "artifact_name": artifact_name}
+
+
+# ── Download, evaluate, promote ────────────────────────────────────────────────
 
 
 def download_adapter(
@@ -114,14 +269,7 @@ def download_adapter(
     output_dir: Path,
     dry_run: bool = False,
 ) -> str:
-    """Download the trained adapter from W&B Artifacts.
-
-    Args:
-        artifact_name: W&B artifact name (e.g. ``"model-qwen3-14b-baseline_14b"``).
-        output_dir: Local directory to download into.
-
-    Returns the local path to the adapter directory.
-    """
+    """Download the trained adapter from W&B Artifacts."""
     if dry_run:
         local_path = str(output_dir / artifact_name)
         print(f"  [DRY-RUN] Would download W&B artifact {artifact_name} to {local_path}")
@@ -136,9 +284,6 @@ def download_adapter(
     return local_dir
 
 
-# ── F2P evaluation ────────────────────────────────────────────────────────────
-
-
 def evaluate_proxy_f2p(
     variant: str,
     golden_path: Path,
@@ -146,6 +291,9 @@ def evaluate_proxy_f2p(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run proxy F2P evaluation for one variant."""
+    if dry_run:
+        return {"variant": variant, "mean_f2p": 0.0}
+
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
@@ -157,12 +305,9 @@ def evaluate_proxy_f2p(
 
     scores = mod.compute_proxy_f2p_scores(
         golden_path=golden_path,
-        variant_adapter_map={variant: adapter_path if not dry_run else ""},
+        variant_adapter_map={variant: adapter_path},
     )
     return scores[variant]
-
-
-# ── Champion promotion ────────────────────────────────────────────────────────
 
 
 def promote_champion(
@@ -190,40 +335,58 @@ def promote_champion(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+def main() -> None:  # noqa: PLR0915 — 63 stmts for sequential orchestration logic
     args = parse_args()
 
-    data_dir = _REPO_ROOT / "data" / args.run_id
-    if not data_dir.is_dir():
-        print(f"Error: data directory not found: {data_dir}", file=sys.stderr)
-        sys.exit(1)
+    golden_path = _resolve_golden_path(args.run_id)
 
-    golden_path = _golden_path(args.run_id)
-    if not golden_path.is_file():
-        print(f"Warning: golden set not found at {golden_path}, proxy F2P will use cleaned.jsonl")
-        # Fall back to cleaned.jsonl — all records, no train/val split
-        golden_path = data_dir / "swebench/cleaned.jsonl"
-        if not golden_path.is_file():
-            print(f"Error: no data found under {data_dir}", file=sys.stderr)
-            sys.exit(1)
-
-    print("Phase 4H: 3-Config Comparison")
+    print("Phase 4H: 3-Config Comparison (sleep-resilient mode)")
     print(f"  Run ID:    {args.run_id}")
     print(f"  Golden:    {golden_path}")
     print(f"  Variants:  {', '.join(args.variants)}")
     print(f"  Mode:      {'DRY-RUN' if args.dry_run else 'LIVE'}")
+    print(f"  State:     {_STATE_PATH}")
     print()
+
+    # Register signal handlers for graceful Ctrl-C
+    signal.signal(signal.SIGINT, lambda *_: (_cleanup_state(), sys.exit(130)))
+    signal.signal(signal.SIGTERM, lambda *_: (_cleanup_state(), sys.exit(143)))
 
     output_dir = _REPO_ROOT / "models" / "comparisons" / args.run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Launch all variants
+    # ── Load or init state ────────────────────────────────────────────────
+    state = _load_state(args.run_id)
+    if state.get("completed_variants"):
+        print(f"  Resuming — already completed: {', '.join(state['completed_variants'])}")
+    print()
+
+    # Common kwargs passed to every train_qlora call
+    train_kwargs = {
+        "model_name": "qwen3-14b",
+        "data_dir": "/data/tokenized",
+        "gpu_type": None,  # auto-resolve from models.yaml → A100-80GB
+    }
+    if args.max_train_samples:
+        train_kwargs["max_train_samples"] = args.max_train_samples
+        print(f"  Smoke mode: {args.max_train_samples} samples per variant")
+        print()
+
+    # ── Step 1: Train all variants sequentially ───────────────────────────
     results: dict[str, dict[str, Any]] = {}
     for variant in args.variants:
+        if variant in state.get("completed_variants", []):
+            print(f"[{variant}] Already completed, skipping. ✓")
+            previous_result = state["variants"].get(variant, {}).get("result", {})
+            results[variant] = {"wandb_run_id": previous_result.get("wandb_run_id")}
+            continue
+
         print(f"[{variant}]")
         run_name = _variant_run_name(variant)
 
-        launch_info = launch_modal_training(variant, args.run_id, run_name, args.dry_run)
+        launch_info = launch_modal_training(
+            variant, args.run_id, run_name, state, train_kwargs, args.dry_run
+        )
         wandb_run_id = launch_info["wandb_run_id"]
         artifact_name = launch_info["artifact_name"]
 
@@ -240,7 +403,7 @@ def main() -> None:
         print(f"  mean_f2p={f2p_result['mean_f2p']}")
         print()
 
-    # Step 2: Select champion
+    # ── Step 2: Select champion ────────────────────────────────────────────
     import importlib.util
 
     _spec = importlib.util.spec_from_file_location(
@@ -255,10 +418,10 @@ def main() -> None:
     champion_artifact_name = results[champion]["artifact_name"]
     print(f"Champion: {champion} (F2P={results[champion]['mean_f2p']})")
 
-    # Step 3: Promote champion
+    # ── Step 3: Promote champion ───────────────────────────────────────────
     promote_champion(champion, champion_artifact_name, args.dry_run)
 
-    # Step 4: Output summary
+    # ── Step 4: Output summary ─────────────────────────────────────────────
     summary = {
         "run_id": args.run_id,
         "dry_run": args.dry_run,
@@ -271,6 +434,9 @@ def main() -> None:
     with out_path.open("w") as f:
         json.dump(summary, f, indent=2)
     print(f"\nSummary written to {out_path}")
+
+    # Cleanup state on successful completion
+    _cleanup_state()
 
 
 if __name__ == "__main__":
