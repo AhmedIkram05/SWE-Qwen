@@ -101,7 +101,7 @@ def launch_modal_training(
         variant=variant,
         data_dir="/data/tokenized",
         run_name=run_name,
-        gpu_type="A10G:1",
+        gpu_type=None,  # auto-resolve from models.yaml → A100-80GB
     )
     return {
         "wandb_run_id": result["wandb_run_id"],
