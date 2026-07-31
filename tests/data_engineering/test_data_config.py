@@ -22,7 +22,7 @@ class TestDataPipelineConfig:
         cfg = DataPipelineConfig()
         assert cfg.batch_size == 50
         assert cfg.max_patch_lines == 500
-        assert cfg.min_golden_examples == 200
+        assert cfg.min_golden_examples == 100
         assert cfg.parallel_workers == 1
         assert cfg.max_issues_per_repo == 2000
         assert cfg.max_events_per_issue == 100
