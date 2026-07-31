@@ -24,7 +24,7 @@ from transformers import (
     PreTrainedTokenizer,
     TrainingArguments,
 )
-from trl import SFTTrainer
+from trl.trainer.sft_trainer import SFTTrainer
 
 from training.callbacks import WandbCheckpointCallback, WandbLoggingCallback
 from training.prompt_loader import PromptLoader
