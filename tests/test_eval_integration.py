@@ -832,3 +832,248 @@ def test_prompt_ab_runs_templates(config: EvalConfig, monkeypatch: pytest.Monkey
     assert run.aggregate[0].model_name == "qwen3-14b"
     assert run.aggregate[0].variant == "baseline_14b"
     assert run.aggregate[0].f2p_rate == pytest.approx(1.0)
+
+
+# ── harness: batching ────────────────────────────────────────────────────────
+
+
+def test_run_batch_generates_once_per_repo(
+    config: EvalConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run_batch`` calls ``_generate_patches`` once per repo, not once per example."""
+    _write_golden(
+        Path(config.golden_data_path),
+        [
+            _input_record("demo-1", repo="owner/repo-a"),
+            _input_record("demo-2", repo="owner/repo-a"),
+            _input_record("demo-3", repo="owner/repo-b"),
+        ],
+    )
+    harness = EvaluationHarness(config)
+    monkeypatch.setattr("evaluation.harness._wandb_or_none", lambda: None)
+
+    generate_calls: list[list[EvalInput]] = []
+
+    def _tracking_generate(
+        model: str, variant: str, template: str, examples: list[EvalInput]
+    ) -> list[str]:
+        generate_calls.append(list(examples))
+        return [FIX_PATCH] * len(examples)
+
+    monkeypatch.setattr("evaluation.harness._generate_patches", _tracking_generate)
+    monkeypatch.setattr("evaluation.harness._run_tests", _fake_run_tests)
+
+    harness.run_golden([("qwen3-14b", "baseline_14b")], run_id="batch-test")
+
+    # Two repos → two generate calls, not three
+    assert len(generate_calls) == 2
+    # First call has 2 examples from repo-a
+    assert len(generate_calls[0]) == 2
+    assert all(ex.repo == "owner/repo-a" for ex in generate_calls[0])
+    # Second call has 1 example from repo-b
+    assert len(generate_calls[1]) == 1
+    assert generate_calls[1][0].repo == "owner/repo-b"
+
+
+def test_run_example_with_generated_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_example`` skips ``_generate_patches`` when ``generated_patch`` is provided."""
+    harness = EvaluationHarness(
+        EvalConfig(checkpoint_dir=Path("data/ckpt"), output_dir=Path("data/out"))
+    )
+
+    generate_calls: list[tuple[str, str, str, list[EvalInput]]] = []
+
+    def _tracking_generate(
+        model: str, variant: str, template: str, examples: list[EvalInput]
+    ) -> list[str]:
+        generate_calls.append((model, variant, template, list(examples)))
+        return [FIX_PATCH] * len(examples)
+
+    monkeypatch.setattr("evaluation.harness._generate_patches", _tracking_generate)
+    monkeypatch.setattr("evaluation.harness._run_tests", _fake_run_tests)
+
+    example = _make_input()
+    result = harness.run_example(
+        example,
+        "qwen3-14b",
+        "baseline_14b",
+        "chat",
+        generated_patch="+pre-generated-fix\n",
+    )
+
+    # _generate_patches must NOT be called
+    assert generate_calls == []
+    assert result.generated_patch == "+pre-generated-fix\n"
+    assert result.f2p == 1.0
+
+
+def test_run_example_without_generated_patch_calls_generate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy path: ``run_example`` calls ``_generate_patches`` when no patch provided."""
+    harness = EvaluationHarness(
+        EvalConfig(checkpoint_dir=Path("data/ckpt"), output_dir=Path("data/out"))
+    )
+    monkeypatch.setattr("evaluation.harness._generate_patches", _fake_generate)
+    monkeypatch.setattr("evaluation.harness._run_tests", _fake_run_tests)
+
+    result = harness.run_example(_make_input(), "qwen3-14b", "baseline_14b", "chat")
+
+    assert result.generated_patch == FIX_PATCH
+
+
+# ── harness: batch test execution ─────────────────────────────────────────
+
+
+def test_run_example_from_output_builds_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_example_from_output`` builds EvalResult from pre-fetched output."""
+    harness = EvaluationHarness(
+        EvalConfig(checkpoint_dir=Path("data/ckpt"), output_dir=Path("data/out"))
+    )
+    example = _make_input()
+    output = {
+        "tests_before": [
+            {"name": "tests.test_fix", "status": "failed", "duration": 0.1},
+            {"name": "tests.test_stays", "status": "passed", "duration": 0.1},
+        ],
+        "tests_after": [
+            {"name": "tests.test_fix", "status": "passed", "duration": 0.1},
+            {"name": "tests.test_stays", "status": "passed", "duration": 0.1},
+        ],
+        "patch_application": {
+            "success": True,
+            "method_used": "git_apply",
+            "files_modified": ["app.py"],
+        },
+    }
+
+    result = harness.run_example_from_output(
+        example, "qwen3-14b", "baseline_14b", "chat", FIX_PATCH, output
+    )
+
+    assert isinstance(result, EvalResult)
+    assert result.f2p == 1.0
+    assert result.p2p == 1.0
+    assert result.generated_patch == FIX_PATCH
+    assert result.patch_application.success
+    assert result.latency_seconds == 0.0  # batch path: no per-example timing
+    assert result.error is None
+
+
+def test_run_batch_calls_batch_tests(config: EvalConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """3 examples in same repo → 1 batch call to Modal (or 3 fallback calls)."""
+    _write_golden(
+        Path(config.golden_data_path),
+        [
+            _input_record("demo-1", repo="owner/repo"),
+            _input_record("demo-2", repo="owner/repo"),
+            _input_record("demo-3", repo="owner/repo"),
+        ],
+    )
+    harness = EvaluationHarness(config)
+    monkeypatch.setattr("evaluation.harness._wandb_or_none", lambda: None)
+    monkeypatch.setattr("evaluation.harness._generate_patches", _fake_generate)
+
+    # Mock Modal batch to fail → triggers fallback to _run_tests
+    def _boom_modal(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("Modal not available")
+
+    monkeypatch.setattr("evaluation.harness._run_tests_batch_modal", _boom_modal)
+
+    per_job_calls: list[str] = []
+
+    def _counting_tests(example: EvalInput, patch: str, cfg: EvalConfig) -> dict[str, Any]:
+        per_job_calls.append(example.repo)
+        return PASSING_PAYLOAD
+
+    monkeypatch.setattr("evaluation.harness._run_tests", _counting_tests)
+
+    results = harness.run_batch(
+        harness.load_examples("golden"), "qwen3-14b", "baseline_14b", "chat", "batch-test"
+    )
+
+    assert len(results) == 3
+    # Fallback path: 3 per-job calls when Modal batch fails
+    assert len(per_job_calls) == 3
+
+
+def test_run_batch_uses_modal_batch_when_available(
+    config: EvalConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When Modal batch succeeds, only 1 batch call for all examples in repo."""
+    _write_golden(
+        Path(config.golden_data_path),
+        [
+            _input_record("demo-1", repo="owner/repo"),
+            _input_record("demo-2", repo="owner/repo"),
+            _input_record("demo-3", repo="owner/repo"),
+        ],
+    )
+    harness = EvaluationHarness(config)
+    monkeypatch.setattr("evaluation.harness._wandb_or_none", lambda: None)
+    monkeypatch.setattr("evaluation.harness._generate_patches", _fake_generate)
+
+    batch_calls: list[tuple[str, str, str | None, list[dict[str, Any]]]] = []
+
+    def _fake_modal_batch(
+        repo: str,
+        base_sha: str,
+        test_patch: str | None,
+        test_jobs: list[dict[str, Any]],
+        cfg: EvalConfig,
+    ) -> list[dict[str, Any]]:
+        batch_calls.append((repo, base_sha, test_patch, test_jobs))
+        return [PASSING_PAYLOAD for _ in test_jobs]
+
+    monkeypatch.setattr("evaluation.harness._run_tests_batch_modal", _fake_modal_batch)
+    # _run_tests should NOT be called when batch succeeds
+    monkeypatch.setattr("evaluation.harness._run_tests", _fake_run_tests)
+
+    results = harness.run_batch(
+        harness.load_examples("golden"), "qwen3-14b", "baseline_14b", "chat", "batch-test"
+    )
+
+    assert len(results) == 3
+    assert len(batch_calls) == 1  # ONE batch call for 3 examples
+    assert len(batch_calls[0][3]) == 3  # 3 jobs in the batch
+    assert batch_calls[0][0] == "owner/repo"
+
+
+def test_run_tests_batch_produces_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fake 3 jobs via modal path, assert 3 result dicts returned."""
+    from evaluation.harness import _run_tests_batch
+
+    cfg = EvalConfig(checkpoint_dir=Path("data/ckpt"), output_dir=Path("data/out"))
+    test_jobs = [
+        {"generated_patch": f"patch-{i}", "fail_to_pass": ["t1"], "pass_to_pass": ["t2"]}
+        for i in range(3)
+    ]
+
+    batch_args: list[Any] | None = None
+
+    def _fake_modal(
+        repo: str,
+        base_sha: str,
+        test_patch: str | None,
+        jobs: list[dict[str, Any]],
+        config: EvalConfig,
+    ) -> list[dict[str, Any]]:
+        nonlocal batch_args
+        batch_args = [repo, base_sha, test_patch, jobs]
+        return [PASSING_PAYLOAD for _ in jobs]
+
+    monkeypatch.setattr("evaluation.harness._run_tests_batch_modal", _fake_modal)
+
+    results = _run_tests_batch("owner/repo", "abc123", None, test_jobs, cfg)
+
+    assert len(results) == 3
+    assert batch_args is not None
+    assert batch_args[0] == "owner/repo"
+    assert batch_args[1] == "abc123"
+    assert len(batch_args[3]) == 3

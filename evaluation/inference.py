@@ -8,12 +8,18 @@ The core logic (``render_patch_prompt``, ``extract_patch``,
 ``resolve_adapter_path``, ``resolve_hf_id``) is plain Python and importable
 without Modal; vLLM is only imported inside the Modal function because it is
 Linux-only.
+
+The LLM engine is cached per (model, variant) so the container re-uses the
+same loaded model across ``generate_patches_batch`` calls instead of
+cold-starting vLLM (engine init + 28 GB model download + CUDA graph capture)
+on every invocation.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -54,12 +60,67 @@ vllm_image = (
     # Modal container has no CUDA toolkit. vLLM 0.26 honors
     # VLLM_USE_FLASHINFER_SAMPLER=0 to fall back to the torch sampler.
     .env({"VLLM_USE_FLASHINFER_SAMPLER": "0"})
+    # Cache models into the Modal volume so container restarts reuse the
+    # 28 GB model instead of re-downloading from Hugging Face.
+    .env({"HF_HOME": "/models"})
     .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
     .add_local_dir(str(_EVAL_DIR), remote_path="/root/evaluation", copy=True)
     .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)
 )
 
 model_volume = modal.Volume.from_name("eval-model-cache", create_if_missing=True)
+
+# ── GPU type mapping ──────────────────────────────────────────────────────
+# GPU type hardcoded to A10G:1; change here + EvalConfig.gpu_type to switch to A100-80GB.
+_GPU_MAP: dict[str, str] = {
+    "a10g-24gb": "A10G:1",
+    "a100-80gb": "A100-80GB",
+}
+
+# ── LLM singleton cache ───────────────────────────────────────────────────
+# ponytail: process-level singleton keyed by (model_name, variant).
+# vLLM LLM() is expensive to construct (28 GB model load + CUDA graph capture).
+# Inside a Modal container the process lives for the container lifetime, so
+# caching avoids cold-start on every generate_patches_batch call.
+_LLM_CACHE: dict[tuple[str, str], Any] = {}
+_LLM_LOCK = threading.Lock()
+
+
+def _get_llm(
+    model_name: str,
+    variant: str,
+    adapter_path: str | None,
+) -> Any:
+    """Return a cached vLLM ``LLM`` instance for *(model_name, variant)*.
+
+    On first call the model is loaded (expensive). Subsequent calls return
+    the cached instance. The LoRA adapter is applied on first use if present.
+
+    Args:
+        model_name: ``models.yaml`` key or full Hugging Face ID.
+        variant: Variant key for adapter lookup & cache key.
+        adapter_path: Local path to LoRA adapter (``None`` for baseline).
+
+    Returns:
+        A ``vllm.LLM`` instance (cached after first creation).
+    """
+    from vllm import LLM
+
+    cache_key = (model_name, variant)
+    with _LLM_LOCK:
+        if cache_key in _LLM_CACHE:
+            return _LLM_CACHE[cache_key]
+
+        llm = LLM(
+            model=resolve_hf_id(model_name),
+            quantization="bitsandbytes",
+            enable_lora=adapter_path is not None,
+            gpu_memory_utilization=0.85,
+        )
+        # ponytail: in vLLM 0.26+ LoRA adapters are loaded on-demand via
+        # lora_request param on llm.generate(); no pre-load needed here.
+        _LLM_CACHE[cache_key] = llm
+        return llm
 
 
 # ── Pure helpers (no Modal / vLLM) ────────────────────────────────────────────
@@ -253,7 +314,7 @@ def resolve_adapter_path(variant: str, config: EvalConfig | None = None) -> str 
 
 @app.function(
     image=vllm_image,
-    gpu="A10G:1",  # A10G = 24GB; uses config.gpu_type mapping if needed
+    gpu="A10G:1",  # hardcoded; change here + EvalConfig.gpu_type for A100-80GB
     volumes={"/models": model_volume},
     timeout=600,
     secrets=[modal.Secret.from_name("wandb-secret"), modal.Secret.from_name("hf-secret")],
@@ -288,7 +349,7 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
     Returns:
         List of patch strings, same order as ``examples``.
     """
-    from vllm import LLM, SamplingParams
+    from vllm import SamplingParams
     from vllm.lora.request import LoRARequest
 
     from evaluation.config import EvalConfig
@@ -300,20 +361,21 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
     else:
         logger.info("no LoRA adapter for variant %s — using base model %s", variant, model_name)
 
-    llm = LLM(
-        model=resolve_hf_id(model_name),
-        quantization="bitsandbytes",  # in-flight NF4 4-bit, matches QLoRA-trained base
-        enable_lora=adapter_path is not None,
-        gpu_memory_utilization=0.85,
-    )
+    llm = _get_llm(model_name, variant, adapter_path)
     prompts = [render_patch_prompt(example, template_name=prompt_template) for example in examples]
     sampling_params = SamplingParams(
         max_tokens=max_new_tokens, temperature=temperature, top_p=top_p
     )
-    lora_request = (
-        LoRARequest(lora_name=f"{model_name}-{variant}", lora_int_id=1, lora_path=adapter_path)
+    # ponytail: vLLM 0.26+ loads LoRA on-demand via lora_request on generate().
+    # The cached LLM only needs enable_lora=True; the adapter is loaded first use.
+    lora_req = (
+        LoRARequest(
+            lora_name=f"{model_name}-{variant}",
+            lora_int_id=1,
+            lora_path=adapter_path,
+        )
         if adapter_path is not None
         else None
     )
-    outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
+    outputs = llm.generate(prompts, sampling_params, lora_request=lora_req)
     return [extract_patch(output.outputs[0].text) for output in outputs]

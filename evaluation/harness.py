@@ -155,6 +155,101 @@ def _run_tests(example: EvalInput, generated_patch: str, config: EvalConfig) -> 
     )
 
 
+def _run_tests_batch(
+    repo: str,
+    base_sha: str,
+    test_patch: str | None,
+    test_jobs: list[dict[str, Any]],
+    config: EvalConfig,
+) -> list[dict[str, Any]]:
+    """Run tests for multiple patches (Modal batch, fallback to per-job).
+
+    Tries ``_run_tests_batch_modal`` first (one container for all jobs).
+    Falls back to ``_run_tests`` per job when Modal is unavailable or fails.
+    Uses explicit module lookup so tests can monkeypatch the modal function.
+    """
+    # Explicit module lookup: allows tests to monkeypatch the modal function
+    import evaluation.harness as _harness  # noqa: PLW0406 — intentional for monkeypatch support
+
+    try:
+        return _harness._run_tests_batch_modal(  # type: ignore[attr-defined]
+            repo,
+            base_sha,
+            test_patch,
+            test_jobs,
+            config,
+        )
+    except Exception:  # noqa: BLE001 — Modal unavailable, fall back
+        logger.info(
+            "batch test runner unavailable for %s, falling back to per-job",
+            repo,
+        )
+        return _harness._run_tests_batch_fallback(  # type: ignore[attr-defined]
+            repo,
+            base_sha,
+            test_patch,
+            test_jobs,
+            config,
+        )
+
+
+def _run_tests_batch_modal(
+    repo: str,
+    base_sha: str,
+    test_patch: str | None,
+    test_jobs: list[dict[str, Any]],
+    config: EvalConfig,
+) -> list[dict[str, Any]]:
+    """Modal batch path: one container for all jobs."""
+    from evaluation.test_runner import app as _test_runner_app
+    from evaluation.test_runner import run_tests_batch as _modal_batch
+
+    _ensure_app_running(_test_runner_app)
+    if _test_runner_app in _APP_RUN_FAILED:
+        raise RuntimeError("Modal disabled for this process (app.run() failed earlier)")
+
+    return _modal_batch.remote(  # type: ignore[no-any-return]
+        repo,
+        base_sha,
+        test_patch,
+        test_jobs,
+        timeout=config.test_timeout_seconds,
+        max_retries=config.max_retries,
+    )
+
+
+def _run_tests_batch_fallback(
+    repo: str,
+    base_sha: str,
+    test_patch: str | None,
+    test_jobs: list[dict[str, Any]],
+    config: EvalConfig,
+) -> list[dict[str, Any]]:
+    """Fallback: delegate to ``_run_tests`` per job (test-compatible).
+
+    Uses explicit module lookup so monkeypatched ``_run_tests`` is picked up.
+    """
+    import evaluation.harness as _harness  # noqa: PLW0406 — intentional for monkeypatch support
+
+    results: list[dict[str, Any]] = []
+    for job in test_jobs:
+        example = EvalInput(
+            instance_id=job.get("instance_id", ""),
+            repo=repo,
+            issue_body="",
+            base_sha=base_sha,
+            head_sha="",
+            test_patch=test_patch or "",
+            fail_to_pass=job.get("fail_to_pass") or [],
+            pass_to_pass=job.get("pass_to_pass") or [],
+            repo_domain="",
+        )
+        results.append(
+            _harness._run_tests(example, job.get("generated_patch") or "", config)  # type: ignore[attr-defined]
+        )
+    return results
+
+
 # ── Data reading ─────────────────────────────────────────────────────────────
 
 
@@ -564,6 +659,7 @@ class EvaluationHarness:
         model_name: str,
         variant: str,
         prompt_template: str,
+        generated_patch: str | None = None,
     ) -> EvalResult:
         """Evaluate a single example: generate patch → run tests → metrics.
 
@@ -572,14 +668,29 @@ class EvaluationHarness:
         failure is captured in the returned ``EvalResult.error`` so callers
         can mark the run partial.
 
+        Args:
+            example: Eval input instance.
+            model_name: Model registry key.
+            variant: Trained variant key.
+            prompt_template: Template name for prompt rendering.
+            generated_patch: Pre-generated patch string. If provided, skips
+                ``_generate_patches`` call (batch already did it). If not
+                provided (legacy path), calls ``_generate_patches`` for this
+                single example.
+
         Returns:
             An EvalResult with f2p/p2p rates computed from the test runner's
             before/after payloads.
         """
         started = time.monotonic()
         try:
-            patches = _generate_patches(model_name, variant, prompt_template, [example])
-            generated_patch = patches[0] if patches else ""
+            if generated_patch is not None:
+                # Batch path: patch already generated
+                pass
+            else:
+                # Legacy path: generate on the fly
+                patches = _generate_patches(model_name, variant, prompt_template, [example])
+                generated_patch = patches[0] if patches else ""
             output = _run_tests(example, generated_patch, self.config)
             tests_before = [TestResult.model_validate(t) for t in output.get("tests_before") or []]
             tests_after = [TestResult.model_validate(t) for t in output.get("tests_after") or []]
@@ -643,6 +754,62 @@ class EvaluationHarness:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
+    def run_example_from_output(  # noqa: PLR0913, PLR0917
+        self,
+        example: EvalInput,
+        model_name: str,
+        variant: str,
+        prompt_template: str,
+        generated_patch: str,
+        output: dict[str, Any],
+    ) -> EvalResult:
+        """Build EvalResult from pre-fetched test output (batch path).
+
+        Args:
+            example: Eval input instance.
+            model_name: Model registry key.
+            variant: Trained variant key.
+            prompt_template: Template name.
+            generated_patch: Patch string already applied in container.
+            output: Test result dict from ``run_tests_batch`` (same shape as
+                ``run_tests_in_container`` return).
+
+        Returns:
+            EvalResult with f2p/p2p computed from the output payload.
+        """
+        tests_before = [TestResult.model_validate(t) for t in output.get("tests_before") or []]
+        tests_after = [TestResult.model_validate(t) for t in output.get("tests_after") or []]
+        raw_patch = output.get("patch_application") or {}
+        patch_application = (
+            PatchApplicationResult.model_validate(raw_patch)
+            if raw_patch
+            else PatchApplicationResult(
+                success=False,
+                method_used="failed",
+                error="no patch application result",
+            )
+        )
+        error = str(output["error"]) if output.get("error") else None
+        f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
+            tests_before, tests_after, example.fail_to_pass, example.pass_to_pass
+        )
+        return EvalResult(
+            instance_id=example.instance_id,
+            repo=example.repo,
+            model_name=model_name,
+            variant=variant,
+            prompt_template=prompt_template,
+            generated_patch=generated_patch,
+            patch_application=patch_application,
+            tests_before=tests_before,
+            tests_after=tests_after,
+            f2p=f2p,
+            p2p=p2p,
+            latency_seconds=0.0,
+            timestamp=datetime.now(UTC),
+            error=error,
+        )
+
     def run_batch(
         self,
         examples: list[EvalInput],
@@ -684,10 +851,53 @@ class EvaluationHarness:
             if self.checkpoint_mgr.is_completed(key):
                 logger.info("skipping completed repo %s (checkpoint %s)", repo, key)
                 continue
-            repo_results = [
-                self.run_example(example, model_name, variant, prompt_template)
-                for example in by_repo[repo]
-            ]
+            repo_examples = by_repo[repo]
+            # Batch: generate patches once for all examples in this repo
+            patches = _generate_patches(model_name, variant, prompt_template, repo_examples)
+
+            # Build test jobs list
+            test_jobs: list[dict[str, Any]] = []
+            for i, example in enumerate(repo_examples):
+                patch = patches[i] if i < len(patches) else ""
+                test_jobs.append(
+                    {
+                        "generated_patch": patch,
+                        "fail_to_pass": example.fail_to_pass or [],
+                        "pass_to_pass": example.pass_to_pass or [],
+                    }
+                )
+
+            # Run all tests for this repo in one container
+            batch_results = _run_tests_batch(
+                repo,
+                repo_examples[0].base_sha,
+                repo_examples[0].test_patch or None,
+                test_jobs,
+                self.config,
+            )
+
+            # Pair results back with examples
+            repo_results: list[EvalResult] = []
+            for i, example in enumerate(repo_examples):
+                if i < len(batch_results):
+                    result = self.run_example_from_output(
+                        example,
+                        model_name,
+                        variant,
+                        prompt_template,
+                        patches[i] if i < len(patches) else "",
+                        batch_results[i],
+                    )
+                else:
+                    # Fallback if batch returned fewer results
+                    result = self.run_example(
+                        example,
+                        model_name,
+                        variant,
+                        prompt_template,
+                        generated_patch=patches[i] if i < len(patches) else "",
+                    )
+                repo_results.append(result)
             new.extend(repo_results)
             if repo_results:
                 payload: EvalResult | list[EvalResult] = (

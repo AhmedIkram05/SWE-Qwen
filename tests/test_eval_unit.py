@@ -9,6 +9,8 @@ by Agent B; skipped until that module exists).
 from __future__ import annotations
 
 import subprocess
+import sys
+import types
 from datetime import datetime
 from pathlib import Path
 
@@ -625,3 +627,104 @@ def test_ensure_app_running_enters_once_per_app(monkeypatch: pytest.MonkeyPatch)
 
     assert _FakeRun.enters == 2  # once per app, not once per call
     assert len(_APP_RUN_STACKS) == 2
+
+
+# ── inference: LLM singleton cache ─────────────────────────────────────────
+
+
+def test_get_llm_returns_cached_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_get_llm`` returns the same LLM instance on repeated calls for the same key."""
+    import evaluation.inference
+
+    evaluation.inference._LLM_CACHE.clear()
+
+    call_count = 0
+
+    class _FakeLLM:
+        def __init__(self, **kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+
+        def load_lora_adapter(self, req: object) -> None:
+            pass
+
+    class _FakeLoRARequest:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+    # Mock vllm at sys.modules level (import happens inside _get_llm)
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.LLM = _FakeLLM
+    fake_lora = types.ModuleType("vllm.lora")
+    fake_lora_request = types.ModuleType("vllm.lora.request")
+    fake_lora_request.LoRARequest = _FakeLoRARequest
+    fake_lora.request = fake_lora_request
+
+    monkeypatch.setattr(evaluation.inference, "resolve_hf_id", lambda _: "fake/model")
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.lora", fake_lora)
+    monkeypatch.setitem(sys.modules, "vllm.lora.request", fake_lora_request)
+
+    from evaluation.inference import _get_llm
+
+    llm1 = _get_llm("qwen3-14b", "baseline_14b", None)
+    llm2 = _get_llm("qwen3-14b", "baseline_14b", None)
+
+    assert llm1 is llm2
+    assert call_count == 1  # LLM() constructed only once
+    assert len(evaluation.inference._LLM_CACHE) == 1
+
+
+def test_get_llm_different_variants_separate_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Different (model, variant) keys get separate LLM instances."""
+    import evaluation.inference
+
+    evaluation.inference._LLM_CACHE.clear()
+
+    call_count = 0
+
+    class _FakeLLM:
+        def __init__(self, **kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+
+        def load_lora_adapter(self, req: object) -> None:
+            pass
+
+    class _FakeLoRARequest:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.LLM = _FakeLLM
+    fake_lora = types.ModuleType("vllm.lora")
+    fake_lora_request = types.ModuleType("vllm.lora.request")
+    fake_lora_request.LoRARequest = _FakeLoRARequest
+    fake_lora.request = fake_lora_request
+
+    monkeypatch.setattr(evaluation.inference, "resolve_hf_id", lambda _: "fake/model")
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.lora", fake_lora)
+    monkeypatch.setitem(sys.modules, "vllm.lora.request", fake_lora_request)
+
+    from evaluation.inference import _get_llm
+
+    llm_a = _get_llm("qwen3-14b", "variant_a", "/path/to/a")
+    llm_b = _get_llm("qwen3-14b", "variant_b", "/path/to/b")
+
+    assert llm_a is not llm_b
+    assert call_count == 2
+    assert len(evaluation.inference._LLM_CACHE) == 2
+
+
+# ── test_runner: batch function ───────────────────────────────────────────
+
+
+def test_run_tests_batch_single_job() -> None:
+    """``run_tests_batch`` exists as a Modal Function."""
+    from evaluation.test_runner import run_tests_batch
+
+    assert run_tests_batch is not None
+    assert hasattr(run_tests_batch, "remote")

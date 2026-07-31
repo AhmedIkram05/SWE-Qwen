@@ -542,3 +542,150 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
         "patch_application": patch_result.model_dump(),
         "ground_truth": ground_truth,
     }
+
+
+# ── Batch Modal function ──────────────────────────────────────────────────
+
+
+@app.function(
+    image=BASE_IMAGE,
+    volumes={"/repo_cache": repo_volume, "/test_cache": test_volume},
+    timeout=600,
+    gpu=None,
+)
+def run_tests_batch(  # noqa: PLR0913, PLR0917
+    repo: str,
+    base_sha: str,
+    test_patch: str | None,
+    test_jobs: list[dict[str, Any]],
+    timeout: int = 30,
+    max_retries: int = 2,
+) -> list[dict[str, Any]]:
+    """Execute test suites for multiple patches in a single container.
+
+    One container per repo: clone once, checkout once, run tests_before and
+    tests_head ONCE (shared base state), then run tests_after per patch.
+
+    Args:
+        repo: GitHub repo ``"owner/name"``.
+        base_sha: Commit to evaluate against.
+        test_patch: Ground-truth test changes, or None.
+        test_jobs: Per-job dicts with ``generated_patch``, ``fail_to_pass``,
+            ``pass_to_pass``.
+        timeout: Per-test timeout in seconds.
+        max_retries: Extra attempts for failed/errored tests.
+
+    Returns:
+        List of result dicts (same shape as ``run_tests_in_container`` return),
+        one per ``test_job``.
+    """
+    from evaluation.metrics import compute_f2p
+    from evaluation.patch_applier import apply_patch
+    from evaluation.schema import PatchApplicationResult
+
+    repo_dir = Path("/repo_cache") / repo
+
+    try:
+        _clone_repo(repo, repo_dir)
+        _ensure_checked_out(repo_dir, base_sha)
+    except (subprocess.TimeoutExpired, RuntimeError) as exc:
+        logger.error("repo preparation failed for %s: %s", repo, exc, exc_info=True)
+        error_result = {
+            "repo": repo,
+            "base_sha": base_sha,
+            "error": str(exc),
+            "tests_before": [],
+            "tests_head": [],
+            "tests_after": [],
+            "patch_application": {},
+            "ground_truth": {},
+        }
+        return [dict(error_result) for _ in test_jobs]
+
+    # ── Shared: tests_before (same base state for all jobs) ──
+    # Collect all test names across jobs for the shared baseline run
+    all_test_names: list[str] = []
+    for job in test_jobs:
+        all_test_names.extend(job.get("fail_to_pass") or [])
+        all_test_names.extend(job.get("pass_to_pass") or [])
+    all_test_names = list(set(all_test_names))
+
+    tests_before = collect_test_results(
+        repo_dir, all_test_names, timeout=timeout, max_retries=max_retries
+    )
+
+    # ── Shared: tests_head (ground-truth verification, computed once) ──
+    tests_head: list[TestResult] = []
+    ground_truth: dict[str, Any] = {}
+    if test_patch:
+        patch_result = apply_patch(repo_dir, test_patch, base_sha)
+        if patch_result.success:
+            tests_head = collect_test_results(
+                repo_dir, all_test_names, timeout=timeout, max_retries=max_retries
+            )
+            # Use first job's fail_to_pass/pass_to_pass for ground truth
+            first_job = test_jobs[0] if test_jobs else {}
+            f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
+                tests_before,
+                tests_head,
+                first_job.get("fail_to_pass") or [],
+                first_job.get("pass_to_pass") or [],
+            )
+            ground_truth = {
+                "f2p": f2p,
+                "p2p": p2p,
+                "warning": f2p < _GT_F2P_THRESHOLD,
+            }
+            if f2p < _GT_F2P_THRESHOLD:
+                logger.warning(
+                    "ground truth F2P=%.2f%% < 100%% for %s",
+                    f2p * 100,
+                    repo,
+                )
+        else:
+            logger.warning("test_patch application failed for %s: %s", repo, patch_result.error)
+
+    # ── Per-job: reset, apply generated patch, run tests_after ──
+    results: list[dict[str, Any]] = []
+    for job in test_jobs:
+        _reset_to_base(repo_dir, base_sha)
+
+        generated_patch = job.get("generated_patch") or ""
+        fail_to_pass = job.get("fail_to_pass") or []
+        pass_to_pass = job.get("pass_to_pass") or []
+        job_test_names = [*fail_to_pass, *pass_to_pass]
+
+        if generated_patch:
+            patch_result = apply_patch(repo_dir, generated_patch, base_sha)
+            if patch_result.success:
+                tests_after = collect_test_results(
+                    repo_dir, job_test_names, timeout=timeout, max_retries=max_retries
+                )
+            else:
+                logger.warning(
+                    "generated patch application failed for %s: %s",
+                    repo,
+                    patch_result.error,
+                )
+                tests_after = []
+        else:
+            patch_result = PatchApplicationResult(
+                success=False,
+                method_used="failed",
+                error="no generated patch provided",
+            )
+            tests_after = []
+
+        results.append(
+            {
+                "repo": repo,
+                "base_sha": base_sha,
+                "tests_before": [t.model_dump() for t in tests_before],
+                "tests_head": [t.model_dump() for t in tests_head],
+                "tests_after": [t.model_dump() for t in tests_after],
+                "patch_application": patch_result.model_dump(),
+                "ground_truth": ground_truth,
+            }
+        )
+
+    return results
