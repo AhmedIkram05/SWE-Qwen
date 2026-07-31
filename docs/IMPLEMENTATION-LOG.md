@@ -583,53 +583,94 @@ Each Phase follows this structure:
 
 ---
 
-## Phase 5: Evaluation Harness — YYYY-MM-DD
+## Phase 5: Evaluation Harness — 2026-07-31 ✅ COMPLETED (code + tests; live Modal runs pending credentials)
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 |------|---------|--------|--------|--------|
-| 5.1 | Evaluation schema | | | |
-| 5.2 | Test runner | | | |
-| 5.3 | F2P computation | | | |
-| 5.4 | P2P computation | | | |
-| 5.5 | Golden runner | | | |
-| 5.6 | SWE-bench Verified runner | | | |
-| 5.7 | W&B eval logging | | | |
-| 5.8 | Comparison framework | | | |
-| 5.9 | Baseline eval | | | |
-| 5.10 | Fine-tuned eval | | | |
-| 5.11 | SWE-bench integration | | | |
-| 5.12 | Unit/integration tests | | | |
+| 5.1 | Evaluation schema | Completed | `evaluation/` package, 11 modules: config.py, schema.py, patch_applier.py, metrics.py, test_runner.py, inference.py, harness.py, prompt_ab_test.py, comparison.py, cli.py | Low |
+| 5.2 | Test runner | Completed | Modal `run_tests_in_container` (clone → base_sha → tests_before → test_patch → tests_head → ground-truth F2P → revert → generated_patch → tests_after) + retry/flaky detection | Low |
+| 5.3/5.4 | F2P/P2P computation | Completed | metrics.py `compute_f2p`/`aggregate_metrics`; flaky + skipped excluded from denominators; empty P2P → 1.0 | Low |
+| 5.5/5.6/5.9 | Golden / Verified / baseline runners | Completed | harness.py `run_golden`/`run_swebench_verified`/`run_baseline` (variant "baseline", no LoRA), all funneled through `_run_split` | Low |
+| 5.7 | W&B eval logging | Completed | WandbLogger no-op safe without W&B; artifacts eval-results-{run_id} (JSONL), eval-aggregate-{run_id}, eval-per-repo-{run_id} (CSV), eval-prompt-ab-{run_id} | Low |
+| 5.8 | Comparison framework | Completed | comparison.py: revalidate_champion (P2P≥90% + F2P≥15% gates), proxy_champion_from_f2p_proxy **imports** `scripts.f2p_proxy.select_champion` (AC #17), annotated markdown report | Low |
+| 5.10 | Fine-tuned eval (3 variants) | Code complete | `run --models "qwen3-14b:baseline_14b|higher_rank_14b|higher_lr_14b"`; live run needs Modal creds | Medium |
+| 5.11 | SWE-bench integration | Completed | load_examples: local JSONL or gs:// via lazy google-cloud-storage; `metadata.is_verified` filter; {run_id} substitution | Low |
+| 5.12 | Unit/integration tests | Completed | test_eval_unit.py (47) + test_eval_integration.py (17) = 64 tests, all offline | Low |
+| 5.13–5.17 | Manual Modal eval runs | **Not executed** | Requires Modal/W&B credentials; deferred to user-owned run | Medium |
+| — | Flaky classification semantics | Corrected to spec §6 | Initial impl "any pass → passed"; spec: status change across attempts → `flaky` | High |
+| — | Run persistence | Added `_persist_run` | Harness never wrote `{output_dir}/{run_id}.json` — comparison.py local-first load was dead code | High |
+| — | Comparison run-file parsing | Whole-file json.loads first, JSONL fallback | `_persist_run` writes indented multi-line JSON; per-line parse returned 0 runs | Medium |
+| — | scripts/ importable under pytest | Added `scripts/__init__.py` + pyproject include | ModuleNotFoundError on `from scripts.f2p_proxy import ...` in tests | Medium |
+| — | Checkpoint key | `{repo}__{model}__{variant}__{template}.json` (template added) | Spec's 4-arg key collided across prompt templates in one run_id — template 2 silently skipped as "completed" | Medium |
+| — | vLLM image deps | Added trl to vllm_image pip_install | `training/__init__.py` imports trl; container import would fail without it | Low |
+| — | Patch batching | Per-example `_generate_patches` (single-example Modal batch call) | Batching per-repo would cut Modal overhead on 2,056-example runs; deferred | Medium |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| Modal app functions for test exec + vLLM inference | Isolation + parallelizable + matches Phase 4 Modal infra | Local subprocess, docker | Plan Q1 decision honored; volumes for repo/test cache |
+| Pure `classify_test_outcomes(attempts) -> Literal["passed","failed","flaky","skipped"]` | Cross-agent contract, unit-testable | Framework-coupled result parsing | Spec §6: any status change across attempts → flaky; flaky excluded from F2P/P2P denominators |
+| Flaky excluded from F2P/P2P denominators | Metrics must reflect ground truth, not retry noise | Count flaky as failed | Spec §6 rule; `compute_f2p` filters status != flaky/skipped |
+| git apply → unidiff fallback patch application | Real workflow fidelity with robustness | unidiff only, git apply only | Plan Q2 honored; `apply_patch` never raises, reports method_used |
+| WandbLogger no-op safe without W&B | Offline dev + test loops | Hard fail on missing creds | Same pattern as Phase 3 pipeline (non-fatal cloud failures) |
+| `revalidate_champion` ≠ `select_champion` | Two distinct paths: proxy (P4) vs real-F2P (P5) | Reuse select_champion for both | Real-metrics path re-aggregates by model:variant with P2P/F2P gates; proxy path wraps P4 functions (imported, AC #17) |
+| Local run files + W&B artifact fallback in comparison | compare must work offline | W&B-only | `{output_dir}/{run_id}.json` primary (now persisted by `_persist_run`), artifact fallback |
+| Seeded sampling for CI runs | `random.Random(ci_random_seed)` | Unseeded random, fixed slice | Reproducible `--sample N` results |
+| Lazy imports (modal, vllm, wandb, google-cloud-storage) | Heavy/credentialed deps stay out of import graph | Module-level imports | 64 offline tests run without any cloud dep installed/credentialed |
+| Checkpoint key includes prompt_template | Template A/B in one run_id collided | Spec-literal 4-arg key | Correctness fix; template 2 was silently skipped |
+| `--run_ids` flag (underscore) | Typer 0.27 kebab-cases `run_ids` → `--run-ids` | Accept kebab-case | Spec verification command uses `--run_ids` verbatim |
+| _persist_run format = `model_dump(mode="json")`, indent=2 | Single EvalRun document | JSONL lines | Round-trips through comparison `_parse_run_file` (whole-file first) |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
+| classify_test_outcomes "any pass → passed" violated spec §6 | During orchestrator review | 2026-07-31 | Rewrote: all-pass→passed, all-fail→failed, all-skip→skipped, any mix→flaky; updated unit tests | 20 min |
+| `from scripts.f2p_proxy` ModuleNotFoundError under pytest | Agent E integration tests | 2026-07-31 | `scripts/__init__.py` + `"scripts*"` in pyproject packages.find.include + `pip install -e . --no-deps` (stale editable finder) | 15 min |
+| Harness never persisted `{output_dir}/{run_id}.json` | Agent E review | 2026-07-31 | Added `_persist_run` (harness.py:380), called in `_run_split` + prompt_ab_test | 15 min |
+| Comparison local-first load returned 0 runs | Orchestrator repro (E's tests used hand-written JSONL fixtures) | 2026-07-31 | `_parse_run_file`: whole-file `json.loads` first (EvalRun/single result), per-line JSONL fallback; 2 regression tests | 20 min |
+| pytest collection warning on `TestResult` class name | Any test importing schema.py | 2026-07-31 | Aliased `_TestResult` in test_eval_unit.py; verified with `-W error::pytest.PytestCollectionWarning` | 10 min |
+| mypy 2.1 has no `include` key | pyproject mypy config | 2026-07-31 | Converted to `files = [...]` form; bare `mypy` works | 5 min |
+| `baseline_14b` adapter resolution needs W&B artifact download | inference.resolve_adapter_path | 2026-07-31 | Local `models/checkpoints/{variant}` first, W&B artifact fallback, None for baseline; lazy vllm import | 0 min |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| Flaky contract | `classify_test_outcomes` — status change across retry attempts → `flaky`; flaky/skipped excluded from F2P/P2P denominators | Phase 9 quality gates consume these metrics |
+| Run file format | `{output_dir}/{run_id}.json` = single EvalRun dump (`model_dump(mode="json")`, indent=2); comparison parses whole-file first, JSONL fallback | Both writer and parser are in-repo now; keep in sync |
+| Checkpoint key | `{checkpoint_dir}/{run_id}/{repo_slug}__{model}__{variant}__{template}.json`, atomic tmp+rename | Resume skips completed repos; template in key is load-bearing |
+| Artifact naming | eval-results-{run_id} (type eval_results), eval-aggregate-{run_id} (eval_metrics), eval-per-repo-{run_id} (eval_breakdown CSV), eval-prompt-ab-{run_id}; scalars `eval/{model}/{variant}/{prompt}/<metric>` | Phase 9 promotion pipeline + W&B dashboard conventions |
+| EvalConfig knobs | EVAL_ env prefix; min_f2p_threshold 0.15, min_p2p_threshold 0.90 (mirrored in comparison `_MIN_*_RATE`), test_timeout 30s, repo_timeout 300s, max_retries 2, flaky_threshold 0.5, ci_sample_size 50, ci_random_seed 42 | Mirrored constants must stay in sync between harness and comparison |
+| Template kwargs | chat.j2 → system_prompt/messages/user_prompt; system.j2 → language/task_description/style_guide; user.j2 → issue_title/issue_body/repo_name/repo_domain/context_files/test_files; assistant.j2 → analysis/plan/code_changes | Phase 6 inference API reuses prompt composition |
+| LoRA resolution | resolve_adapter_path: local models/checkpoints/{variant} → W&B artifact `model-qwen3-14b-{variant}`, None for baseline | Phase 6 consumes champion adapter path |
+| Perf note | `run_example` calls `_generate_patches` per-example (single-example Modal batch); per-repo batching would cut overhead on 2,056-example runs | Optimize before large-scale eval runs |
+| Ground truth | run_tests_in_container runs tests_before (base_sha) + tests_head (head_sha); warns if ground-truth F2P < 1.0 | Validates SWE-bench labels per example (AC #16) |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| `evaluation/` package (11 modules) | Added | Phase 5 deliverable per plan §14 manifest |
+| `scripts/__init__.py` | Added | scripts/ must be importable (comparison imports f2p_proxy) |
+| pyproject: `"scripts*"` in packages.find.include | Added | Same importability fix for editable installs |
+| pyproject: per-file ruff ignores for cli.py (B008, PLR0913, PLR0917) | Added | Typer signature conventions; same precedent as data_engineering/cli.py |
+| pyproject: mypy `include` → `files` form | Modified | mypy 2.1 removed `include` key |
+| `_persist_run` in harness | Added | Comparison local-first load was dead code without it |
+| TRACKER.md | Added | Orchestration plan + AC status table + final verification record |
 
 ### Metrics / Observations
 
--
--
+- **64 tests passing** (47 unit + 17 integration), all offline, no cloud deps required
+- **ruff clean** on evaluation/ + both test files; **mypy clean** on evaluation/
+- **17/17 acceptance criteria satisfied at code+test level**; 6 require live Modal/W&B runs (AC 2,3,4,6,7,16)
+- Module line counts: cli 251, comparison 321, config 68, harness 702, inference 307, metrics 132, patch_applier 212, prompt_ab_test 102, schema 153, test_runner 530
+- Regression: `pytest tests/test_scaffold.py` still 30 passed after package/pyproject changes
+- Full repo pytest hang is pre-existing (network/model-dependent data_engineering test), unrelated to eval work
+- 2 orchestrator-caught bugs not covered by agent tests (run persistence parse mismatch) — regression tests added
 
 ---
 
@@ -1084,16 +1125,3 @@ Each Phase follows this structure:
 - **W&B artifacts**: 8 dataset artifacts per run + proper lineage
 - **All 183 data engineering tests pass** (including new synthetic + SWE-bench tests)
 - **Tokenization stats**: train 1115/1561 examples, avg 961/942 tokens (max_length=4096), labels masked with -100 for prompt portion
-
----
-
-## Phase 5: Evaluation Harness — YYYY-MM-DD
-
-### Deviation Log
-
-| Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
-| 5.1 | Evaluation schema | | | |
-| 5.2 | Test runner | | | |
-| 5.3 | F2P computation | | | |
-| 5.4 | P2P computation | | | |
