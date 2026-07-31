@@ -77,7 +77,7 @@ _GCS_BUCKET = "swe-qwen-datasets"
 
 def _gcs_golden_prefix(run_id: str) -> str:
     """Construct GCS prefix for golden data given a pipeline run ID."""
-    return f"datasets/{run_id}/"
+    return f"datasets/{run_id}/swebench/"
 
 
 # ── State persistence (sleep-resilient) ────────────────────────────────────────
@@ -274,6 +274,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--skip-eval",
         action="store_true",
         help="Skip F2P evaluation and champion selection (training only)",
+    )
+    p.add_argument(
+        "--force-retrain",
+        action="store_true",
+        help="Ignore W&B state, retrain all variants from scratch",
     )
     return p.parse_args(argv)
 
@@ -676,10 +681,13 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — 63 stmts for sequential orches
     state = _load_state(args.run_id)
 
     # ── Reconcile with W&B (recover from interrupted sessions) ────────────
-    if not args.dry_run:
+    if not args.dry_run and not args.force_retrain:
         print("  Reconciling state with W&B ...")
         state = _reconcile_state_with_wandb(state, requested_variants=args.variants)
         _save_state(state)
+    elif args.force_retrain:
+        state["completed_variants"] = []
+        print("  Force mode: ignoring previous completions, will retrain all variants")
     if state.get("completed_variants"):
         print(f"  Completed: {', '.join(state['completed_variants'])}")
     print()
@@ -746,16 +754,9 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — 63 stmts for sequential orches
             print(f"  {v}: {err[:200]}")
         print()
 
-    # ── Step 2: Select champion ────────────────────────────────────────────
-    if args.skip_eval:
-        print("  Skipping evaluation and champion selection (--skip-eval).")
-        champion = None
-        champion_artifact_name = None
-    elif not results:
-        print("No completed variants — cannot select champion.")
-        champion = None
-        champion_artifact_name = None
-    else:
+    # ── Load f2p_proxy module (used for both F2P scoring and champion selection) ──
+    select_champion = None
+    if not args.skip_eval and results:
         import importlib.util
 
         _spec = importlib.util.spec_from_file_location(
@@ -768,6 +769,32 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — 63 stmts for sequential orches
         _spec.loader.exec_module(_mod)
         select_champion = _mod.select_champion
 
+        # ── Compute F2P for ALL completed variants in ONE batch ──
+        print("Computing F2P scores for all completed variants ...")
+
+        # f2p_proxy queries W&B directly; adapter paths not needed for scoring.
+        # Pass all variant names in a single call so normalization is consistent.
+        all_variants = dict.fromkeys(results, "")
+        all_f2p = _mod.compute_proxy_f2p_scores(golden_path, all_variants)
+
+        for variant, f2p in all_f2p.items():
+            if variant in results:
+                results[variant].update(f2p)
+                loss = f2p.get("train_loss", "?")
+                print(f"  {variant}: F2P={f2p['mean_f2p']} (loss={loss})")
+        print()
+
+    # ── Step 2: Select champion ────────────────────────────────────────────
+    if args.skip_eval:
+        print("  Skipping evaluation and champion selection (--skip-eval).")
+        champion = None
+        champion_artifact_name = None
+    elif not results:
+        print("No completed variants — cannot select champion.")
+        champion = None
+        champion_artifact_name = None
+    else:
+        assert select_champion is not None  # guaranteed by if not args.skip_eval and results
         champion = select_champion(results)
         champion_artifact_name = results[champion]["artifact_name"]
         print(f"Champion: {champion} (F2P={results[champion]['mean_f2p']})")

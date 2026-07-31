@@ -48,8 +48,10 @@ def compute_proxy_f2p_scores(
     api = wandb.Api(timeout=30)
     project = _wandb_project_entity()
     results: dict[str, dict[str, Any]] = {}
+
+    # First pass: collect all train_losses
+    losses: dict[str, float] = {}
     for variant in variant_adapter_map:
-        # Find the W&B run for this variant
         runs = api.runs(project, {"config.variant": variant})
         if not runs:
             results[variant] = {
@@ -59,8 +61,16 @@ def compute_proxy_f2p_scores(
             }
             continue
 
-        # Use the most recent run
-        run = sorted(runs, key=lambda r: r.created_at, reverse=True)[0]
+        finished = [r for r in runs if r.state == "finished"]
+        if not finished:
+            results[variant] = {
+                "mean_f2p": 0.0,
+                "count": len(records),
+                "warning": "no finished W&B run found",
+            }
+            continue
+
+        run = sorted(finished, key=lambda r: r.created_at, reverse=True)[0]
         train_loss = run.summary.get("train_loss", None)
         if train_loss is None:
             results[variant] = {
@@ -70,9 +80,19 @@ def compute_proxy_f2p_scores(
             }
             continue
 
-        # Invert loss: lower loss → higher score. Scale to ~[0, 1] range.
-        # Typical train_loss for QLoRA is ~0.8-1.2, so 2 - loss gives ~0.8-1.2 → clamp to [0, 1]
-        score = max(0.0, min(1.0, 2.0 - train_loss))
+        losses[variant] = train_loss
+
+    # Second pass: normalize relative to min/max loss (lower loss → higher score)
+    if not losses:
+        return results
+
+    min_loss = min(losses.values())
+    max_loss = max(losses.values())
+    loss_range = max_loss - min_loss
+
+    for variant, train_loss in losses.items():
+        score = 1.0 - (train_loss - min_loss) / loss_range if loss_range > 0 else 1.0
+
         results[variant] = {
             "mean_f2p": round(score, 4),
             "count": len(records),
