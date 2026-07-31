@@ -212,3 +212,51 @@ class TestCleanRecords:
         cleaned, stats = clean_records(records, config)
         assert len(cleaned) == 1  # kept
         assert len(stats.warnings_non_python) >= 1
+
+    def test_unverified_record_with_warnings(self, config: DataPipelineConfig) -> None:
+        """is_verified=False with no test files and no F2P should warn but keep record.
+        Covers the warning branch under is_verified=False (lines 200-205)."""
+        from data_engineering.schema import IssueRecord
+
+        rec = IssueRecord.model_construct(
+            issue_id="unverified#1",
+            repo="owner/repo",
+            issue_body="Training example",
+            patch_diff="--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n-x\n+x\n+y\n",
+            test_files_changed=[],  # triggers no_test_files warning
+            files_changed=["foo.py"],
+            # no F2P keywords → triggers no_f2p_signal warning
+            commit_messages=["refactor: cleanup"],
+            pr_description="",
+            metadata={"is_verified": False},
+        )
+        cleaned, stats = clean_records([rec], config)
+        assert len(cleaned) == 1  # kept despite warnings
+        assert stats.removed_no_test_files == 0  # not removed, just warned
+
+    def test_unverified_record_no_warnings(self, config: DataPipelineConfig) -> None:
+        """is_verified=False with test files and F2P keywords should have no warnings.
+        Covers the false branch of _check_no_test_files and _check_f2p for unverified records."""
+        from data_engineering.schema import IssueRecord
+
+        rec = IssueRecord.model_construct(
+            issue_id="unverified_clean#1",
+            repo="owner/repo",
+            issue_body="Training example",
+            patch_diff="--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n-x\n+x\n+y\n",
+            test_files_changed=["test_foo.py"],  # has tests — no warning
+            files_changed=["foo.py"],
+            commit_messages=["fix: resolve bug"],  # has F2P keywords — no warning
+            pr_description="",
+            metadata={"is_verified": False},
+        )
+        cleaned, stats = clean_records([rec], config)
+        assert len(cleaned) == 1
+
+    def test_apply_filter_unknown_reason(self) -> None:
+        """_apply_filter with unknown reason should not raise (dead-code protection branch)."""
+        from data_engineering.clean import CleanStats, _apply_filter
+
+        stats = CleanStats()
+        _apply_filter(stats, "nonexistent_reason")  # no-op, should not raise
+        assert stats.total_input == 0

@@ -152,6 +152,16 @@ class TestLogValidationErrors:
             artifact = log_validation_errors("run_id", errors, config)
             assert artifact is not None
 
+    def test_log_dataset_artifacts_with_empty_repo_results(self) -> None:
+        """Empty repo_results should not set per_repo_counts in run.summary."""
+        stages = {"train": [_rec("r#1")]}
+        config = DataPipelineConfig(wandb_project="test-proj")
+        stats = {"repo_results": []}
+        with patch("data_engineering.version.wandb") as mock_wandb:
+            mock_run = mock_wandb.init.return_value
+            result = log_dataset_artifacts("run_id", stages, config, "hash", stats)
+            assert isinstance(result, dict)
+
     def test_log_dataset_artifacts_with_per_repo_stats(self) -> None:
         """log_dataset_artifacts with stats that include repo_results should log per_repo_counts."""
         stages = {
@@ -171,6 +181,29 @@ class TestLogValidationErrors:
             "train_count": 1,
             "val_count": 0,
             "test_count": 1,
+            "golden_count": 0,
+        }
+
+        with patch("data_engineering.version.wandb") as mock_wandb:
+            mock_run = mock_wandb.init.return_value
+            result = log_dataset_artifacts("run_id", stages, config, "hash", stats)
+            assert mock_wandb.init.called
+            assert isinstance(result, dict)
+
+    def test_log_dataset_artifacts_empty_repo_results(self) -> None:
+        """Empty repo_results and non-dict items should be handled gracefully."""
+        stages = {
+            "train": [_rec("r#1")],
+        }
+        config = DataPipelineConfig(wandb_project="test-proj")
+        stats = {
+            "repo_results": [
+                {},  # dict without "repo_id"
+                "not_a_dict",  # not a dict at all
+            ],
+            "train_count": 1,
+            "val_count": 0,
+            "test_count": 0,
             "golden_count": 0,
         }
 

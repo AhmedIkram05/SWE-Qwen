@@ -350,3 +350,22 @@ class TestCli:
         assert data["augment_codecontests"] is False
         assert data["augment_codealpaca"] is False
         assert data["max_train_examples"] == 30000
+
+    def test_tokenize_success(self) -> None:
+        """Tokenize command succeeds with valid --run-id."""
+        mock_result = {"run_id": "abc123", "splits": {"train": 10}, "total_examples": 10}
+        with mock.patch("data_engineering.cli.tokenize_dataset", return_value=mock_result):
+            result = runner.invoke(app, ["tokenize", "--run-id", "abc123"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert data["run_id"] == "abc123"
+
+    def test_tokenize_failure(self) -> None:
+        """Tokenize command exits with code 1 on failure."""
+        with mock.patch(
+            "data_engineering.cli.tokenize_dataset",
+            side_effect=ValueError("No data found"),
+        ):
+            result = runner.invoke(app, ["tokenize", "--run-id", "abc123"])
+        assert result.exit_code == 1
+        assert "No data found" in result.stderr

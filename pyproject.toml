@@ -186,7 +186,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --strict-markers --strict-config -p no:warnings"
+addopts = "-v --strict-markers --strict-config -p no:warnings --durations=10"
 markers = [
     "unit: Unit tests",
     "integration: Integration tests",
@@ -202,7 +202,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["swe_qwen"]
+source = ["src/swe_qwen", "training", "data_engineering", "scripts"]
 omit = ["tests/*", "*/__pycache__/*", "*/conftest.py"]
 branch = true
 

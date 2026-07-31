@@ -225,6 +225,45 @@ class TestLoadCodeContestsMocked:
         records = load_codecontests(config)
         assert len(records) == 0  # Gracefully skipped
 
+    @patch("data_engineering.synthetic_augment.load_dataset")
+    def test_load_codecontests_non_dict_solutions(self, mock_load_dataset, config):
+        """Row with solutions as list (not dict) should be skipped."""
+        from data_engineering.synthetic_augment import load_codecontests
+
+        mock_ds = [
+            {
+                "name": "weird",
+                "description": "Solutions as list",
+                "difficulty": 1,
+                "solutions": ["a", "b"],  # not a dict
+            },
+        ]
+        mock_load_dataset.return_value = mock_ds
+
+        records = load_codecontests(config)
+        assert len(records) == 0
+
+    @patch("data_engineering.synthetic_augment.load_dataset")
+    def test_load_codecontests_empty_solution_code(self, mock_load_dataset, config):
+        """Python solution with empty code after strip should be skipped."""
+        from data_engineering.synthetic_augment import load_codecontests
+
+        mock_ds = [
+            {
+                "name": "empty_sol",
+                "description": "Empty solution",
+                "difficulty": 1,
+                "solutions": {
+                    "solution": ["   "],  # only whitespace → empty after strip
+                    "language": [3],
+                },
+            },
+        ]
+        mock_load_dataset.return_value = mock_ds
+
+        records = load_codecontests(config)
+        assert len(records) == 0
+
 
 class TestLoadCodeAlpacaMocked:
     """Tests for load_codealpaca with mocked dataset."""

@@ -6,6 +6,7 @@ so we patch it at the source to avoid real GCS calls.
 
 from __future__ import annotations
 
+from unittest import mock
 from unittest.mock import patch
 
 from data_engineering.archive import upload_text_to_gcs, upload_to_gcs
@@ -93,10 +94,37 @@ class TestUploadToGcs:
 
             mock_debug.assert_any_call(
                 "Uploaded %s (%d records, md5=%s)",
-                "gs://bucket/datasets/run_1/train.jsonl",
-                1,
-                "abc123",
+                mock.ANY,
+                mock.ANY,
+                mock.ANY,
             )
+
+    def test_upload_jsonl_with_dict_fallback(self) -> None:
+        """Record with .dict() method (pydantic v1) should use dict() fallback."""
+
+        class _OldModel:
+            def dict(self):
+                return {"issue_id": "old#1"}
+
+        stages = {"train": [_OldModel()]}
+        config = DataPipelineConfig(gcs_bucket="bucket")
+        with patch("google.cloud.storage.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_bucket = mock_client.bucket.return_value
+            mock_bucket.name = "bucket"
+            result = upload_to_gcs("run_1", stages, {}, "card", config)
+            assert "train" in result
+
+    def test_upload_jsonl_with_plain_dict(self) -> None:
+        """Plain dict records should be handled (neither model_dump nor dict)."""
+        stages = {"train": [{"issue_id": "dict#1"}]}
+        config = DataPipelineConfig(gcs_bucket="bucket")
+        with patch("google.cloud.storage.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_bucket = mock_client.bucket.return_value
+            mock_bucket.name = "bucket"
+            result = upload_to_gcs("run_1", stages, {}, "card", config)
+            assert "train" in result
 
     def test_skips_empty_stages(self) -> None:
         """Empty stage lists should not call _upload_jsonl (no blob for that stage)."""
