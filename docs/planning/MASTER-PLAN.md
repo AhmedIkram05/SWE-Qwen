@@ -882,7 +882,7 @@ swe-qwen/
 - [ ] Champion/Challenger comparison runs automatically on any new model checkpoint
 - [ ] Promotion decision (promote/reject) is logged to W&B with full rationale
 - [ ] Successful promotion triggers automatic deployment to inference endpoint
-- [ rejected promotions have documented reason and metrics
+- [ ] rejected promotions have documented reason and metrics
 - [ ] Unit tests cover all promotion rule scenarios
 
 **Acceptance Criteria:**
