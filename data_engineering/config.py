@@ -15,7 +15,7 @@ class DataPipelineConfig(BaseSettings):
     # Processing
     batch_size: int = 50
     max_patch_lines: int = 500
-    min_golden_examples: int = 200
+    min_golden_examples: int = 100
     parallel_workers: int = 1
     max_issues_per_repo: int = 2000
     max_events_per_issue: int = 100
@@ -29,7 +29,7 @@ class DataPipelineConfig(BaseSettings):
     wandb_entity: str | None = None  # optional, defaults to user default
 
     # Splits
-    golden_source_split: str = "test"  # SWE-bench has F2P in verified+test+dev
+    golden_source_split: str = "verified+test+dev"  # official SWE-bench F2P splits
     train_ratio: float = 0.8
     val_ratio: float = 0.1
     test_ratio: float = 0.1

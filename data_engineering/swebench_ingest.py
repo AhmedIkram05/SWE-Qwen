@@ -97,6 +97,13 @@ SWE_BENCH_PYTHON_REPOS: set[str] = {
     "pallets/markupsafe",
     "psf/typing-extensions",
     "python/typing_extensions",
+    # Dev-split repos (6, from princeton-nlp/SWE-bench dev split)
+    "marshmallow-code/marshmallow",
+    "pvlib/pvlib-python",
+    "pydicom/pydicom",
+    "pylint-dev/astroid",
+    "pyvista/pyvista",
+    "sqlfluff/sqlfluff",
 }
 
 # Repo → domain mapping for curriculum/domain-aware training
@@ -176,6 +183,13 @@ REPO_DOMAIN_MAP: dict[str, str] = {
     "pallets/markupsafe": "utils",
     "psf/typing-extensions": "utils",
     "python/typing_extensions": "utils",
+    # Dev-split repos
+    "marshmallow-code/marshmallow": "web-api",
+    "pvlib/pvlib-python": "data-ml",
+    "pydicom/pydicom": "data-ml",
+    "pylint-dev/astroid": "utils",
+    "pyvista/pyvista": "data-ml",
+    "sqlfluff/sqlfluff": "utils",
 }
 
 
@@ -208,24 +222,32 @@ def _parse_files_from_patch(patch: str) -> list[str]:
 
 
 def _parse_unified_diff(diff_str: str) -> list[ParsedHunk]:
-    """Parse a unified diff string into a list of ParsedHunk."""
-    import unidiff
+    """Parse a unified diff string into a list of ParsedHunk.
 
-    hunks: list[ParsedHunk] = []
-    patch_set = unidiff.PatchSet(diff_str)
-    for patched_file in patch_set:
-        for hunk in patched_file:
-            hunks.append(
-                ParsedHunk(
-                    file=patched_file.path,
-                    old_start=hunk.source_start,
-                    old_lines=hunk.source_length,
-                    new_start=hunk.target_start,
-                    new_lines=hunk.target_length,
-                    diff_lines=[str(line) for line in hunk],
+    Tries unidiff first; falls back to empty list on parse failure
+    (some SWE-bench patches have formatting quirks).
+    """
+    from unidiff.patch import PatchSet
+
+    try:
+        patch_set = PatchSet(diff_str)
+        hunks: list[ParsedHunk] = []
+        for patched_file in patch_set:
+            for hunk in patched_file:
+                hunks.append(
+                    ParsedHunk(
+                        file=patched_file.path,
+                        old_start=hunk.source_start,
+                        old_lines=hunk.source_length,
+                        new_start=hunk.target_start,
+                        new_lines=hunk.target_length,
+                        diff_lines=[str(line) for line in hunk],
+                    )
                 )
-            )
-    return hunks
+        return hunks  # noqa: TRY300 -- early return deliberate; except path returns []
+    except Exception:
+        logger.warning("unidiff parse failed, returning empty hunks")
+        return []
 
 
 def load_swebench_splits(config: DataPipelineConfig) -> dict[str, list[dict[str, Any]]]:
@@ -276,14 +298,16 @@ def load_swebench_splits(config: DataPipelineConfig) -> dict[str, list[dict[str,
     )
 
     return {
-        "verified": list(verified),
-        "test": list(test),
-        "dev": list(dev),
-        "train": list(train_python),
+        "verified": [dict(r) for r in verified],
+        "test": [dict(r) for r in test],
+        "dev": [dict(r) for r in dev],
+        "train": [dict(r) for r in train_python],
     }
 
 
-def swebench_to_issue_record(example: dict[str, Any], repo_domain: str) -> IssueRecord:
+def swebench_to_issue_record(
+    example: dict[str, Any], repo_domain: str, source_split: str = ""
+) -> IssueRecord:
     """Map a SWE-bench example to IssueRecord schema.
 
     SWE-bench fields:
@@ -331,6 +355,7 @@ def swebench_to_issue_record(example: dict[str, Any], repo_domain: str) -> Issue
             "base_sha": example["base_commit"],
             "head_sha": example["environment_setup_commit"],
             "test_patch": example.get("test_patch", ""),
+            "source_split": source_split,
             "version": example["version"],
             "hints": hints,
             "created_at": example["created_at"],
@@ -362,7 +387,7 @@ def ingest_swebench(config: DataPipelineConfig) -> list[IssueRecord]:
                 skipped_empty_patch += 1
                 continue
             repo_domain = REPO_DOMAIN_MAP.get(repo, "unknown")
-            record = swebench_to_issue_record(ex, repo_domain)
+            record = swebench_to_issue_record(ex, repo_domain, split_name)
             records.append(record)
 
     if skipped_empty_patch:
