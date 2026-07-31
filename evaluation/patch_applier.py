@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 from pathlib import Path
 
-from unidiff.patch import PatchedFile
+from unidiff.patch import PatchedFile, PatchSet
 
 from evaluation.schema import PatchApplicationResult
 
 logger = logging.getLogger(__name__)
 
-_GIT_TIMEOUT_SECONDS = 60
+_GIT_TIMEOUT_SECONDS = 600  # Match test_runner.py timeout for consistency
 _DEV_NULL = "/dev/null"
 
 
@@ -130,10 +131,37 @@ def apply_patch_unidiff(repo_path: Path, patch: str) -> PatchApplicationResult:
         return PatchApplicationResult(
             success=False, method_used="unidiff_fallback", error="patch is empty"
         )
-    try:
-        from unidiff.patch import PatchSet
 
-        patchset = PatchSet(patch)
+    # Add timeout protection for unidiff parsing
+    def parse_patch():
+        return PatchSet(patch)
+
+    try:
+        # Use threading timer to enforce timeout
+        result_container = []  # type: list
+        exception_container = []  # type: list
+
+        def target():
+            try:
+                parsed_result = parse_patch()
+                result_container.append(parsed_result)
+            except Exception as e:
+                exception_container.append(e)
+
+        thread = threading.Thread(target=target)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout=30)  # 30 second timeout for parsing
+
+        if thread.is_alive():
+            return PatchApplicationResult(
+                success=False, method_used="unidiff_fallback", error="unidiff parsing timed out"
+            )
+
+        if exception_container:
+            raise exception_container[0]  # noqa: TRY301
+
+        patchset = result_container[0]
     except Exception as exc:
         logger.warning("unidiff parse failed: %s", exc)
         return PatchApplicationResult(
@@ -171,20 +199,46 @@ def _apply_file_change(target: Path, pfile: PatchedFile) -> None:
 
     Raises:
         FileNotFoundError: if a modified file is missing on disk.
+        TimeoutError: if file operations take too long.
     """
-    if pfile.is_removed_file:
-        target.unlink(missing_ok=True)
-        return
-    if not target.exists() and not pfile.is_added_file:
-        raise FileNotFoundError(f"target file missing: {pfile.path}")
-    lines = target.read_text().splitlines(keepends=True) if target.exists() else []
-    for hunk in reversed(list(pfile)):
-        start = hunk.source_start - 1
-        end = start + hunk.source_length
-        new_section = [line.value for line in hunk if line.is_added or line.is_context]
-        lines[start:end] = new_section
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("".join(lines))
+
+    # Add timeout protection for file operations
+    def do_file_change():
+        if pfile.is_removed_file:
+            target.unlink(missing_ok=True)
+            return
+        if not target.exists() and not pfile.is_added_file:
+            raise FileNotFoundError(f"target file missing: {pfile.path}")
+        lines = target.read_text().splitlines(keepends=True) if target.exists() else []
+        for hunk in reversed(list(pfile)):
+            start = hunk.source_start - 1
+            end = start + hunk.source_length
+            new_section = [line.value for line in hunk if line.is_added or line.is_context]
+            lines[start:end] = new_section
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("".join(lines))
+
+    # Use threading timer to enforce timeout
+    result_container = []  # type: list
+    exception_container = []  # type: list
+
+    def target_func():
+        try:
+            do_file_change()
+            result_container.append(True)
+        except Exception as e:
+            exception_container.append(e)
+
+    thread = threading.Thread(target=target_func)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout=30)  # 30 second timeout for file operations
+
+    if thread.is_alive():
+        raise TimeoutError(f"file operation timed out for {pfile.path}")
+
+    if exception_container:
+        raise exception_container[0]
 
 
 def apply_patch(repo_path: Path, patch: str, base_sha: str) -> PatchApplicationResult:

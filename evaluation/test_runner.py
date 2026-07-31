@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -37,16 +38,29 @@ app = modal.App("swe-qwen-eval-test-runner")
 
 BASE_IMAGE = (
     modal.Image.from_registry("python:3.11-slim")
+    .apt_install(
+        "git",
+        "build-essential",  # gcc, g++, make for C extensions
+        "libffi-dev",  # cffi, cryptography
+        "libssl-dev",  # cryptography, pyOpenSSL
+        "pkg-config",  # find libraries
+        "libfreetype6-dev",  # matplotlib
+        "libpng-dev",  # matplotlib
+        "libjpeg-dev",  # matplotlib
+        "zlib1g-dev",  # matplotlib
+    )
     .pip_install(
-        "pytest>=8.0",
+        "pytest>=7.0,<8.0",  # <8: old repos import _pytest.monkeypatch.notset (removed in 8)
         "pytest-timeout>=2.3",
         "pytest-json-report>=1.5",
         "gitpython>=3.1",
         "unidiff>=0.7",
         "pydantic>=2.10.0",
         "pydantic-settings>=2.7.0",
+        "numpy",  # matplotlib, scikit-learn
+        "setuptools>=65.0",  # many old repos
+        "wheel",  # build wheels
     )
-    .apt_install("git")
 )
 
 
@@ -65,7 +79,7 @@ def _get_volumes() -> tuple[modal.Volume, modal.Volume]:
 
 repo_volume, test_volume = _get_volumes()
 
-_GIT_TIMEOUT_SECONDS = 300
+_GIT_TIMEOUT_SECONDS = 600  # Django checkout of old commits can take 5+ min on CPU
 
 
 # ── Outcome classification (pure) ─────────────────────────────────────────────
@@ -123,11 +137,18 @@ _MISSING_ATTEMPT = _errored_attempt("test not collected by pytest")
 def _quote_k_name(name: str) -> str:
     """Quote a test name for a pytest ``-k`` expression if it needs it.
 
-    Names are passed through as-is (parametrize suffixes are preserved);
-    only names containing characters the expression parser treats specially
-    are wrapped in double quotes with backslash-escapes.
+    pytest ``-k`` is a boolean expression on test IDs. Full node IDs
+    (``path/to/file.py::test_name``) don't work because ``:`` is not a
+    valid ``-k`` operator. Strip the file path and keep only the test
+    function name (plus any parametrize suffix).
+
+    Names containing other special characters are wrapped in double quotes
+    with backslash-escapes.
     """
-    if any(c in name for c in " \t'\"()[]{}&|!~,;"):
+    # Strip file path from full node ID: ``tests/foo.py::test_bar`` → ``test_bar``
+    if "::" in name:
+        name = name.split("::", 1)[1]
+    if any(c in name for c in " \t'\"()[]{}&|!~,;:"):
         escaped = name.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
     return name
@@ -203,10 +224,14 @@ def _attempts_from_report(
             if idx in used or not isinstance(test, dict):
                 continue
             nodeid = str(test.get("nodeid", ""))
-            if name == nodeid or nodeid.endswith(name) or name in nodeid:
+            if name == nodeid or nodeid.endswith(name) or nodeid in name:
                 by_name[name] = _attempt_from_report_test(test)
                 used.add(idx)
                 break
+        else:
+            logger.debug(
+                "_attempts_from_report: unmatched name=%r (nodeids: %d)", name, len(nodeids)
+            )
     return by_name, nodeids
 
 
@@ -237,10 +262,19 @@ def _run_pytest_once(
     The subprocess bound is capped below the Modal function timeout so the
     function can return gracefully instead of being killed.
     """
+    import time
+
+    start_time = time.time()
+
+    # ponytail: derive venv python from repo_path (mirrors _install_repo logic)
+    python = sys.executable
+    if (Path("/test_cache") / repo_path.name / ".venv" / "bin" / "python").exists():
+        python = str(Path("/test_cache") / repo_path.name / ".venv" / "bin" / "python")
+
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         report_path = Path(tmp.name)
     cmd = [
-        sys.executable,
+        python,
         "-m",
         "pytest",
         ".",
@@ -258,25 +292,41 @@ def _run_pytest_once(
     if Path("/test_cache").is_dir():
         cmd += ["-o", "cache_dir=/test_cache/pytest-cache"]
     subprocess_timeout = min(max(120, timeout * max(len(test_names) * 3, 12) + 60), 240)
+
+    # Add a safety margin to the timeout
+    safety_margin = 30
+    effective_timeout = subprocess_timeout - safety_margin
+    if effective_timeout <= 0:
+        effective_timeout = subprocess_timeout // 2
+
     try:
         proc = subprocess.run(
             cmd,
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=subprocess_timeout,
+            timeout=effective_timeout,
             check=False,
         )
     except subprocess.TimeoutExpired:
         logger.error(
             "pytest timed out after %ss in %s",
-            subprocess_timeout,
+            effective_timeout,
             repo_path,
             exc_info=True,
         )
         return ({n: _errored_attempt("pytest invocation timed out") for n in test_names}, [])
     finally:
-        report_path.unlink(missing_ok=True)
+        try:
+            report_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning("Failed to cleanup report file %s: %s", report_path, e)
+
+    # Check if we're taking too long overall
+    elapsed = time.time() - start_time
+    modal_timeout_warn = 250
+    if elapsed > modal_timeout_warn:  # Close to Modal function timeout
+        logger.warning("pytest execution took %.1fs, approaching limit", elapsed)
 
     report = _load_json_report(report_path)
     if report is None:
@@ -307,17 +357,44 @@ def collect_test_results(
         One ``TestResult`` per requested test; status comes from
         ``classify_test_outcomes`` across attempts.
     """
+    import time
+
+    start_time = time.time()
+
     from evaluation.schema import TestResult
 
     names = [n for n in test_names if n]
     full_suite = not names
     attempts: dict[str, list[_Attempt]] = {}
-    for round_idx in range(max_retries + 1):
+
+    # Add a maximum iteration limit to prevent infinite loops
+    max_iterations = max_retries + 5  # Allow some extra iterations
+
+    for iteration_count, round_idx in enumerate(range(max_retries + 1), start=1):
+        if iteration_count > max_iterations:
+            logger.warning(
+                "Exceeded maximum iterations (%d) in collect_test_results for %s",
+                max_iterations,
+                repo_path,
+            )
+            break
+
+        # Check if we're taking too long overall
+        elapsed = time.time() - start_time
+        collect_timeout_warn = 200
+        if elapsed > collect_timeout_warn:  # Close to Modal function timeout
+            logger.warning("collect_test_results taking too long (%.1fs), truncating", elapsed)
+            break
+
         if full_suite:
             if round_idx > 0:
                 break
             run_names: list[str] = []
+        elif round_idx == 0:
+            # First iteration: run all requested tests
+            run_names = names
         else:
+            # Subsequent iterations: run only failed/errored tests
             pending = [
                 n for n, a in attempts.items() if not a or a[-1]["status"] in ("failed", "errored")
             ]
@@ -387,6 +464,9 @@ def _clone_repo(repo: str, repo_dir: Path) -> None:
 
 def _ensure_checked_out(repo_dir: Path, base_sha: str) -> None:
     """Checkout ``base_sha``, fetching from origin first if the commit is unknown."""
+    # Remove stale lock files from crashed containers (Modal volumes persist state)
+    lock = repo_dir / ".git" / "index.lock"
+    lock.unlink(missing_ok=True)
     proc = _run_git(repo_dir, "checkout", "--quiet", base_sha)
     if proc.returncode != 0:
         logger.warning(
@@ -402,8 +482,72 @@ def _ensure_checked_out(repo_dir: Path, base_sha: str) -> None:
 
 def _reset_to_base(repo_dir: Path, base_sha: str) -> None:
     """Revert working tree to ``base_sha`` (drops applied patches and stray files)."""
-    _run_git(repo_dir, "reset", "--hard", base_sha, check=True)
-    _run_git(repo_dir, "clean", "-fd", check=True)
+    _run_git(repo_dir, "reset", "--hard", base_sha)
+    _run_git(repo_dir, "clean", "-fd")
+
+
+def _install_repo(repo_dir: Path, timeout: int = 300) -> None:
+    """Install the repo package so tests can import it.
+
+    Uses a cached venv in /test_cache to avoid rebuilding on every Modal spin-up.
+    Tries pyproject.toml, setup.py, setup.cfg. Idempotent and fast on retry.
+    """
+    # ponytail: cache venv in persistent volume so pip install runs once per repo
+    test_cache = Path("/test_cache")
+    repo_name = repo_dir.name
+    venv_dir = test_cache / repo_name / ".venv"
+    marker = venv_dir / (repo_dir.name + ".installed")
+
+    if marker.exists():
+        logger.info("reusing cached venv for %s", repo_dir)
+        sys.prefix = str(venv_dir)
+        # activate venv for subsequent subprocess calls
+        _activate_venv(venv_dir)
+        return
+
+    if not venv_dir.exists():
+        subprocess.run(
+            [sys.executable, "-m", "venv", str(venv_dir)],
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+
+    pip = venv_dir / "bin" / "pip"
+    proc = subprocess.run(
+        [str(pip), "install", "-e", str(repo_dir), "--quiet", "--disable-pip-version-check"],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode == 0:
+        logger.info("pip install -e . succeeded for %s", repo_dir)
+    else:
+        setup_py = repo_dir / "setup.py"
+        if setup_py.exists():
+            python = venv_dir / "bin" / "python"
+            subprocess.run(
+                [str(python), "setup.py", "develop", "--quiet"],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                cwd=repo_dir,
+            )
+        logger.warning(
+            "repo installation may be incomplete for %s: %s", repo_dir, proc.stderr[:200]
+        )
+
+    marker.touch()
+    _activate_venv(venv_dir)
+
+
+def _activate_venv(venv_dir: Path) -> None:
+    """Prepend venv bin to PATH for subsequent subprocess calls."""
+    venv_bin = str(venv_dir / "bin")
+    env_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = venv_bin + os.pathsep + env_path
 
 
 # ── Modal function ────────────────────────────────────────────────────────────
@@ -465,6 +609,7 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
     try:
         _clone_repo(repo, repo_dir)
         _ensure_checked_out(repo_dir, base_sha)
+        _install_repo(repo_dir)
     except (subprocess.TimeoutExpired, RuntimeError) as exc:
         logger.error("repo preparation failed for %s: %s", repo, exc, exc_info=True)
         return {
@@ -487,6 +632,7 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
     if test_patch:
         patch_result = apply_patch(repo_dir, test_patch, base_sha)
         if patch_result.success:
+            _install_repo(repo_dir)
             tests_head = collect_test_results(
                 repo_dir, test_names, timeout=timeout, max_retries=max_retries
             )
@@ -516,6 +662,7 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
     if generated_patch:
         patch_result = apply_patch(repo_dir, generated_patch, base_sha)
         if patch_result.success:
+            _install_repo(repo_dir)
             tests_after = collect_test_results(
                 repo_dir, test_names, timeout=timeout, max_retries=max_retries
             )
@@ -553,7 +700,7 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
     timeout=600,
     gpu=None,
 )
-def run_tests_batch(  # noqa: PLR0913, PLR0917
+def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     repo: str,
     base_sha: str,
     test_patch: str | None,
@@ -579,6 +726,10 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917
         List of result dicts (same shape as ``run_tests_in_container`` return),
         one per ``test_job``.
     """
+    import time
+
+    start_time = time.time()
+
     from evaluation.metrics import compute_f2p
     from evaluation.patch_applier import apply_patch
     from evaluation.schema import PatchApplicationResult
@@ -588,6 +739,7 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917
     try:
         _clone_repo(repo, repo_dir)
         _ensure_checked_out(repo_dir, base_sha)
+        _install_repo(repo_dir)
     except (subprocess.TimeoutExpired, RuntimeError) as exc:
         logger.error("repo preparation failed for %s: %s", repo, exc, exc_info=True)
         error_result = {
@@ -620,6 +772,7 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917
     if test_patch:
         patch_result = apply_patch(repo_dir, test_patch, base_sha)
         if patch_result.success:
+            _install_repo(repo_dir)
             tests_head = collect_test_results(
                 repo_dir, all_test_names, timeout=timeout, max_retries=max_retries
             )
@@ -647,7 +800,31 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917
 
     # ── Per-job: reset, apply generated patch, run tests_after ──
     results: list[dict[str, Any]] = []
-    for job in test_jobs:
+    for i, job in enumerate(test_jobs):
+        # Check if we're taking too long
+        elapsed = time.time() - start_time
+        batch_timeout_warn = 540
+        if elapsed > batch_timeout_warn:  # 9 minutes, leaving 1 minute for cleanup
+            logger.warning("Approaching timeout for %s, truncating remaining jobs", repo)
+            remaining_jobs = len(test_jobs) - i
+            if remaining_jobs > 0:
+                # Return error results for remaining jobs
+                error_result = {
+                    "repo": repo,
+                    "base_sha": base_sha,
+                    "error": "timeout approaching, truncated",
+                    "tests_before": [t.model_dump() for t in tests_before],
+                    "tests_head": [t.model_dump() for t in tests_head],
+                    "tests_after": [],
+                    "patch_application": {},
+                    "ground_truth": ground_truth,
+                }
+                results.extend([dict(error_result) for _ in range(remaining_jobs)])
+            break
+
+        logger.info(
+            "Processing job %d/%d for %s (%.1fs elapsed)", i + 1, len(test_jobs), repo, elapsed
+        )
         _reset_to_base(repo_dir, base_sha)
 
         generated_patch = job.get("generated_patch") or ""
@@ -656,11 +833,16 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917
         job_test_names = [*fail_to_pass, *pass_to_pass]
 
         if generated_patch:
+            logger.info("Applying generated patch for job %d", i + 1)
             patch_result = apply_patch(repo_dir, generated_patch, base_sha)
             if patch_result.success:
+                logger.info("Generated patch applied successfully, installing repo")
+                _install_repo(repo_dir)
+                logger.info("Running tests_after for job %d (%d tests)", i + 1, len(job_test_names))
                 tests_after = collect_test_results(
                     repo_dir, job_test_names, timeout=timeout, max_retries=max_retries
                 )
+                logger.info("Completed tests_after for job %d", i + 1)
             else:
                 logger.warning(
                     "generated patch application failed for %s: %s",
@@ -687,5 +869,6 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917
                 "ground_truth": ground_truth,
             }
         )
+        logger.info("Completed job %d/%d for %s", i + 1, len(test_jobs), repo)
 
     return results

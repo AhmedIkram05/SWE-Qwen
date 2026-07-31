@@ -55,7 +55,7 @@ app = modal.App("swe-qwen-eval-inference")
 vllm_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "wget", "curl")
-    .pip_install("vllm>=0.26.0", "peft", "wandb", "trl", "bitsandbytes>=0.49.2")
+    .pip_install("vllm>=0.26.0", "peft", "wandb", "trl")
     # FlashInfer's top-k/top-p sampler JIT-compiles with nvcc at startup; the
     # Modal container has no CUDA toolkit. vLLM 0.26 honors
     # VLLM_USE_FLASHINFER_SAMPLER=0 to fall back to the torch sampler.
@@ -113,7 +113,6 @@ def _get_llm(
 
         llm = LLM(
             model=resolve_hf_id(model_name),
-            quantization="bitsandbytes",
             enable_lora=adapter_path is not None,
             gpu_memory_utilization=0.85,
         )
@@ -127,24 +126,28 @@ def _get_llm(
 
 
 def extract_patch(text: str) -> str:
-    """Strip markdown code fences from a model completion.
+    """Extract a unified diff from model output.
 
-    Args:
-        text: Raw completion text (e.g. ``"```diff\\n+line\\n```"``).
-
-    Returns:
-        The patch text with any surrounding ``` fence (and language tag)
-        removed; the raw completion is returned otherwise.
+    Handles reasoning text before the diff, multiple code blocks, and fence variants.
     """
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    lines = stripped.splitlines()
-    if lines and lines[0].lstrip().startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
+    # Try ```diff fenced blocks — take LAST (model often reasons first, diff last)
+    diffs: list[str] = re.findall(r"```diff\s*\n(.*?)```", text, re.DOTALL)
+    if diffs:
+        patch = diffs[-1].strip()
+        if patch.startswith("diff --git") or patch.startswith("---") or patch.startswith("+++"):
+            return patch
+    # Try any fenced block — take LAST
+    blocks: list[str] = re.findall(r"```\w*\s*\n(.*?)```", text, re.DOTALL)
+    if blocks:
+        patch = blocks[-1].strip()
+        if patch.startswith("diff --git") or patch.startswith("---") or patch.startswith("+++"):
+            return patch
+    # No fences: scan for diff --git anywhere, take from there
+    idx = text.rfind("diff --git")
+    if idx >= 0:
+        return text[idx:].strip()
+    # Last resort: return as-is
+    return text.strip()
 
 
 def _files_from_diff(patch: str) -> list[str]:
@@ -314,7 +317,7 @@ def resolve_adapter_path(variant: str, config: EvalConfig | None = None) -> str 
 
 @app.function(
     image=vllm_image,
-    gpu="A10G:1",  # hardcoded; change here + EvalConfig.gpu_type for A100-80GB
+    gpu="A100-80GB",  # A100-80GB: bf16 14B fits, 3-4x gen speed vs A10G
     volumes={"/models": model_volume},
     timeout=600,
     secrets=[modal.Secret.from_name("wandb-secret"), modal.Secret.from_name("hf-secret")],

@@ -77,8 +77,18 @@ class EvalInput(BaseModel):
         base_sha = metadata.get("base_sha") or record.get("base_commit") or ""
         head_sha = metadata.get("head_sha") or record.get("environment_setup_commit") or ""
         test_patch = metadata.get("test_patch") or record.get("test_patch") or ""
-        fail_to_pass = test_results.get("failed") or record.get("FAIL_TO_PASS") or []
-        pass_to_pass = test_results.get("passed") or record.get("PASS_TO_PASS") or []
+        fail_to_pass = (
+            test_results.get("failed")
+            or record.get("FAIL_TO_PASS")
+            or record.get("fail_to_pass")
+            or []
+        )
+        pass_to_pass = (
+            test_results.get("passed")
+            or record.get("PASS_TO_PASS")
+            or record.get("pass_to_pass")
+            or []
+        )
 
         return cls(
             instance_id=str(instance_id),
@@ -144,7 +154,37 @@ class EvalRun(BaseModel):
 
 
 def _to_test_list(value: Any) -> list[str]:
-    """Normalize a test list from either a comma-joined string or a list."""
+    """Normalize a test list from either a comma-joined string or a list.
+
+    Handles JSON-encoded lists stored as strings (e.g. ``'["test_a","test_b"]'``)
+    which appear in golden.jsonl when ``test_results`` was serialized via
+    ``json.dumps``. Also strips stray quotes/brackets from split fragments.
+    """
+    import json as _json
+
     if isinstance(value, str):
+        # Try JSON-decode first (handles ``'["test_a","test_b"]'``)
+        try:
+            decoded = _json.loads(value)
+            if isinstance(decoded, list):
+                return [str(t).strip() for t in decoded if str(t).strip()]
+        except ValueError:
+            pass
+        # Fall back to comma-split
         return [t.strip() for t in value.split(",") if t.strip()]
-    return [str(t) for t in value]
+
+    # golden.jsonl splits JSON arrays across list elements; join, JSON-decode, then strip
+    joined = "".join(str(item) for item in value)
+    try:
+        decoded = _json.loads(joined)
+        if isinstance(decoded, list):
+            return [str(t).strip() for t in decoded if str(t).strip()]
+    except ValueError:
+        pass
+    # Fall back: strip stray brackets/quotes from each item
+    out = []
+    for item in value:
+        s = str(item).strip().strip('",[]').strip()
+        if s:
+            out.append(s)
+    return out

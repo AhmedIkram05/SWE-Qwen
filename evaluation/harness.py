@@ -272,16 +272,15 @@ def _read_text(path: str) -> str:
 
 
 def _record_to_input(record: dict[str, Any]) -> EvalInput:
-    """Build an ``EvalInput``, preferring validation for EvalInput-shaped records.
+    """Build an ``EvalInput`` from any golden record shape.
 
-    Records that already carry ``EvalInput`` fields validate directly; any
-    other golden shape (``IssueRecord`` dumps, raw SWE-bench dicts) falls
-    back to ``EvalInput.from_swebench_record``.
+    Always goes through ``EvalInput.from_swebench_record`` because it
+    normalizes ``test_results`` fields through ``_to_test_list``.  The
+    ``model_validate`` fast path was removed — golden.jsonl stores test-name
+    lists as split JSON-encoded strings that only ``_to_test_list`` correctly
+    reassembles.
     """
-    try:
-        return EvalInput.model_validate(record)
-    except ValidationError:
-        return EvalInput.from_swebench_record(record)
+    return EvalInput.from_swebench_record(record)
 
 
 # ── CheckpointManager ────────────────────────────────────────────────────────
@@ -810,7 +809,7 @@ class EvaluationHarness:
             error=error,
         )
 
-    def run_batch(
+    def run_batch(  # noqa: PLR0912
         self,
         examples: list[EvalInput],
         model_name: str,
@@ -820,13 +819,9 @@ class EvaluationHarness:
     ) -> list[EvalResult]:
         """Run a batch with per-repo checkpoint resume.
 
-        Repos with a completed checkpoint for ``run_id+repo+model+variant``
-        are skipped (their results come back from the checkpoint store);
-        every other repo's results are checkpointed after the repo finishes.
-
-        Returns:
-            All results for this model/variant/prompt combo: checkpointed
-            (loaded) plus newly evaluated.
+        Generates patches for ALL non-completed examples in a single
+        ``_generate_patches`` call (one Modal container lifetime), then
+        processes per-repo for tests and checkpointing.
         """
         if not examples:
             return []
@@ -843,7 +838,8 @@ class EvaluationHarness:
         for example in examples:
             by_repo.setdefault(example.repo, []).append(example)
 
-        new: list[EvalResult] = []
+        # Phase 1: identify non-completed repos, collect all examples
+        pending_repos: dict[str, list[EvalInput]] = {}
         for repo in sorted(by_repo):
             key = self.checkpoint_mgr.get_checkpoint_key(
                 run_id, repo, model_name, variant, prompt_template
@@ -851,14 +847,28 @@ class EvaluationHarness:
             if self.checkpoint_mgr.is_completed(key):
                 logger.info("skipping completed repo %s (checkpoint %s)", repo, key)
                 continue
-            repo_examples = by_repo[repo]
-            # Batch: generate patches once for all examples in this repo
-            patches = _generate_patches(model_name, variant, prompt_template, repo_examples)
+            pending_repos[repo] = by_repo[repo]
+
+        # Generate patches for ALL pending examples in ONE call
+        all_pending: list[EvalInput] = []
+        for repo in sorted(pending_repos):
+            all_pending.extend(pending_repos[repo])
+
+        patches_map: dict[str, str] = {}
+        if all_pending:
+            patches = _generate_patches(model_name, variant, prompt_template, all_pending)
+            for i, example in enumerate(all_pending):
+                patches_map[example.instance_id] = patches[i] if i < len(patches) else ""
+
+        # Phase 2: per-repo test execution and checkpointing
+        new: list[EvalResult] = []
+        for repo in sorted(pending_repos):
+            repo_examples = pending_repos[repo]
 
             # Build test jobs list
             test_jobs: list[dict[str, Any]] = []
-            for i, example in enumerate(repo_examples):
-                patch = patches[i] if i < len(patches) else ""
+            for example in repo_examples:
+                patch = patches_map.get(example.instance_id, "")
                 test_jobs.append(
                     {
                         "generated_patch": patch,
@@ -885,7 +895,7 @@ class EvaluationHarness:
                         model_name,
                         variant,
                         prompt_template,
-                        patches[i] if i < len(patches) else "",
+                        patches_map.get(example.instance_id, ""),
                         batch_results[i],
                     )
                 else:
@@ -895,10 +905,14 @@ class EvaluationHarness:
                         model_name,
                         variant,
                         prompt_template,
-                        generated_patch=patches[i] if i < len(patches) else "",
+                        generated_patch=patches_map.get(example.instance_id, ""),
                     )
                 repo_results.append(result)
             new.extend(repo_results)
+
+            key = self.checkpoint_mgr.get_checkpoint_key(
+                run_id, repo, model_name, variant, prompt_template
+            )
             if repo_results:
                 payload: EvalResult | list[EvalResult] = (
                     repo_results[0] if len(repo_results) == 1 else repo_results
