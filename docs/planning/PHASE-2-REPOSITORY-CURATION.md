@@ -70,20 +70,20 @@ Select, document, and prepare **10+ Python repositories** for Phase 3 Data Pipel
 ```python
 queries = [
     # web-api
-    'language:python stars:>300 pushed:>2025-01-01 archived:false '
-    'topic:fastapi OR topic:django OR topic:flask OR topic:starlette OR topic:aiohttp',
+    "language:python stars:>300 pushed:>2025-01-01 archived:false "
+    "topic:fastapi OR topic:django OR topic:flask OR topic:starlette OR topic:aiohttp",
     # cli
-    'language:python stars:>300 pushed:>2025-01-01 archived:false '
-    'topic:cli OR topic:click OR topic:typer OR topic:argparse',
+    "language:python stars:>300 pushed:>2025-01-01 archived:false "
+    "topic:cli OR topic:click OR topic:typer OR topic:argparse",
     # data-ml
-    'language:python stars:>300 pushed:>2025-01-01 archived:false '
-    'topic:pandas OR topic:numpy OR topic:scikit-learn OR topic:polars OR topic:duckdb',
+    "language:python stars:>300 pushed:>2025-01-01 archived:false "
+    "topic:pandas OR topic:numpy OR topic:scikit-learn OR topic:polars OR topic:duckdb",
     # utils
-    'language:python stars:>300 pushed:>2025-01-01 archived:false '
-    'topic:utility OR topic:helpers OR topic:toolkit',
+    "language:python stars:>300 pushed:>2025-01-01 archived:false "
+    "topic:utility OR topic:helpers OR topic:toolkit",
     # testing
-    'language:python stars:>300 pushed:>2025-01-01 archived:false '
-    'topic:testing OR topic:pytest OR topic:linting OR topic:formatting',
+    "language:python stars:>300 pushed:>2025-01-01 archived:false "
+    "topic:testing OR topic:pytest OR topic:linting OR topic:formatting",
 ]
 ```
 

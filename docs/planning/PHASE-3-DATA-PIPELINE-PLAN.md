@@ -227,7 +227,9 @@ class DataPipelineConfig(BaseSettings):
 ```python
 class IssueRecord(BaseModel):
     ...
-    metadata: dict[str, Any] = {}  # Includes: base_sha, head_sha, version, hints, created_at, has_test_patch, bigquery_commits, bigquery_file_cochanges, bigquery_repo_stats
+    metadata: dict[
+        str, Any
+    ] = {}  # Includes: base_sha, head_sha, version, hints, created_at, has_test_patch, bigquery_commits, bigquery_file_cochanges, bigquery_repo_stats
 ```
 
 ### 2. `data_engineering/swebench_ingest.py` (SWE-bench ingestion)

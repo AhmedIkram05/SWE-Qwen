@@ -73,7 +73,10 @@ class EvalConfig(BaseSettings):
     lora_artifact_pattern: str = "model-qwen3-14b-{variant}"  # W&B artifact naming
 
     # Modal
-    modal_volumes: dict[str, str] = {"repo_cache": "eval-repo-cache", "test_cache": "eval-test-cache"}
+    modal_volumes: dict[str, str] = {
+        "repo_cache": "eval-repo-cache",
+        "test_cache": "eval-test-cache",
+    }
     docker_image_base: str = "python:3.11-slim"
     gpu_type: str = "a10g-24gb"  # for inference
 
@@ -84,8 +87,8 @@ class EvalConfig(BaseSettings):
     flaky_threshold: float = 0.5  # if pass rate < 0.5 across retries → flaky
 
     # Quality Gates (ADR-005, Master Plan S2)
-    min_f2p_threshold: float = 0.15      # Quality floor: minimum F2P to pass
-    min_p2p_threshold: float = 0.90      # Regression ceiling: P2P ≥ 90% (no regressions)
+    min_f2p_threshold: float = 0.15  # Quality floor: minimum F2P to pass
+    min_p2p_threshold: float = 0.90  # Regression ceiling: P2P ≥ 90% (no regressions)
 
     # Sampling
     ci_sample_size: int = 50  # lightweight PR eval
@@ -101,7 +104,7 @@ class EvalConfig(BaseSettings):
     wandb_log_aggregate: bool = True
 
     # Comparison
-    comparison_run_ids: str = ""         # Comma-separated run IDs for champion selection
+    comparison_run_ids: str = ""  # Comma-separated run IDs for champion selection
 
     model_config = SettingsConfigDict(env_prefix="EVAL_", env_file=".env")
 ```
@@ -113,6 +116,7 @@ class EvalConfig(BaseSettings):
 ```python
 # Pydantic models for evaluation I/O
 
+
 class TestResult(BaseModel):
     name: str
     status: Literal["passed", "failed", "errored", "skipped", "flaky"]
@@ -120,11 +124,13 @@ class TestResult(BaseModel):
     output: str = ""
     retry_count: int = 0
 
+
 class PatchApplicationResult(BaseModel):
     success: bool
     method_used: Literal["git_apply", "unidiff_fallback", "failed"]
     error: str | None = None
     files_modified: list[str] = []
+
 
 class EvalInput(BaseModel):
     instance_id: str
@@ -138,6 +144,7 @@ class EvalInput(BaseModel):
     repo_domain: str
     metadata: dict[str, Any] = {}
 
+
 class EvalResult(BaseModel):
     instance_id: str
     repo: str
@@ -147,12 +154,13 @@ class EvalResult(BaseModel):
     generated_patch: str
     patch_application: PatchApplicationResult
     tests_before: list[TestResult]  # at base_sha
-    tests_after: list[TestResult]   # at head_sha + generated patch
+    tests_after: list[TestResult]  # at head_sha + generated patch
     f2p: float  # 0.0-1.0
     p2p: float  # 0.0-1.0
     latency_seconds: float
     timestamp: datetime
     error: str | None = None
+
 
 class F2PMetrics(BaseModel):
     model_name: str
@@ -167,6 +175,7 @@ class F2PMetrics(BaseModel):
     avg_latency: float
     flaky_test_rate: float
     per_repo_breakdown: dict[str, dict]
+
 
 class EvalRun(BaseModel):
     run_id: str
@@ -191,11 +200,13 @@ def apply_patch_git(repo_path: Path, patch: str, base_sha: str) -> PatchApplicat
     # 3. git apply patch
     # Return result
 
+
 def apply_patch_unidiff(repo_path: Path, patch: str) -> PatchApplicationResult:
     """Fallback: parse with unidiff, apply manually."""
     # Use unidiff.PatchSet to parse hunks
     # Apply each hunk to target file
     # Return result
+
 
 def apply_patch(repo_path: Path, patch: str, base_sha: str) -> PatchApplicationResult:
     """Main entry: git apply → unidiff fallback."""
@@ -213,6 +224,7 @@ def apply_patch(repo_path: Path, patch: str, base_sha: str) -> PatchApplicationR
 
 ```python
 # Modal function for isolated test execution
+
 
 @app.function(
     image=Image.from_registry("python:3.11-slim").pip_install(["pytest", "gitpython"]),
@@ -261,11 +273,7 @@ def run_tests_in_container(
     if test_patch:
         tests_head = collect_test_results(repo_path, test_dirs, timeout, max_retries)
         gt_f2p, gt_p2p = compute_f2p(tests_before, tests_head, fail_to_pass, pass_to_pass)
-        ground_truth = {
-            "f2p": gt_f2p,
-            "p2p": gt_p2p,
-            "warning": gt_f2p < 1.0
-        }
+        ground_truth = {"f2p": gt_f2p, "p2p": gt_p2p, "warning": gt_f2p < 1.0}
     return {
         "tests_before": tests_before,
         "tests_after": tests_after,
@@ -273,7 +281,10 @@ def run_tests_in_container(
         "ground_truth": ground_truth,
     }
 
-def collect_test_results(repo_path: Path, test_dirs: list[str], timeout: int, max_retries: int) -> list[TestResult]:
+
+def collect_test_results(
+    repo_path: Path, test_dirs: list[str], timeout: int, max_retries: int
+) -> list[TestResult]:
     """Run pytest with retries, return TestResult list."""
     # Use pytest --json-report or parse stdout
     # Retry failed/errored tests up to max_retries
@@ -292,8 +303,12 @@ def collect_test_results(repo_path: Path, test_dirs: list[str], timeout: int, ma
 ### 4.5 `evaluation/metrics.py`
 
 ```python
-def compute_f2p(tests_before: list[TestResult], tests_after: list[TestResult],
-                fail_to_pass: list[str], pass_to_pass: list[str]) -> tuple[float, float, int, int]:
+def compute_f2p(
+    tests_before: list[TestResult],
+    tests_after: list[TestResult],
+    fail_to_pass: list[str],
+    pass_to_pass: list[str],
+) -> tuple[float, float, int, int]:
     """
     F2P = |{t ∈ fail_to_pass : t failed before ∧ t passed after}| / |fail_to_pass|
     P2P = |{t ∈ pass_to_pass : t passed before ∧ t passed after}| / |pass_to_pass|
@@ -301,17 +316,23 @@ def compute_f2p(tests_before: list[TestResult], tests_after: list[TestResult],
     before_map = {t.name: t.status for t in tests_before}
     after_map = {t.name: t.status for t in tests_after}
 
-    f2p_passed = sum(1 for t in fail_to_pass
-                     if before_map.get(t) == "failed" and after_map.get(t) == "passed")
+    f2p_passed = sum(
+        1 for t in fail_to_pass if before_map.get(t) == "failed" and after_map.get(t) == "passed"
+    )
     f2p_total = len(fail_to_pass)
 
-    p2p_passed = sum(1 for t in pass_to_pass
-                     if before_map.get(t) == "passed" and after_map.get(t) == "passed")
+    p2p_passed = sum(
+        1 for t in pass_to_pass if before_map.get(t) == "passed" and after_map.get(t) == "passed"
+    )
     p2p_total = len(pass_to_pass)
 
-    return f2p_passed / f2p_total if f2p_total else 0.0, \
-           p2p_passed / p2p_total if p2p_total else 1.0, \
-           f2p_passed, p2p_passed
+    return (
+        f2p_passed / f2p_total if f2p_total else 0.0,
+        p2p_passed / p2p_total if p2p_total else 1.0,
+        f2p_passed,
+        p2p_passed,
+    )
+
 
 def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
     """Aggregate per-example results into F2PMetrics."""
@@ -326,17 +347,21 @@ def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
 ```python
 class CheckpointManager:
     """Per-repo checkpoint resume (was resume.py)."""
+
     def __init__(self, checkpoint_dir: Path): ...
     def get_checkpoint_key(self, run_id, repo, model, variant): ...
     def is_completed(self, key): ...
     def save_result(self, key, result): ...
     def load_results(self, run_id): ...
 
+
 class WandbLogger:
     """W&B artifact logging (was wandb_logger.py)."""
+
     def log_eval_run(run, config): ...
     def log_per_example(results, run_id): ...
     def log_aggregate(metrics, run_id): ...
+
 
 class EvaluationHarness:
     def __init__(self, config: EvalConfig):
@@ -349,16 +374,24 @@ class EvaluationHarness:
         """Load EvalInput from GCS golden.jsonl + metadata."""
         # Read JSONL from GCS, reconstruct EvalInput from metadata
 
-    def run_example(self, example: EvalInput, model_name: str, variant: str,
-                    prompt_template: str) -> EvalResult:
+    def run_example(
+        self, example: EvalInput, model_name: str, variant: str, prompt_template: str
+    ) -> EvalResult:
         """Single example: generate patch → apply → run tests → compute metrics."""
 
-    def run_batch(self, examples: list[EvalInput], model_name: str, variant: str,
-                  prompt_template: str, resume_from: str | None = None) -> list[EvalResult]:
+    def run_batch(
+        self,
+        examples: list[EvalInput],
+        model_name: str,
+        variant: str,
+        prompt_template: str,
+        resume_from: str | None = None,
+    ) -> list[EvalResult]:
         """Run batch with checkpoint resume per-repo."""
 
-    def run_golden(self, models: list[tuple[str, str]],
-                   prompt_templates: list[str] = ["chat"]) -> EvalRun:
+    def run_golden(
+        self, models: list[tuple[str, str]], prompt_templates: list[str] = ["chat"]
+    ) -> EvalRun:
         """Entry: run golden eval on all model/variant/prompt combos."""
         # Load golden examples from GCS
         # For each model+variant+prompt: run_batch
@@ -396,10 +429,8 @@ def run_prompt_ab_test(
 ```python
 # Modal function for vLLM + LoRA batch inference
 
-vllm_image = (
-    Image.from_registry("vllm/vllm-openai:latest")
-    .pip_install(["peft", "wandb"])
-)
+vllm_image = Image.from_registry("vllm/vllm-openai:latest").pip_install(["peft", "wandb"])
+
 
 @app.function(
     image=vllm_image,
@@ -409,9 +440,9 @@ vllm_image = (
     secrets=[modal.Secret.from_name("wandb-secret"), modal.Secret.from_name("hf-secret")],
 )
 def generate_patches_batch(
-    model_name: str,           # key from models.yaml
-    variant: str,              # determines LoRA adapter path
-    prompt_template: str,      # "chat", "system", etc.
+    model_name: str,  # key from models.yaml
+    variant: str,  # determines LoRA adapter path
+    prompt_template: str,  # "chat", "system", etc.
     examples: list[EvalInput],
     max_new_tokens: int = 2048,
     temperature: float = 0.1,
@@ -441,8 +472,10 @@ def log_eval_run(run: EvalRun, config: EvalConfig):
     # 3. Per-repo breakdown: table artifact
     # 4. Link to model checkpoint artifact (lineage)
 
+
 def log_per_example(results: list[EvalResult], run_id: str):
     """Write JSONL, upload as artifact."""
+
 
 def log_aggregate(metrics: list[F2PMetrics], run_id: str):
     """Log summary scalars to W&B run."""
@@ -467,8 +500,10 @@ import wandb
 def load_all_eval_runs(run_ids: list[str]) -> list[EvalRun]:
     """Download and parse EvalRun from W&B artifacts."""
 
+
 def extract_model_metrics(runs: list[EvalRun]) -> dict[str, F2PMetrics]:
     """Aggregate per-model metrics across runs."""
+
 
 def revalidate_champion(
     metrics: dict[str, F2PMetrics],
@@ -485,7 +520,8 @@ def revalidate_champion(
     5. If another model is #1 → proxy was wrong, promote new champion
     """
     candidates = [
-        (model, m) for model, m in metrics.items()
+        (model, m)
+        for model, m in metrics.items()
         if m.p2p_rate >= min_p2p and m.f2p_rate >= min_f2p
     ]
     if not candidates:
@@ -568,13 +604,15 @@ def compare(
   ```python
   BASE_IMAGE = (
       Image.from_registry("python:3.11-slim")
-      .pip_install([
-          "pytest>=8.0",
-          "pytest-timeout>=2.3",
-          "pytest-json-report>=1.5",
-          "gitpython>=3.1",
-          "unidiff>=0.7",
-      ])
+      .pip_install(
+          [
+              "pytest>=8.0",
+              "pytest-timeout>=2.3",
+              "pytest-json-report>=1.5",
+              "gitpython>=3.1",
+              "unidiff>=0.7",
+          ]
+      )
       .apt_install(["git"])
   )
   ```
@@ -820,13 +858,15 @@ The following 7 gaps were identified during plan review against Master Plan/ADR 
 # Pre-built base image with common test deps (build once, reuse)
 BASE_IMAGE = (
     Image.from_registry("python:3.11-slim")
-    .pip_install([
-        "pytest>=8.0",
-        "pytest-timeout>=2.3",
-        "pytest-json-report>=1.5",
-        "gitpython>=3.1",
-        "unidiff>=0.7",
-    ])
+    .pip_install(
+        [
+            "pytest>=8.0",
+            "pytest-timeout>=2.3",
+            "pytest-json-report>=1.5",
+            "gitpython>=3.1",
+            "unidiff>=0.7",
+        ]
+    )
     .apt_install(["git"])
 )
 
