@@ -278,3 +278,7 @@ data/interim/
 data/*/
 *.parquet
 *.arrow
+
+# Evaluation harness runtime output
+data/eval_checkpoints/
+data/eval_results/
