@@ -135,13 +135,20 @@ class PromptLoader:
             artifact.add_file(str(path), name=f"{template_name}.j2")
 
         wandb.log_artifact(artifact)
-        artifact.wait()
-        time.sleep(1)
-        logger.info(
-            "Logged prompt templates artifact v%s (%d templates)",
-            version,
-            len(self.available_templates),
-        )
+        try:
+            artifact.wait(timeout=120)
+        except Exception:
+            logger.warning(
+                "W&B artifact wait timed out for prompt templates — "
+                "files logged locally, artifact may appear later"
+            )
+        else:
+            time.sleep(1)
+            logger.info(
+                "Logged prompt templates artifact v%s (%d templates)",
+                version,
+                len(self.available_templates),
+            )
         return artifact
 
     @staticmethod

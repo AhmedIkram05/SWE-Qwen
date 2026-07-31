@@ -155,7 +155,7 @@ training_image = (
     # Enable Unsloth by default
     .env({"UNSLOTH_ENABLED": "1"})
     # Force rebuild v8 — add flash-attn 2.8.3 wheel for torch 2.11+cu126+cp311
-    .run_commands("echo 'cache-bust-v8'")
+    .run_commands("echo 'cache-bust-v9-fix-wandb-artifact-timeout'")
     # Copy local source into the image — must be LAST
     .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
     .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)

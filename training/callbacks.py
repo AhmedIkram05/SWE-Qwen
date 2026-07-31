@@ -76,10 +76,17 @@ class WandbCheckpointCallback(TrainerCallback):
         # Add the checkpoint directory (all files except optimizer state for size)
         artifact.add_dir(str(latest_ckpt), name="checkpoint")
         wandb.log_artifact(artifact)
-        artifact.wait()
-        time.sleep(1)
-
-        logger.info("Checkpoint artifact logged: %s (step %d)", artifact_name, step)
+        try:
+            artifact.wait(timeout=120)
+        except Exception:  # WANDB service busy, network blip — don't crash training
+            logger.warning(
+                "W&B artifact wait timed out for %s — checkpoint saved locally, "
+                "artifact may appear later",
+                artifact_name,
+            )
+        else:
+            time.sleep(1)
+            logger.info("Checkpoint artifact logged: %s (step %d)", artifact_name, step)
 
     def on_train_end(
         self,

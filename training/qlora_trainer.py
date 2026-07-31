@@ -394,9 +394,16 @@ class QLoRATrainer:
             )
             artifact.add_dir(str(self.output_dir))
             wandb.log_artifact(artifact)
-            artifact.wait()
-            time.sleep(1)
-            logger.info("Model artifact logged to W&B")
+            try:
+                artifact.wait(timeout=120)
+            except Exception:
+                logger.warning(
+                    "W&B artifact wait timed out for model artifact — "
+                    "checkpoint saved locally, artifact may appear later"
+                )
+            else:
+                time.sleep(1)
+                logger.info("Model artifact logged to W&B")
 
     def resume(self, checkpoint_path: str) -> dict[str, Any]:
         """Resume training from a checkpoint.
