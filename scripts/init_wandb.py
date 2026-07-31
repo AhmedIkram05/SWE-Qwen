@@ -144,20 +144,25 @@ def create_sweep_config(project_name: str, entity: str | None = None):
     return sweep_id
 
 
+def _registry_path(project_name: str, entity: str | None) -> str:
+    """wandb.Api.artifact_type takes entity via an entity/project path."""
+    return f"{entity}/{project_name}" if entity else project_name
+
+
 def setup_artifact_registries(project_name: str, entity: str | None = None):
     """Set up model and dataset artifact registries."""
     api = wandb.Api()
 
     # Create model registry
     try:
-        api.artifact_type("model", project=project_name)
+        api.artifact_type("model", project=_registry_path(project_name, entity))
         print(f"Model registry ready: {project_name}")
     except Exception:
         print("Model registry will be created on first model upload")
 
     # Create dataset registry
     try:
-        api.artifact_type("dataset", project=project_name)
+        api.artifact_type("dataset", project=_registry_path(project_name, entity))
         print(f"Dataset registry ready: {project_name}")
     except Exception:
         print("Dataset registry will be created on first dataset upload")

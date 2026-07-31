@@ -30,7 +30,7 @@ class TestDataPipelineConfig:
         assert str(cfg.output_dir) == "data"
         assert cfg.wandb_project == "swe-qwen-data"
         assert cfg.wandb_entity is None
-        assert cfg.golden_source_split == "test"
+        assert cfg.golden_source_split == "verified+test+dev"
         assert cfg.train_ratio == 0.8
         assert cfg.val_ratio == 0.1
         assert cfg.test_ratio == 0.1

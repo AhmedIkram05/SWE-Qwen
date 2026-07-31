@@ -891,8 +891,9 @@ class TestInitWandb:
         mod.wandb.Api.return_value = mock_api
 
         mod.setup_artifact_registries("swe-qwen", "myteam")
-        mock_api.artifact_type.assert_any_call("model", project="swe-qwen", entity="myteam")
-        mock_api.artifact_type.assert_any_call("dataset", project="swe-qwen", entity="myteam")
+        # wandb's artifact_type() has no entity kwarg; entity goes in the project path
+        mock_api.artifact_type.assert_any_call("model", project="myteam/swe-qwen")
+        mock_api.artifact_type.assert_any_call("dataset", project="myteam/swe-qwen")
 
     def test_setup_artifact_registries_exception(self, mocker):
         mod = self._load()
