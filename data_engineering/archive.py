@@ -36,7 +36,7 @@ def _upload_jsonl(
     """Upload records as JSONL to GCS, return the full gs:// path."""
     import hashlib
 
-    key = f"{prefix}/{name}.jsonl"
+    key = f"{prefix}/swebench/{name}.jsonl"
     blob = bucket.blob(key)
 
     def to_dict(r: Any) -> Any:

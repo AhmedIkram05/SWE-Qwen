@@ -77,26 +77,21 @@ def solution_to_unified_diff(
 def parse_hunks_from_diff(patch_diff: str) -> list[dict[str, Any]]:
     """Parse unified diff into structured hunks for IssueRecord.parsed_hunks."""
     hunks = []
-    try:
-        patch_set = PatchSet(patch_diff)
-        for patched_file in patch_set:
-            filepath = patched_file.path
-            if filepath.startswith("a/") or filepath.startswith("b/"):
-                filepath = filepath[2:]
+    patch_set = PatchSet(patch_diff)
+    for patched_file in patch_set:
+        filepath = patched_file.path
 
-            for hunk in patched_file:
-                hunks.append(
-                    {
-                        "file": filepath,
-                        "old_start": hunk.source_start,
-                        "old_lines": hunk.source_length,
-                        "new_start": hunk.target_start,
-                        "new_lines": hunk.target_length,
-                        "diff_lines": [str(line) for line in hunk],
-                    }
-                )
-    except Exception:
-        pass  # Return empty list on parse failure
+        for hunk in patched_file:
+            hunks.append(
+                {
+                    "file": filepath,
+                    "old_start": hunk.source_start,
+                    "old_lines": hunk.source_length,
+                    "new_start": hunk.target_start,
+                    "new_lines": hunk.target_length,
+                    "diff_lines": [str(line) for line in hunk],
+                }
+            )
     return hunks
 
 
@@ -133,9 +128,6 @@ def load_codecontests(config: DataPipelineConfig) -> list[IssueRecord]:
 
             patch_diff = solution_to_unified_diff(problem_name, description, solution_code)
             parsed_hunks_dict = parse_hunks_from_diff(patch_diff)
-
-            if not parsed_hunks_dict:
-                continue
 
             parsed_hunks = [ParsedHunk(**h) for h in parsed_hunks_dict]
             test_results = TestResults(passed=[], failed=[], errored=[])
@@ -195,9 +187,6 @@ def load_codealpaca(config: DataPipelineConfig) -> list[IssueRecord]:
 
         patch_diff = solution_to_unified_diff(problem_name, description, output)
         parsed_hunks_dict = parse_hunks_from_diff(patch_diff)
-
-        if not parsed_hunks_dict:
-            continue
 
         parsed_hunks = [ParsedHunk(**h) for h in parsed_hunks_dict]
         test_results = TestResults(passed=[], failed=[], errored=[])

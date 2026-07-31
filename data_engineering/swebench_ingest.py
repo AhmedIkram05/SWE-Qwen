@@ -212,10 +212,7 @@ def _parse_unified_diff(diff_str: str) -> list[ParsedHunk]:
     import unidiff
 
     hunks: list[ParsedHunk] = []
-    try:
-        patch_set = unidiff.PatchSet(diff_str)
-    except Exception:
-        return hunks
+    patch_set = unidiff.PatchSet(diff_str)
     for patched_file in patch_set:
         for hunk in patched_file:
             hunks.append(
@@ -333,6 +330,7 @@ def swebench_to_issue_record(example: dict[str, Any], repo_domain: str) -> Issue
         metadata={
             "base_sha": example["base_commit"],
             "head_sha": example["environment_setup_commit"],
+            "test_patch": example.get("test_patch", ""),
             "version": example["version"],
             "hints": hints,
             "created_at": example["created_at"],
