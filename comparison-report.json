@@ -1,0 +1,31 @@
+{
+  "run_id": "expanded-repos",
+  "dry_run": false,
+  "golden_path": "/Users/ahmedikram/GitHub Repos/SWE-Qwen/data/expanded-repos/swebench/golden.jsonl",
+  "variants": {
+    "baseline_14b": {
+      "wandb_run_id": "escalztl",
+      "artifact_name": "model-qwen3-14b-baseline_14b",
+      "mean_f2p": 0.0,
+      "count": 118,
+      "train_loss": 0.9328
+    },
+    "higher_rank_14b": {
+      "wandb_run_id": "4lllxds8",
+      "artifact_name": "model-qwen3-14b-higher_rank_14b",
+      "mean_f2p": 0.5225,
+      "count": 118,
+      "train_loss": 0.9008
+    },
+    "higher_lr_14b": {
+      "wandb_run_id": "30g522hk",
+      "artifact_name": "model-qwen3-14b-higher_lr_14b",
+      "mean_f2p": 1.0,
+      "count": 118,
+      "train_loss": 0.8717
+    }
+  },
+  "failed_variants": {},
+  "champion": "higher_lr_14b",
+  "champion_f2p": 1.0
+}

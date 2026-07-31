@@ -1,0 +1,21 @@
+{%- if system_prompt %}
+{{ system_prompt }}
+{% endif %}
+
+{%- for message in messages %}
+{%- if message.role == "system" %}
+{{ message.content }}
+{%- elif message.role == "user" %}
+### Input
+{{ message.content }}
+
+### Response
+{%- elif message.role == "assistant" %}
+{{ message.content }}
+
+{%- endif %}
+{%- endfor %}
+
+{%- if not messages %}
+{{ user_prompt }}
+{% endif -%}

@@ -9,6 +9,8 @@ Primary model: Qwen/Qwen3-30B-A3B (30B MoE, 3B active params)
 Fallback model: Qwen/Qwen3-14B (14B dense)
 """
 
+from dataclasses import dataclass
+
 import modal
 import wandb
 
@@ -67,6 +69,14 @@ gpu_image = base_image.pip_install(
 
 # CPU image for lightweight tasks
 cpu_image = base_image
+
+# Data pipeline image (extends cpu_image with data engineering deps)
+data_pipeline_image = cpu_image.pip_install(
+    "unidiff>=0.7.5",
+    "pydantic>=2.10.0",
+    "python-dotenv>=1.0.0",
+    "typer>=0.12.0",
+)
 
 
 @app.function(
@@ -386,6 +396,168 @@ async def serve_swe_qwen(  # noqa: PLR0913,PLR0917
     await server.serve()
 
     return {"status": "serving", "model": model_path}
+
+
+@app.function(
+    image=data_pipeline_image,
+    secrets=[
+        modal.Secret.from_name("modal-api-token"),
+        modal.Secret.from_name("wandb-api-key"),
+        modal.Secret.from_name("github-token"),
+        modal.Secret.from_name("gcp-credentials"),  # for BigQuery if enabled
+    ],
+    volumes={
+        "/data": modal.Volume.from_name("swe-qwen-datasets", create_if_missing=True),
+    },
+    timeout=3600,  # 1 hour
+    retries=modal.Retries(max_retries=1, backoff_coefficient=2.0),
+)
+@dataclass
+class DataPipelineConfig:
+    """Configuration for the data pipeline."""
+
+    swe_bench_dir: str = "/data/swe_bench"
+    output_dir: str = "/data/pipeline_output"
+    run_id: str | None = None
+    stages: str = "all"
+    bigquery: bool = True
+    wandb_project: str = "swe-qwen-data"
+    parallel: int = 4
+
+
+def run_data_pipeline(
+    augment_codecontests: bool = True,
+    augment_codealpaca: bool = True,
+    max_train_examples: int = 30000,
+    cfg: DataPipelineConfig | None = None,
+):
+    """
+    Run the full SWE-bench data pipeline with synthetic augmentation on Modal.
+
+    This downloads SWE-bench from HF, processes it, adds synthetic data (CodeContests,
+    CodeAlpaca), creates train/val/test/golden splits, versions in W&B, archives to GCS.
+
+    Args:
+        augment_codecontests: Add CodeContests competitive programming solutions (~13k)
+        augment_codealpaca: Add CodeAlpaca instruction-following examples (~20k filtered)
+        max_train_examples: Cap total training examples
+        cfg: Pipeline config (swe_bench_dir, output_dir, run_id, stages, etc.)
+
+    Returns:
+        Dict with pipeline results and W&B artifact references
+    """
+    import os
+    import subprocess
+    import sys
+    from datetime import datetime
+    from pathlib import Path
+
+    cfg = cfg or DataPipelineConfig()
+    swe_bench_dir = cfg.swe_bench_dir
+    output_dir = cfg.output_dir
+    run_id = cfg.run_id
+    stages = cfg.stages
+    bigquery = cfg.bigquery
+    wandb_project = cfg.wandb_project
+    parallel = cfg.parallel
+
+    # Set up environment
+    os.environ["WANDB_API_KEY"] = os.environ.get("WANDB_API_KEY", "")
+    os.environ["DATA_PIPELINE_WANDB_PROJECT"] = wandb_project
+
+    # Ensure data directories exist
+    Path(swe_bench_dir).mkdir(parents=True, exist_ok=True)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    # Build CLI command
+    cmd = [
+        sys.executable,
+        "-m",
+        "data_engineering.cli",
+        "run",
+        "--swe-bench-dir",
+        swe_bench_dir,
+        "--output-dir",
+        output_dir,
+        "--stages",
+        stages,
+        "--parallel",
+        str(parallel),
+    ]
+
+    if run_id:
+        cmd.extend(["--run-id", run_id])
+    else:
+        cmd.extend(["--run-id", f"modal-{datetime.now().strftime('%Y%m%d-%H%M%S')}"])
+
+    if augment_codecontests:
+        cmd.append("--augment-codecontests")
+    else:
+        cmd.append("--no-augment-codecontests")
+
+    if augment_codealpaca:
+        cmd.append("--augment-codealpaca")
+    else:
+        cmd.append("--no-augment-codealpaca")
+
+    cmd.extend(["--max-train-examples", str(max_train_examples)])
+
+    if bigquery:
+        cmd.append("--bigquery")
+    else:
+        cmd.append("--no-bigquery")
+
+    # Run pipeline
+    print(f"Running data pipeline: {' '.join(cmd)}")
+    print("Working directory: /app")
+
+    # Set PYTHONPATH to include the data_engineering package
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "/app:" + env.get("PYTHONPATH", "")
+
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd="/app", check=False)
+
+    if result.returncode != 0:
+        print(f"STDOUT:\n{result.stdout}")
+        print(f"STDERR:\n{result.stderr}")
+        raise RuntimeError(f"Pipeline failed with exit code {result.returncode}")
+
+    print(f"STDOUT:\n{result.stdout}")
+
+    return {
+        "status": "completed",
+        "run_id": run_id,
+        "output_dir": output_dir,
+        "augment_codecontests": augment_codecontests,
+        "augment_codealpaca": augment_codealpaca,
+        "max_train_examples": max_train_examples,
+        "stdout": result.stdout,
+    }
+
+
+@app.local_entrypoint()
+def run_data_pipeline_local(
+    augment_codecontests: bool = True,
+    augment_codealpaca: bool = True,
+    max_train_examples: int = 30000,
+):
+    """
+    Local entrypoint to run data pipeline on Modal.
+
+    Usage:
+        modal run src/swe_qwen/modal_app.py::run_data_pipeline_local
+        modal run src/swe_qwen/modal_app.py::run_data_pipeline_local --no-augment-codecontests
+    """
+    print("Launching data pipeline on Modal...")
+    result = run_data_pipeline.remote(
+        augment_codecontests=augment_codecontests,
+        augment_codealpaca=augment_codealpaca,
+        max_train_examples=max_train_examples,
+    )
+    print(f"Pipeline completed: {result['status']}")
+    print(f"Run ID: {result['run_id']}")
+    print(f"Output: {result['output_dir']}")
+    return result
 
 
 @app.local_entrypoint()

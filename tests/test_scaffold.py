@@ -4,6 +4,7 @@ Tests for project scaffold structure and configuration.
 """
 
 import os
+import shutil
 import subprocess
 import tomllib
 from pathlib import Path
@@ -197,6 +198,8 @@ class TestTerraformFiles:
 
     def test_terraform_init(self):
         """Run terraform init to validate configuration."""
+        if not shutil.which("terraform"):
+            pytest.skip("terraform not available")
         terraform_dir = PROJECT_ROOT / "infra" / "terraform"
         result = subprocess.run(
             ["terraform", "init", "-backend=false"],
@@ -209,6 +212,8 @@ class TestTerraformFiles:
 
     def test_terraform_validate(self):
         """Run terraform validate to check syntax."""
+        if not shutil.which("terraform"):
+            pytest.skip("terraform not available")
         terraform_dir = PROJECT_ROOT / "infra" / "terraform"
         result = subprocess.run(
             ["terraform", "validate"],

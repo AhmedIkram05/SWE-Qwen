@@ -269,3 +269,103 @@ class TestCli:
         with mock.patch("data_engineering.cli.run_pipeline", return_value=mock_result):
             result = runner.invoke(app, ["run", "--min-golden", "0", "--batch-size", "1"])
         assert result.exit_code == 0
+
+    # ── Augmentation flags ────────────────────────────────────────────────
+
+    def test_augmentation_flags_default_off(self) -> None:
+        """Default: both augmentation flags are False."""
+        mock_result = PipelineResult(
+            run_id="s",
+            manifest_hash="h",
+            splits=Splits(),
+            stats=PipelineStats(),
+        )
+        with mock.patch("data_engineering.cli.run_pipeline", return_value=mock_result) as m:
+            runner.invoke(app, ["run"])
+            cfg = m.call_args[0][0]
+            assert cfg.augment_codecontests is False
+            assert cfg.augment_codealpaca is False
+            assert cfg.max_train_examples == 30000
+
+    def test_augmentation_flags_disable_codecontests(self) -> None:
+        """--no-augment-codecontests flag is parsed correctly."""
+        mock_result = PipelineResult(
+            run_id="s",
+            manifest_hash="h",
+            splits=Splits(),
+            stats=PipelineStats(),
+        )
+        with mock.patch("data_engineering.cli.run_pipeline", return_value=mock_result) as m:
+            runner.invoke(app, ["run", "--no-augment-codecontests"])
+            cfg = m.call_args[0][0]
+            assert cfg.augment_codecontests is False
+            assert cfg.augment_codealpaca is False  # unchanged
+
+    def test_augmentation_flags_disable_both(self) -> None:
+        """Both flags can be disabled simultaneously."""
+        mock_result = PipelineResult(
+            run_id="s",
+            manifest_hash="h",
+            splits=Splits(),
+            stats=PipelineStats(),
+        )
+        with mock.patch("data_engineering.cli.run_pipeline", return_value=mock_result) as m:
+            runner.invoke(
+                app,
+                ["run", "--no-augment-codecontests", "--no-augment-codealpaca"],
+            )
+            cfg = m.call_args[0][0]
+            assert cfg.augment_codecontests is False
+            assert cfg.augment_codealpaca is False
+
+    def test_augmentation_max_train_examples(self) -> None:
+        """--max-train-examples flag is forwarded."""
+        mock_result = PipelineResult(
+            run_id="s",
+            manifest_hash="h",
+            splits=Splits(),
+            stats=PipelineStats(),
+        )
+        with mock.patch("data_engineering.cli.run_pipeline", return_value=mock_result) as m:
+            runner.invoke(app, ["run", "--max-train-examples", "50000"])
+            cfg = m.call_args[0][0]
+            assert cfg.max_train_examples == 50000
+
+    def test_augmentation_flags_round_trip_in_config(self, monkeypatch) -> None:
+        """Augmentation flags appear in 'config' command output."""
+        monkeypatch.setenv("DATA_PIPELINE_AUGMENT_CODECONTESTS", "false")
+        monkeypatch.setenv("DATA_PIPELINE_AUGMENT_CODEALPACA", "false")
+        result = runner.invoke(app, ["config"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert data["augment_codecontests"] is False
+        assert data["augment_codealpaca"] is False
+        assert data["max_train_examples"] == 30000
+
+    def test_config_shows_augmentation_defaults(self) -> None:
+        """Config output shows default augmentation values."""
+        result = runner.invoke(app, ["config"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert data["augment_codecontests"] is False
+        assert data["augment_codealpaca"] is False
+        assert data["max_train_examples"] == 30000
+
+    def test_tokenize_success(self) -> None:
+        """Tokenize command succeeds with valid --run-id."""
+        mock_result = {"run_id": "abc123", "splits": {"train": 10}, "total_examples": 10}
+        with mock.patch("data_engineering.cli.tokenize_dataset", return_value=mock_result):
+            result = runner.invoke(app, ["tokenize", "--run-id", "abc123"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert data["run_id"] == "abc123"
+
+    def test_tokenize_failure(self) -> None:
+        """Tokenize command exits with code 1 on failure."""
+        with mock.patch(
+            "data_engineering.cli.tokenize_dataset",
+            side_effect=ValueError("No data found"),
+        ):
+            result = runner.invoke(app, ["tokenize", "--run-id", "abc123"])
+        assert result.exit_code == 1
+        assert "No data found" in result.stderr

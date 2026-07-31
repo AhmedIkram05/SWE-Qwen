@@ -72,7 +72,7 @@ class TestSWEBenchConstants:
     """Tests for SWE-bench constants."""
 
     def test_python_repos_count(self):
-        assert len(SWE_BENCH_PYTHON_REPOS) == 18
+        assert len(SWE_BENCH_PYTHON_REPOS) == 74
 
     def test_python_repos_contains_expected(self):
         assert "django/django" in SWE_BENCH_PYTHON_REPOS
@@ -337,6 +337,33 @@ class TestAugmentWithBigQuery:
         assert result[0].metadata.get("bigquery_repo_stats") == {"stars": 100}
         mock_fetch.assert_not_called()
 
+    def test_augment_with_bigquery_fetches_missing(self, tmp_path) -> None:
+        """BQ fetches missing stats and saves them to cache."""
+        from data_engineering.swebench_ingest import _get_bq_stats_cache_path, augment_with_bigquery
+
+        config = DataPipelineConfig(bigquery_enabled=True, swe_bench_dir=tmp_path)
+
+        record = IssueRecord.model_construct(
+            issue_id="test-1",
+            repo="owner/repo",
+            issue_body="test",
+            patch_diff="--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-foo\n+bar\n",
+        )
+
+        with patch("data_engineering.swebench_ingest._fetch_repo_stats") as mock_fetch:
+            mock_fetch.return_value = {"owner/repo": {"stars": 50}}
+            result = augment_with_bigquery([record], config)
+
+        assert len(result) == 1
+        assert result[0].metadata.get("bigquery_repo_stats") == {"stars": 50}
+        mock_fetch.assert_called_once()
+        # Verify cache was updated
+        cache_path = _get_bq_stats_cache_path(config)
+        import json
+
+        cached = json.loads(cache_path.read_text())
+        assert cached["owner/repo"]["stars"] == 50
+
     def test_augment_with_bigquery_query_fails_no_cache(self, tmp_path) -> None:
         """BQ fails, no cache, returns records unchanged."""
         from data_engineering.swebench_ingest import augment_with_bigquery
@@ -486,6 +513,53 @@ class TestIngestSWEBench:
 
         assert len(records) == 1
         assert records[0].issue_id == "v1"
+        assert records[0].repo == "django/django"
+
+    @patch("data_engineering.swebench_ingest.load_swebench_splits")
+    def test_ingest_skips_non_python_repos(self, mock_load_splits):
+        """Examples with non-Python repos should be skipped."""
+        mock_load_splits.return_value = {
+            "train": [
+                {
+                    "instance_id": "tr1",
+                    "repo": "django/django",
+                    "base_commit": "abc",
+                    "patch": "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n",
+                    "test_patch": "",
+                    "problem_statement": "Fix bug",
+                    "hints_text": "",
+                    "created_at": "2024-01-01",
+                    "version": "1.0",
+                    "FAIL_TO_PASS": "",
+                    "PASS_TO_PASS": "",
+                    "environment_setup_commit": "def",
+                },
+                {
+                    "instance_id": "tr2",
+                    "repo": "microsoft/vscode",  # not in SWE_BENCH_PYTHON_REPOS
+                    "base_commit": "abc",
+                    "patch": "--- a/foo.ts\n+++ b/foo.ts\n@@ -1 +1 @@\n-a\n+b\n",
+                    "test_patch": "",
+                    "problem_statement": "Fix TS bug",
+                    "hints_text": "",
+                    "created_at": "2024-01-01",
+                    "version": "1.0",
+                    "FAIL_TO_PASS": "",
+                    "PASS_TO_PASS": "",
+                    "environment_setup_commit": "def",
+                },
+            ],
+            "verified": [],
+            "test": [],
+            "dev": [],
+        }
+
+        from data_engineering.swebench_ingest import ingest_swebench
+
+        config = DataPipelineConfig()
+        records = ingest_swebench(config)
+
+        assert len(records) == 1
         assert records[0].repo == "django/django"
 
     @patch("data_engineering.swebench_ingest.load_swebench_splits")

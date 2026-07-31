@@ -30,6 +30,7 @@ import typer
 from data_engineering.config import DataPipelineConfig
 from data_engineering.run_pipeline import run_pipeline
 from data_engineering.schema import PipelineResult
+from data_engineering.tokenize import tokenize_dataset
 
 app = typer.Typer(
     name="data-engineering",
@@ -134,6 +135,34 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         "--bigquery/--no-bigquery",
         help="Enable BigQuery augmentation (v2 feature)",
     ),
+    augment_codecontests: bool = typer.Option(
+        False,
+        "--augment-codecontests/--no-augment-codecontests",
+        help="Augment training with CodeContests (13k Python solutions)",
+    ),
+    augment_codealpaca: bool = typer.Option(
+        False,
+        "--augment-codealpaca/--no-augment-codealpaca",
+        help="Augment training with CodeAlpaca-20k (filtered to ~8k Python)",
+    ),
+    max_train_examples: int = typer.Option(
+        30000,
+        "--max-train-examples",
+        help="Cap total training size after augmentation",
+        min=1000,
+    ),
+    tokenize_model: str = typer.Option(
+        "qwen3-14b",
+        "--tokenize-model",
+        help="Model name from models.yaml for tokenization",
+    ),
+    tokenize_max_length: int = typer.Option(
+        4096,
+        "--tokenize-max-length",
+        help="Maximum sequence length for tokenization",
+        min=512,
+        max=32768,
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -160,6 +189,11 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         val_ratio=val_ratio,
         test_ratio=test_ratio,
         bigquery_enabled=bigquery,
+        augment_codecontests=augment_codecontests,
+        augment_codealpaca=augment_codealpaca,
+        max_train_examples=max_train_examples,
+        tokenize_model=tokenize_model,
+        tokenize_max_length=tokenize_max_length,
     )
 
     try:
@@ -177,6 +211,53 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         "wandb_artifacts": result.wandb_artifacts,
     }
     typer.echo(json.dumps(summary, indent=2))
+
+
+@app.command()
+def tokenize(  # noqa: PLR0913 -- typer CLI dispatcher; Option() calls required by typer
+    run_id: str | None = typer.Option(
+        None,
+        "--run-id",
+        help="Run ID of the dataset to tokenize (defaults to latest)",
+    ),
+    model_name: str = typer.Option(
+        "qwen3-14b",
+        "--model-name",
+        help="Model name from models.yaml",
+    ),
+    max_seq_length: int = typer.Option(
+        8192,
+        "--max-seq-length",
+        help="Maximum sequence length for tokenization",
+    ),
+    output: Path = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output directory (defaults to <run_id>_tokenized)",
+        file_okay=False,
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable DEBUG logging",
+    ),
+) -> None:
+    """Tokenize a completed dataset run."""
+    _setup_logging(verbose)
+
+    try:
+        result = tokenize_dataset(
+            run_id=run_id,
+            model_name=model_name,
+            max_seq_length=max_seq_length,
+        )
+    except Exception as exc:
+        typer.secho(f"Tokenization failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(result, indent=2))
 
 
 @app.command()

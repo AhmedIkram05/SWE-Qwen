@@ -26,14 +26,98 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from data_engineering import archive, card, clean, golden, split, swebench_ingest, validate, version
+from data_engineering import (
+    archive,
+    card,
+    clean,
+    golden,
+    split,
+    swebench_ingest,
+    synthetic_augment,
+    validate,
+    version,
+)
 from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import (
+    GoldenSet,
     IssueRecord,
     PipelineResult,
     PipelineStats,
     RepoResult,
+    Splits,
 )
+
+# ─── GCS Streaming Helpers ──────────────────────────────────────────────────
+
+
+def _save_stage_gcs(
+    records: list[Any],
+    config: DataPipelineConfig,
+    run_id: str,
+    repo_id: str,
+    stage: str,
+) -> None:
+    """Save records as JSONL to GCS checkpoint."""
+    if not config.gcs_bucket:
+        return
+    try:
+        from google.cloud import storage  # type: ignore[attr-defined]
+
+        client = storage.Client()
+        bucket = client.bucket(config.gcs_bucket)
+        if not bucket.exists():
+            return
+        prefix = f"datasets/{run_id}/{repo_id}"
+        key = f"{prefix}/{stage}.jsonl"
+        blob = bucket.blob(key)
+        lines = []
+        for r in records:
+            if hasattr(r, "model_dump"):
+                line = json.dumps(r.model_dump(), default=str)
+            else:
+                line = json.dumps(r, default=str)
+            lines.append(line + "\n")
+        content = "".join(lines)
+        blob.upload_from_string(content, content_type="application/jsonl")
+        logging.info(
+            f"Uploaded {len(records)} records to gs://{config.gcs_bucket}/datasets/{run_id}/{repo_id}/{stage}.jsonl"
+        )
+    except Exception as e:
+        logging.warning(f"GCS save failed for stage {stage} (non-fatal): {e}")
+
+
+def _load_stage_gcs(
+    config: DataPipelineConfig,
+    run_id: str,
+    repo_id: str,
+    stage: str,
+) -> list[dict[str, Any]]:
+    """Load records from GCS checkpoint."""
+    if not config.gcs_bucket:
+        return []
+    try:
+        from google.cloud import storage  # type: ignore[attr-defined]
+
+        client = storage.Client()
+        bucket = client.bucket(config.gcs_bucket)
+        if not bucket.exists():
+            return []
+        prefix = f"datasets/{run_id}/{repo_id}"
+        key = f"{prefix}/{stage}.jsonl"
+        blob = bucket.blob(key)
+        if not blob.exists():
+            return []
+        content = blob.download_as_text()
+        records = [json.loads(line) for line in content.strip().split("\n") if line.strip()]
+    except Exception as e:
+        logging.warning(f"GCS load failed for stage {stage} (non-fatal): {e}")
+        return []
+    else:
+        logging.info(
+            f"Loaded {len(records)} records from gs://{config.gcs_bucket}/datasets/{run_id}/{stage}.jsonl"
+        )
+        return records
+
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -58,6 +142,7 @@ _STAGE_MAP = {
     "version": "version",
     "archive": "archive",
     "card": "card",
+    "tokenize": "tokenize",
 }
 
 # Reverse map: human-readable -> file-stage name
@@ -93,7 +178,8 @@ def _save_stage(
     repo_id: str,
     stage: str,
 ) -> None:
-    """Save records as JSONL checkpoint."""
+    """Save records as JSONL checkpoint locally (for resume) and to GCS (if configured)."""
+    # Local save (for fast resume)
     out_dir = _checkpoint_dir(config, run_id, repo_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{stage}.jsonl"
@@ -104,6 +190,10 @@ def _save_stage(
             else:
                 line = json.dumps(rec, default=str)
             f.write(line + "\n")
+
+    # GCS save (async-style, non-blocking)
+    if config.gcs_bucket:
+        _save_stage_gcs(records, config, run_id, "swebench", stage)
 
 
 def _load_stage(
@@ -311,6 +401,33 @@ def run_pipeline_swebench(
 # Full pipeline entry point
 
 
+def _save_splits_jsonl(
+    splits: Splits,
+    golden_set: GoldenSet,
+    config: DataPipelineConfig,
+    run_id: str,
+) -> None:
+    """Save train/val/test/golden splits as JSONL files for tokenization."""
+    out_dir = config.output_dir / run_id / "swebench"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Helper to save records
+    def save_records(records, filename):
+        path = out_dir / filename
+        with path.open("w") as f:
+            for rec in records:
+                if hasattr(rec, "model_dump"):
+                    f.write(json.dumps(rec.model_dump(), default=str) + "\n")
+                else:
+                    f.write(json.dumps(rec, default=str) + "\n")
+        logger.info("Saved %d records to %s", len(records), path)
+
+    save_records(splits.train, "train.jsonl")
+    save_records(splits.val, "val.jsonl")
+    save_records(splits.test, "test.jsonl")
+    save_records(golden_set.records, "golden.jsonl")
+
+
 def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
     """Run the full multi-repo pipeline end to end."""
     # Setup
@@ -362,11 +479,25 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
     else:
         splits = split.Splits()
 
+    # Synthetic augmentation (Phase 3 extension)
+    if config.augment_codecontests or config.augment_codealpaca:
+        logger.info("Augmenting training set with synthetic data...")
+        orig_count = len(splits.train)
+        splits.train = synthetic_augment.augment_training_data(splits.train, config)
+        logger.info(
+            "Training set augmented: %d records (was %d)",
+            len(splits.train),
+            orig_count,
+        )
+
     # Golden
     if _stage_enabled(config, "golden"):
         golden_set = golden.build_golden_set_from_config(splits, config)
     else:
         golden_set = golden.GoldenSet()
+
+    # Save splits as JSONL for tokenization
+    _save_splits_jsonl(splits, golden_set, config, run_id)
 
     # Collect validation errors
     from data_engineering.schema import ValidationError
@@ -473,6 +604,35 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         except Exception as exc:
             logger.warning("GCS card re-upload failed (non-fatal): %s", exc)
 
+    # Tokenize (optional, runs if model_name provided)
+    tokenized_paths: dict[str, str] = {}
+    if _stage_enabled(config, "tokenize"):
+        try:
+            from data_engineering.tokenize import tokenize_pipeline
+
+            model_name = getattr(config, "tokenize_model", "qwen3-14b")
+            max_seq_length = getattr(config, "tokenize_max_length", 4096)
+
+            tokenized_dir = config.output_dir / f"{run_id}_tokenized"
+            ds = tokenize_pipeline(
+                data_dir=config.output_dir / run_id / "swebench",
+                output_dir=tokenized_dir,
+                model_name=model_name,
+                max_length=max_seq_length,
+                config=config,
+                run_id=run_id,
+            )
+            tokenized_paths = {
+                "train": str(tokenized_dir / "train"),
+                "val": str(tokenized_dir / "val"),
+                "test": str(tokenized_dir / "test"),
+                "golden": str(tokenized_dir / "golden"),
+                "dataset_dict": str(tokenized_dir / "dataset_dict.json"),
+            }
+            logger.info(f"Tokenized dataset saved to {tokenized_dir}")
+        except Exception as exc:
+            logger.warning("Tokenization failed (non-fatal): %s", exc)
+
     # Print summary
     console.print("\n[bold green]Pipeline Complete![/bold green]")
     table = Table(title=f"Run {run_id[:8]} Summary")
@@ -492,6 +652,7 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         stats=stats,
         gcs_paths=gcs_paths,
         wandb_artifacts=wandb_artifacts,
+        tokenized_paths=tokenized_paths,
     )
 
 

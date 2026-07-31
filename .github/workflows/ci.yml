@@ -23,6 +23,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.11"
+  HF_XET_DISABLE: "1"  # avoids hf_xet Rust panic on global trace subscriber conflict
 
 jobs:
   lint-and-test:
@@ -32,31 +33,48 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
+
+      - name: Cache virtualenv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+        run: uv sync --extra dev
 
       - name: Run Ruff (lint)
-        run: ruff check data_engineering/ src/ tests/
+        run: uv run ruff check data_engineering/ training/ tests/
 
       - name: Run Ruff (format check)
-        run: ruff format --check data_engineering/ src/ tests/
+        run: uv run ruff format --check data_engineering/ training/ tests/
 
       - name: Run MyPy
-        run: mypy data_engineering/ src/
+        run: uv run mypy data_engineering/ training/
 
-      - name: Run pytest with coverage
+      - name: Run pytest (fast — no slow tests)
         run: |
-          pytest tests/ -v --tb=short -x \
-            -m "not requires_credentials" \
-            --cov=data_engineering --cov=src --cov-report=xml
+          uv run pytest tests/ -v --tb=short -x -n auto \
+            -m "not requires_credentials and not slow" \
+            --cov
+
+      - name: Run pytest (slow tests — coverage upload)
+        if: always()
+        run: |
+          uv run pytest tests/ -v --tb=short -n auto \
+            -m "slow and not requires_credentials" \
+            --cov --cov-report=xml --cov-append
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -149,30 +167,6 @@ jobs:
           echo '```terraform' >> $GITHUB_STEP_SUMMARY
           cat plan.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-
-  modal-deploy:
-    name: Modal Deploy
-    needs: [lint-and-test]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
-
-      - name: Install Modal
-        run: pip install modal
-
-      - name: Deploy Modal App
-        run: modal deploy src/swe_qwen/modal_app.py
-        env:
-          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
 
   notify:
     name: Notify

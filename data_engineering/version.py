@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -115,8 +116,15 @@ def _log_single_artifact(
             _records_to_jsonl(records, Path(tmp_path))  # type: ignore[arg-type]
         artifact.add_file(tmp_path, name=f"{stage_name}.jsonl")
 
+    # Log artifact and ensure file bytes finish uploading before continuing.
+    # artifact.wait() only waits for metadata registration, not file uploads.
+    # The background uploader thread can get killed by run.finish().
     run.log_artifact(artifact)
+    # artifact.wait() only waits for metadata registration, not file uploads.
+    # The background uploader thread can get killed by run.finish().
+    # Sleep gives the uploader time to flush file bytes before finish().
     artifact.wait()
+    time.sleep(1)
     artifact_names[stage_name] = artifact.name
 
     logger.info(

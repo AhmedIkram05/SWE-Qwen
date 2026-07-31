@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import IssueRecord, ValidationError
@@ -89,6 +89,29 @@ class TestLogDatasetArtifacts:
             assert mock_run.log_artifact.called
             assert isinstance(result, dict)
 
+    def test_artifact_upload_waits_for_files(self) -> None:
+        """artifact.wait() and time.sleep(1) are called after log_artifact.
+
+        Guards against regression: if either is removed, file uploads may
+        not complete before run.finish() terminates the uploader thread.
+        """
+        stages = {"train": [_rec("r#1")]}
+        config = DataPipelineConfig(wandb_project="test-proj")
+
+        with (
+            patch("data_engineering.version.wandb") as mock_wandb,
+            patch("data_engineering.version.time.sleep") as mock_sleep,
+        ):
+            mock_run = mock_wandb.init.return_value
+            mock_artifact = mock_wandb.Artifact.return_value
+            mock_artifact.name = "dataset-train:v1"
+
+            log_dataset_artifacts("run_id", stages, config, "abc123")
+
+            mock_run.log_artifact.assert_called_with(mock_artifact)
+            mock_artifact.wait.assert_called_once()
+            mock_sleep.assert_has_calls([call(1)])
+
     def test_empty_stages(self) -> None:
         """Empty stages dict should not raise and return empty dict."""
         stages: dict = {}
@@ -129,6 +152,16 @@ class TestLogValidationErrors:
             artifact = log_validation_errors("run_id", errors, config)
             assert artifact is not None
 
+    def test_log_dataset_artifacts_with_empty_repo_results(self) -> None:
+        """Empty repo_results should not set per_repo_counts in run.summary."""
+        stages = {"train": [_rec("r#1")]}
+        config = DataPipelineConfig(wandb_project="test-proj")
+        stats = {"repo_results": []}
+        with patch("data_engineering.version.wandb") as mock_wandb:
+            mock_run = mock_wandb.init.return_value
+            result = log_dataset_artifacts("run_id", stages, config, "hash", stats)
+            assert isinstance(result, dict)
+
     def test_log_dataset_artifacts_with_per_repo_stats(self) -> None:
         """log_dataset_artifacts with stats that include repo_results should log per_repo_counts."""
         stages = {
@@ -148,6 +181,29 @@ class TestLogValidationErrors:
             "train_count": 1,
             "val_count": 0,
             "test_count": 1,
+            "golden_count": 0,
+        }
+
+        with patch("data_engineering.version.wandb") as mock_wandb:
+            mock_run = mock_wandb.init.return_value
+            result = log_dataset_artifacts("run_id", stages, config, "hash", stats)
+            assert mock_wandb.init.called
+            assert isinstance(result, dict)
+
+    def test_log_dataset_artifacts_empty_repo_results(self) -> None:
+        """Empty repo_results and non-dict items should be handled gracefully."""
+        stages = {
+            "train": [_rec("r#1")],
+        }
+        config = DataPipelineConfig(wandb_project="test-proj")
+        stats = {
+            "repo_results": [
+                {},  # dict without "repo_id"
+                "not_a_dict",  # not a dict at all
+            ],
+            "train_count": 1,
+            "val_count": 0,
+            "test_count": 0,
             "golden_count": 0,
         }
 

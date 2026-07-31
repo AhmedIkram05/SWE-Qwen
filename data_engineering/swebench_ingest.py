@@ -18,9 +18,10 @@ from data_engineering.schema import IssueRecord, ParsedHunk, TestResults
 
 logger = logging.getLogger(__name__)
 
-# ── SWE-bench Python repos (18 total from Verified + Test + Dev) ────────────
+# ── SWE-bench Python repos (expanded to cover all Python repos in train split) ────────────
 
 SWE_BENCH_PYTHON_REPOS: set[str] = {
+    # Original 18 from Verified + Test + Dev
     "astropy/astropy",
     "django/django",
     "matplotlib/matplotlib",
@@ -39,6 +40,63 @@ SWE_BENCH_PYTHON_REPOS: set[str] = {
     "pandas-dev/pandas",
     "scikit-learn/scikit-learn",
     "tensorflow/tensorflow",
+    # Additional Python repos from train split (major ones)
+    "numpy/numpy",
+    "googleapis/google-cloud-python",
+    "pantsbuild/pants",
+    "ipython/ipython",
+    "pypa/pip",
+    "conda/conda",
+    "docker/compose",
+    "apache/airflow",
+    "wagtail/wagtail",
+    "PrefectHQ/prefect",
+    "Lightning-AI/lightning",
+    "pyca/cryptography",
+    "ray-project/ray",
+    "google/jax",
+    "ytdl-org/youtube-dl",
+    "celery/celery",
+    "jupyterlab/jupyterlab",
+    "dagster-io/dagster",
+    "open-mmlab/mmdetection",
+    "twisted/twisted",
+    "gitpython-developers/GitPython",
+    "DataDog/integrations-core",
+    "tensorflow/models",
+    "explosion/spaCy",
+    "Qiskit/qiskit",
+    "mesonbuild/meson",
+    "pypa/setuptools",
+    "pypa/virtualenv",
+    "ansible/ansible",
+    "saltstack/salt",
+    "home-assistant/core",
+    "psf/requests",
+    "psf/urllib3",
+    "pallets/click",
+    "encode/httpx",
+    "encode/starlette",
+    "fastapi/fastapi",
+    "tiangolo/fastapi",
+    "pytest-dev/pluggy",
+    "pytest-dev/pytest-asyncio",
+    "pytest-dev/pytest-mock",
+    "tox-dev/tox",
+    "pypa/pipenv",
+    "pypa/poetry",
+    "astral-sh/ruff",
+    "astral-sh/uv",
+    "python-poetry/poetry",
+    "pydantic/pydantic-core",
+    "encode/databases",
+    "encode/orm",
+    "sqlalchemy/sqlalchemy",
+    "pallets/werkzeug",
+    "pallets/itsdangerous",
+    "pallets/markupsafe",
+    "psf/typing-extensions",
+    "python/typing_extensions",
 }
 
 # Repo → domain mapping for curriculum/domain-aware training
@@ -61,6 +119,63 @@ REPO_DOMAIN_MAP: dict[str, str] = {
     "pandas-dev/pandas": "data-ml",
     "scikit-learn/scikit-learn": "data-ml",
     "tensorflow/tensorflow": "data-ml",
+    # Additional repos
+    "numpy/numpy": "data-ml",
+    "googleapis/google-cloud-python": "web-api",
+    "pantsbuild/pants": "utils",
+    "ipython/ipython": "utils",
+    "pypa/pip": "utils",
+    "conda/conda": "utils",
+    "docker/compose": "utils",
+    "apache/airflow": "web-api",
+    "wagtail/wagtail": "web-api",
+    "PrefectHQ/prefect": "utils",
+    "Lightning-AI/lightning": "data-ml",
+    "pyca/cryptography": "utils",
+    "ray-project/ray": "data-ml",
+    "google/jax": "data-ml",
+    "ytdl-org/youtube-dl": "utils",
+    "celery/celery": "web-api",
+    "jupyterlab/jupyterlab": "utils",
+    "dagster-io/dagster": "utils",
+    "open-mmlab/mmdetection": "data-ml",
+    "twisted/twisted": "web-api",
+    "gitpython-developers/GitPython": "utils",
+    "DataDog/integrations-core": "utils",
+    "tensorflow/models": "data-ml",
+    "explosion/spaCy": "data-ml",
+    "Qiskit/qiskit": "data-ml",
+    "mesonbuild/meson": "utils",
+    "pypa/setuptools": "utils",
+    "pypa/virtualenv": "utils",
+    "ansible/ansible": "utils",
+    "saltstack/salt": "utils",
+    "home-assistant/core": "web-api",
+    "psf/requests": "web-api",
+    "psf/urllib3": "web-api",
+    "pallets/click": "utils",
+    "encode/httpx": "web-api",
+    "encode/starlette": "web-api",
+    "fastapi/fastapi": "web-api",
+    "tiangolo/fastapi": "web-api",
+    "pytest-dev/pluggy": "testing",
+    "pytest-dev/pytest-asyncio": "testing",
+    "pytest-dev/pytest-mock": "testing",
+    "tox-dev/tox": "testing",
+    "pypa/pipenv": "utils",
+    "pypa/poetry": "utils",
+    "astral-sh/ruff": "utils",
+    "astral-sh/uv": "utils",
+    "python-poetry/poetry": "utils",
+    "pydantic/pydantic-core": "utils",
+    "encode/databases": "web-api",
+    "encode/orm": "web-api",
+    "sqlalchemy/sqlalchemy": "web-api",
+    "pallets/werkzeug": "web-api",
+    "pallets/itsdangerous": "utils",
+    "pallets/markupsafe": "utils",
+    "psf/typing-extensions": "utils",
+    "python/typing_extensions": "utils",
 }
 
 
@@ -97,10 +212,7 @@ def _parse_unified_diff(diff_str: str) -> list[ParsedHunk]:
     import unidiff
 
     hunks: list[ParsedHunk] = []
-    try:
-        patch_set = unidiff.PatchSet(diff_str)
-    except Exception:
-        return hunks
+    patch_set = unidiff.PatchSet(diff_str)
     for patched_file in patch_set:
         for hunk in patched_file:
             hunks.append(
@@ -218,6 +330,7 @@ def swebench_to_issue_record(example: dict[str, Any], repo_domain: str) -> Issue
         metadata={
             "base_sha": example["base_commit"],
             "head_sha": example["environment_setup_commit"],
+            "test_patch": example.get("test_patch", ""),
             "version": example["version"],
             "hints": hints,
             "created_at": example["created_at"],

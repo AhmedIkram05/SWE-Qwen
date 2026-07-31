@@ -196,6 +196,7 @@ class PipelineResult(BaseModel):
     stats: PipelineStats
     gcs_paths: dict[str, str] = {}
     wandb_artifacts: dict[str, str] = {}
+    tokenized_paths: dict[str, str] = {}
 
     @property
     def total_examples(self) -> int:
