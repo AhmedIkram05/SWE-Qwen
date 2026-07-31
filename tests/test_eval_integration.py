@@ -840,7 +840,7 @@ def test_prompt_ab_runs_templates(config: EvalConfig, monkeypatch: pytest.Monkey
 def test_run_batch_generates_once_per_repo(
     config: EvalConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``run_batch`` calls ``_generate_patches`` once per repo, not once per example."""
+    """``run_batch`` calls ``_generate_patches`` once for ALL repos, not once per repo."""
     _write_golden(
         Path(config.golden_data_path),
         [
@@ -865,14 +865,12 @@ def test_run_batch_generates_once_per_repo(
 
     harness.run_golden([("qwen3-14b", "baseline_14b")], run_id="batch-test")
 
-    # Two repos → two generate calls, not three
-    assert len(generate_calls) == 2
-    # First call has 2 examples from repo-a
-    assert len(generate_calls[0]) == 2
-    assert all(ex.repo == "owner/repo-a" for ex in generate_calls[0])
-    # Second call has 1 example from repo-b
-    assert len(generate_calls[1]) == 1
-    assert generate_calls[1][0].repo == "owner/repo-b"
+    # Single call for ALL examples across ALL repos
+    assert len(generate_calls) == 1
+    # One call has all 3 examples
+    assert len(generate_calls[0]) == 3
+    repos_in_call = {ex.repo for ex in generate_calls[0]}
+    assert repos_in_call == {"owner/repo-a", "owner/repo-b"}
 
 
 def test_run_example_with_generated_patch(
