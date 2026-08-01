@@ -674,6 +674,111 @@ Each Phase follows this structure:
 
 ---
 
+## Phase 5b (Extension): Eval v5 Redesign — 2026-08-01 ✅ COMPLETED (code + tests; live Modal runs pending credentials)
+
+**Why:** User-directed restart of the eval pipeline (2026-08-01). Two pipelines existed (old harness + mini-SWE-agent); neither was trusted. Agentic path was 10–50× token cost; old harness's per-instance clone+pip-install was ~10 min/instance — unviable for 2,056 golden. Single-turn only, all-Modal, four tiers. Plan: `docs/planning/EVAL-V5-REDESIGN.md`.
+
+### Deviation Log
+
+| Task | Planned | Actual | Reason | Impact |
+|------|---------|--------|--------|--------|
+| 5b.1 | Delete mini-SWE-agent path | Completed | Deleted swe_agent.py, serve.py, test_swe_agent.py (13 tests), run-swe-agent CLI, config remnants; schema Method literal no longer includes swe_agent | Low |
+| 5b.2 | Bottleneck fix: test execution | Completed | **Official SWE-bench images** (per-instance tags, one Modal function per repo — Modal 1.5.3 `with_options` has no image param) + existing volume-cached clone/install fallback. Zero project pip-install per instance; ~60-90 s/instance | High |
+| 5b.3 | Tiers + CI gate | Completed | `run --mode smoke\|dev\|final\|full` (20/100/500/all, seed 42); smoke writes/checks `smoke_baseline.json`, exit 1 on F2P drop > 5% | Medium |
+| 5b.4 | Statistical rigor | Completed | NEW `evaluation/stats.py`: Wilson 95% CI, McNemar exact two-sided, paired bootstrap; `compare` shows f2p_95ci column + paired significance + est. cost | Medium |
+| 5b.5 | Cost tracking | Completed | `estimate_run_cost` (measured GPU-min + estimated test vCPU-hr) → `cost_usd` on EvalRun → W&B scalar + compare report | Low |
+| 5b.6 | run_batch correctness fix | Completed | Old batch grouped by repo only — all jobs evaluated against first example's base_sha + test_patch (WRONG for SWE-bench instances with different base_shas). Now grouped by (repo, base_sha), per-job test_patch, swebench path first, batch fallback | High |
+
+### Decisions Made
+
+| Decision | Context | Alternatives Considered | Rationale |
+|----------|---------|------------------------|-----------|
+| One pipeline, single-turn, tiered | Dual pipelines untrusted; user mandate | Keep both, fix agentic path | Vision out-of-scope: no multi-agent; execution feedback deferred to v2 |
+| Official swebench images, fn per repo | Images are per-instance; Modal 1.5.3 can't switch images per call | Per-call image override (impossible), worktree trick (no setup win) | Full git history in every image → any base_sha resets; editable install; ground-truth verification catches env drift |
+| `--mode smoke` = CI gate w/ stored baseline | Recruiter signal: regression gate in CI | Fixed threshold only | Absolute threshold can't catch regressions of a good model; baseline-relative drop does |
+| Wilson/McNemar/bootstrap stdlib-only | Statistical claims need CIs + paired tests on seed-42 identical subsets | scipy | stdlib: binomial PMF via math.comb; no new dependency; deterministic seeds |
+| Swebench path primary, batch fallback | Test/Dev images partially missing; some images broken | Swebench only | Verified images guaranteed; fallback already exists (volume-cached) |
+| Keep `_run_tests_batch` seam | Existing tests monkeypatch modal seams | Rewrite tests wholesale | Added `_run_tests_swebench` seam ahead of it; conftest disables both in tests |
+
+### Blockers & Resolutions
+
+| Blocker | Discovered | Resolved | Resolution | Time Lost |
+|---------|------------|----------|------------|-----------|
+| Modal 1.5.3 `with_options` has no `image` param | inspect installed modal | 2026-08-01 | Per-repo function registry (swebench_fn); image fixed at decoration, valid for all repo instances | 30 min |
+| Tests would hit real Modal swebench path | Integration test design | 2026-08-01 | conftest autouse fixture also stubs `_run_tests_swebench` → always raises | 5 min |
+| Paired bootstrap CI coincides across seeds on tiny n | stats unit test | 2026-08-01 | Test asserts sane interval + determinism, not seed-dependent CI (order statistics are coarse) | 5 min |
+
+### Technical Details (For Future Phases)
+
+| Area | Detail | Why It Matters |
+|------|--------|----------------|
+| Swebench image naming | `swebench/sweb.eval.x86_64.{instance munged}:latest`; `django__django-10554` → `django_1776_django-10554` (`__`→`_1776_`) | Docker tag safety; per-instance images, per-repo functions |
+| /testbed layout | Image `/testbed` at instance base commit + "SWE-bench" marker commit (HEAD ≠ base_sha; base_sha is ancestor → `git reset --hard` works offline) | No network, no clone at eval time |
+| Deps in testbed env | Per-container `conda run -n testbed python -m pip install pytest-json-report pytest-timeout` (~10-20 s, probe import first) | Could bake into custom image if container starts dominate |
+| Routing | run_batch groups by (repo, base_sha); swebench path → `_run_tests_swebench` (per-instance .remote, ThreadPool max_parallel=16) → fallback `_run_tests_batch` → per-job fallback | Test/Dev images partially missing; resilient by construction |
+| Cost model | `_GPU_RATE_PER_MIN 0.0167` (A10G $1/hr), `_VCPU_RATE_PER_HOUR 0.008`, 1.5 test-min/instance, 2 vCPU; inference measured from latency_seconds, tests estimated | Phase 8 replaces estimates with telemetry |
+| Smoke gate | `data/eval_results/smoke_baseline.json` {model:variant:prompt: f2p_rate} (prompt-keyed since Review Round 2); drop > 5% → exit 1; corrupt/missing/empty edges → exit 1 | Phase 7 wires the CI workflow; gate logic already CLI-visible |
+| Stats contract | `wilson_ci(s, n)` non-degenerate edges; `mcnamar_p(b01, b10)` exact 2×P(Bin≤min); `paired_bootstrap_ci(a, b, seed=42, n_boot=10000)` percentile | Same-seed subsets across variants → paired tests have ~2× power of unpaired |
+
+### Review Round 2 (subagent audit: code review + bottleneck analysis, 2026-08-01)
+
+Two subagent audits (code-reviewer + bottleneck) ran before the live Modal run. All findings fixed; **663 tests passing**.
+
+| Finding | Fix | Where |
+|---------|-----|-------|
+| C1: fallback path dropped per-job `test_patch` (reintroduced 5b.6 bug) | `_run_tests_batch_fallback._run_one` uses `job.get("test_patch") or test_patch or ""` | harness.py |
+| C2: ground-truth F2P<100% was warn-only — broken env scored as model failure | Hard-fail: result `error="ground truth F2P<100%"`, tests_after skipped, excluded from rates; `_reset_to_base` now raises on non-zero reset | test_runner.py (3 sites: `_execute_instance`, `run_tests_in_container`, `run_tests_batch`) |
+| C3: batch truncation threshold 540s stale vs 3600s fn timeout → slow first container failed ALL jobs | `batch_timeout_warn = 3300` (3600 − 300 margin) | test_runner.py |
+| C4: error results checkpointed forever → resume never retried them | Repo checkpointed only when 0 errored results; warn otherwise | harness.py run_batch |
+| B1: **effective test concurrency ≈ 1** (per-(repo,base_sha) group loop; unique base_shas → group size 1) — 15-25× wall-time blowup | ONE `_run_tests_swebench` pool call over ALL pending instances; per-group fallback only for missing ids | harness.py run_batch Phase 2 |
+| B2: inference = single `llm.generate()` for whole tier → full (4.1M tokens ≈ 17-20 min) killed at 600s fn timeout | Chunked sequential remote calls, `_INFER_CHUNK_SIZE = 100`; warm container reused across chunks | harness.py `_generate_patches` |
+| B8: shared `-o cache_dir=/test_cache/pytest-cache` across 16 containers → lock contention | Per-container cache dir `pytest-cache-{pid}` | test_runner.py |
+| M1: `paired_significance` keyed by instance_id only → 3 variants collapsed last-wins → self-comparison (diff=0, p=1.0) | Keyed by `(model:variant, instance_id)`; same variant paired across runs, one line per shared variant | comparison.py |
+| M2: `inference_usd` always $0 (latency hardcoded 0.0 in batch path) | `_generate_patches` timed; per-instance latency amortized; `run_example_from_output(..., latency_seconds=...)` | harness.py |
+| M3: Wilson CI bounded f2p_count (ANY pass) while table shows mean partial credit | `wilson_ci(round(rate × n), n)` — CI on the displayed statistic | comparison.py |
+| M4: `extract_model_metrics` double-counted shared instances across runs (smoke 20 + dev 100) | Dedupe by instance_id per (model, variant) group | comparison.py |
+| M5: smoke gate vacuous-pass edges (multi-prompt last-wins, missing variant, corrupt JSON, 0-result run writing `{}` baseline) | Prompt-keyed `model:variant:prompt` baseline keys; missing-from-baseline → exit 1; corrupt JSON → exit 1; empty aggregate → exit 1 | cli.py `_smoke_gate` |
+| tier_seed dead config | `_run_split` + prompt_ab_test now seed with `config.tier_seed` | harness.py, prompt_ab_test.py |
+| Test gaps (primary swebench path had ZERO coverage) | NEW `tests/test_eval_review_fixes.py` (18 tests): smoke gate (write/drop/update/corrupt/empty/missing), `estimate_run_cost`, `paired_significance` variant pairing, `extract_model_metrics` dedupe, `munge_instance_id`/`swebench_image` naming, `_reset_to_base` raises, error-dict → `run_example_from_output` with latency | tests/ |
+
+**Audit verdict:** architecture sound; 4 correctness bugs (C1-C4) would corrupt results exactly in the designed fallback scenarios — all fixed before live smoke. Still unverified at runtime: swebench_fn lazy registration during active `app.run()` — 1-instance Modal probe before the 20-instance smoke. Cost note: Modal A100-80GB = $2.50/hr (code constant 0.0167/min is the A10G rate — inference estimate low by 2.5×; corrected in Phase 8 telemetry), CPU $0.0236/vCPU-hr.
+
+### W&B Gap Features + DoD Cleanup (2026-08-01) — **668 tests passing**
+
+Closed three audit-listed gaps (user-approved) plus three DoD items:
+
+| Item | Fix | Where |
+|------|-----|-------|
+| Phase 6 dependency: W&B Registry champion alias (claimed in old DoD #8, never built) | `promote_champion_to_registry(champion_key, config)` + `_clear_champion_alias`: lazy wandb, links best variant's checkpoint artifact to `eval-champion` collection with `champion` alias, returns summary str or None (never raises). Wired into `compare` after `revalidate_champion` | comparison.py, cli.py |
+| Old §8: latency p50/p95 scalars | NEW `latency_percentiles(results)` (nearest-rank p95, excludes 0 latencies) + `log_eval_run` writes `eval/{model}/{variant}/{prompt}/latency_p50\|p95` | harness.py |
+| Artifact lineage | NEW `_link_model_lineage`: `use_artifact(model-checkpoint:latest)` per variant BEFORE `log_artifact(eval-results)` in same cached run | harness.py |
+| DoD: README had zero eval coverage | NEW "Run Eval" section: tiers, smoke gate + baseline path, champion promotion, cost | README.md |
+| DoD: broken console script `eval = evaluation.run_eval:app` (module didn't exist) | → `evaluation.cli:app` (verified imports, `app.info.name == "eval"`) | pyproject.toml |
+| DoD: dead dep `swebench>=1.1.0` (nothing imports it) | Removed from `[project.optional-dependencies].eval` (docker kept) | pyproject.toml |
+
+### Scope Changes
+
+| Change | Added/Removed/Modified | Justification |
+|--------|------------------------|---------------|
+| `evaluation/swe_agent.py`, `serve.py`, `tests/test_swe_agent.py` | Removed | Agentic path deleted per user mandate |
+| `evaluation/stats.py` + `tests/test_eval_stats.py` | Added | Wilson CI, McNemar, paired bootstrap (recruiter-visible rigor) |
+| `evaluation/test_runner.py` | Modified | swebench_fn registry, `_execute_instance`, `run_swebench_instance`, `_run_swebench_instance_body`, munge_instance_id, run_tests_batch per-job test_patch |
+| `evaluation/harness.py` | Modified | `_run_tests_swebench` seam, run_batch (repo, base_sha) grouping + routing, `estimate_run_cost`, cost_usd on EvalRun |
+| `evaluation/schema.py` | Modified | `cost_usd` on EvalRun; Method literal without swe_agent |
+| `evaluation/cli.py` | Modified | `--mode` tiers, smoke gate `_smoke_gate`, `_run_best_f2p`, compare cost + paired significance |
+| `evaluation/comparison.py` | Modified | f2p_95ci column, `paired_significance` |
+| `evaluation/config.py` | Modified | tier_sizes, tier_seed, use_swebench_images, max_parallel 16 |
+| `tests/conftest.py` | Modified | autouse fixture also disables `_run_tests_swebench` |
+
+### Metrics / Observations
+
+- **668 tests passing** (was 663; +3 gap features, +2 stats), all offline
+- Test-exec wall estimate: smoke ~3-5 min, dev ~8-10 min, final ~20-25 min, full ~40-60 min (vs old ~10 min/instance)
+- Est. project eval spend: ~$20-25 one-time + ~$0.10 per CI smoke run
+- **Deferred:** CI eval workflow (Phase 7), execution feedback (v2), Optuna (v2); live Modal smoke pending user credentials
+
+---
+
 ## Phase 6: Inference API (Serverless vLLM on Modal) — YYYY-MM-DD
 
 ### Deviation Log
