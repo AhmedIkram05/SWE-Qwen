@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from evaluation.config import EvalConfig
 from evaluation.metrics import aggregate_metrics
 from evaluation.schema import EvalResult, EvalRun, F2PMetrics
+from evaluation.stats import mcnamar_p, paired_bootstrap_ci, wilson_ci
 from scripts.f2p_proxy import compute_proxy_f2p_scores, select_champion
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,10 @@ def extract_model_metrics(runs: list[EvalRun]) -> dict[str, F2PMetrics]:
     ``aggregate_metrics`` so that one run per (model, variant) pair is
     produced regardless of how the runs were split.
 
+    Shared instances across runs (e.g. a smoke-20 run then a dev-100 run of
+    the same tier subset) are deduped by ``instance_id`` — last occurrence
+    wins — so overlapping evaluations are not double-counted.
+
     Args:
         runs: Evaluation runs to aggregate.
 
@@ -81,7 +86,18 @@ def extract_model_metrics(runs: list[EvalRun]) -> dict[str, F2PMetrics]:
     for run in runs:
         for result in run.results:
             grouped[f"{result.model_name}:{result.variant}"].append(result)
-    return {key: aggregate_metrics(results) for key, results in grouped.items()}
+    merged: dict[str, F2PMetrics] = {}
+    for key, results in grouped.items():
+        seen: set[str] = set()
+        deduped: list[EvalResult] = []
+        for result in results:
+            if result.instance_id:
+                if result.instance_id in seen:
+                    continue
+                seen.add(result.instance_id)
+            deduped.append(result)
+        merged[key] = aggregate_metrics(deduped)
+    return merged
 
 
 def revalidate_champion(
@@ -168,11 +184,14 @@ def compare_and_report(metrics: dict[str, F2PMetrics], proxy_champion: str | Non
     champion = max(passing, key=lambda key: metrics[key].f2p_rate) if passing else None
 
     lines = [
-        "| model | variant | total | f2p_rate | p2p_rate | avg_latency | flaky_rate | note |",
-        "|---|---|---|---|---|---|---|---|",
+        "| model | variant | total | f2p_rate | f2p_95ci | p2p_rate | avg_latency | flaky_rate | note |",  # noqa: E501
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for key, m in ranked:
         model, _, variant = key.partition(":")
+        # f2p_rate is the mean partial credit; bound the SAME statistic the
+        # table displays (f2p_count counts instances with ANY pass).
+        lo, hi = wilson_ci(round(m.f2p_rate * m.total_examples), m.total_examples)
         notes = []
         if proxy_champion is not None and (
             key == proxy_champion or key.endswith(f":{proxy_champion}")
@@ -185,10 +204,57 @@ def compare_and_report(metrics: dict[str, F2PMetrics], proxy_champion: str | Non
         if m.f2p_rate < _MIN_F2P_RATE:
             notes.append("[rejected: f2p<15%]")
         lines.append(
-            f"| {model} | {variant} | {m.total_examples} | {m.f2p_rate:.2%} | {m.p2p_rate:.2%} "
-            f"| {m.avg_latency:.2f} | {m.flaky_test_rate:.2%} | {' '.join(notes)} |"
+            f"| {model} | {variant} | {m.total_examples} | {m.f2p_rate:.2%} | {lo:.1%}-{hi:.1%} "
+            f"| {m.p2p_rate:.2%} | {m.avg_latency:.2f} | {m.flaky_test_rate:.2%} "
+            f"| {' '.join(notes)} |"
         )
     return "\n".join(lines)
+
+
+def paired_significance(a: EvalRun, b: EvalRun) -> str:
+    """McNemar + paired-bootstrap significance between two runs.
+
+    Per-instance F2P outcomes (0/1) are keyed by ``model:variant`` first,
+    then instance ID, and the SAME variant is paired across runs — this is
+    what makes runs comparable (e.g. prompt A/B runs both evaluating
+    ``baseline_14b`` on the same seed-42 subset). Variants evaluated in
+    only one run are ignored. One line per shared variant.
+
+    Returns a short markdown block.
+    """
+    a_vars: dict[str, dict[str, float]] = defaultdict(dict)
+    b_vars: dict[str, dict[str, float]] = defaultdict(dict)
+    for r in a.results:
+        if r.instance_id:
+            a_vars[f"{r.model_name}:{r.variant}"][r.instance_id] = 1.0 if r.f2p > 0 else 0.0
+    for r in b.results:
+        if r.instance_id:
+            b_vars[f"{r.model_name}:{r.variant}"][r.instance_id] = 1.0 if r.f2p > 0 else 0.0
+    shared_variants = sorted(set(a_vars) & set(b_vars))
+    if not shared_variants:
+        return (
+            "_no variant evaluated in both runs — paired significance skipped "
+            "(compare runs that share a variant name, e.g. prompt A/B on one variant)_"
+        )
+
+    lines: list[str] = []
+    for variant in shared_variants:
+        a_f2p, b_f2p = a_vars[variant], b_vars[variant]
+        shared = [i for i in a_f2p if i in b_f2p]
+        if not shared:
+            continue
+        b01 = sum(1 for i in shared if a_f2p[i] < b_f2p[i])  # a lost, b won
+        b10 = sum(1 for i in shared if a_f2p[i] > b_f2p[i])  # a won, b lost
+        p = mcnamar_p(b01, b10)
+        lo, hi, diff = paired_bootstrap_ci([a_f2p[i] for i in shared], [b_f2p[i] for i in shared])
+        lines.append(
+            f"- {variant}: F2P diff {diff:+.2%} "
+            f"(bootstrap 95% CI {lo:+.2%} to {hi:+.2%}), "
+            f"McNemar p={p:.4f}{'' if p < 0.05 else ' (n.s.)'} (n={len(shared)})"  # noqa: PLR2004
+        )
+    if not lines:
+        return "_shared variants have no overlapping instances — paired significance skipped_"
+    return f"paired significance ({a.run_id} vs {b.run_id}):\n" + "\n".join(lines)
 
 
 def revalidate_proxy_champion(
@@ -226,6 +292,73 @@ def revalidate_proxy_champion(
     return revalidate_champion(
         metrics, proxy_champion, config.min_f2p_threshold, config.min_p2p_threshold
     )
+
+
+def _clear_champion_alias(api, config: EvalConfig) -> None:
+    """Remove the ``champion`` alias from any artifact currently holding it."""
+    try:
+        collection = api.artifact_collection("eval-champion")
+        for member in collection.artifacts:
+            if "champion" in member.aliases:
+                member.aliases.remove("champion")
+                member.save()
+                logger.info("cleared 'champion' alias from %s", member.name)
+    except Exception:  # noqa: BLE001 — W&B must never break the harness
+        logger.warning("failed to clear previous W&B champion alias", exc_info=True)
+
+
+def promote_champion_to_registry(champion_key: str, config: EvalConfig) -> str | None:
+    """Link the champion's Phase 4 model artifact to W&B Registry.
+
+    Creates/updates the ``eval-champion`` registry portfolio with the
+    ``champion`` alias on the champion variant's model checkpoint artifact
+    (``config.lora_artifact_pattern``).  Phase 6 consumes the champion from
+    the W&B Registry ``champion`` alias.
+
+    Best-effort: returns None (warn + skip) without wandb, without the
+    artifact, or on any failure — never raises.
+
+    Args:
+        champion_key: ``"model_name:variant"`` key (as used in metrics).
+        config: Eval config (wandb entity/project + artifact pattern).
+
+    Returns:
+        Human-readable summary, or None when skipped.
+    """
+    if not champion_key:
+        return None
+    try:
+        import wandb
+    except ImportError:
+        logger.warning("wandb not installed — skipping champion registry promotion")
+        return None
+    variant = champion_key.partition(":")[2]
+    artifact_name = config.lora_artifact_pattern.format(variant=variant)
+    qualified = f"{config.wandb_entity}/{config.wandb_project}/{artifact_name}:latest"
+    try:
+        api = wandb.Api(timeout=30)
+        artifact = api.artifact(qualified)
+    except Exception:  # noqa: BLE001
+        logger.warning("champion artifact %s not found in W&B — skipping promotion", qualified)
+        return None
+    try:
+        run = wandb.init(
+            entity=config.wandb_entity,
+            project=config.wandb_project,
+            job_type="eval-promote",
+            name=f"promote-{champion_key}",
+            reinit=True,
+        )
+        try:
+            _clear_champion_alias(api, config)
+            run.link_artifact(artifact, "eval-champion", aliases=["champion"])
+        finally:
+            run.finish()
+        logger.info("W&B Registry: champion alias -> %s", artifact_name)
+        return f"W&B Registry: champion alias -> {artifact_name}"  # noqa: TRY300
+    except Exception:  # noqa: BLE001
+        logger.warning("W&B champion promotion failed", exc_info=True)
+        return None
 
 
 # ── Loading helpers ────────────────────────────────────────────────────────
