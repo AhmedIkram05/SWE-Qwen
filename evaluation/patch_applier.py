@@ -71,7 +71,9 @@ def _files_from_patch(patch: str) -> list[str]:
     return files
 
 
-def apply_patch_git(repo_path: Path, patch: str, base_sha: str) -> PatchApplicationResult:
+def apply_patch_git(
+    repo_path: Path, patch: str, base_sha: str, *, skip_checkout: bool = False
+) -> PatchApplicationResult:
     """Check out *base_sha*, then ``git apply`` the patch.
 
     Steps: ``git checkout --quiet <base_sha>`` → ``git apply --check
@@ -81,19 +83,24 @@ def apply_patch_git(repo_path: Path, patch: str, base_sha: str) -> PatchApplicat
         repo_path: Git repository root.
         patch: Unified diff (git format preferred).
         base_sha: Commit to reset the working tree to before applying.
+        skip_checkout: If True, skip the ``git checkout`` step (caller already
+            reset to ``base_sha``). Avoids redundant checkout on FUSE volumes.
 
     Returns:
         ``method_used="git_apply"`` on success, ``"failed"`` otherwise.
     """
     if not patch.strip():
         return PatchApplicationResult(success=False, method_used="failed", error="patch is empty")
-    try:
-        _run_git(repo_path, ["checkout", "--quiet", base_sha])
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        logger.warning("git checkout %s failed in %s: %s", base_sha, repo_path, exc)
-        return PatchApplicationResult(
-            success=False, method_used="failed", error=f"checkout {base_sha}: {_error_message(exc)}"
-        )
+    if not skip_checkout:
+        try:
+            _run_git(repo_path, ["checkout", "--quiet", base_sha])
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            logger.warning("git checkout %s failed in %s: %s", base_sha, repo_path, exc)
+            return PatchApplicationResult(
+                success=False,
+                method_used="failed",
+                error=f"checkout {base_sha}: {_error_message(exc)}",
+            )
     try:
         _run_git(repo_path, ["apply", "--check", "--quiet", "-"], patch)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -241,19 +248,23 @@ def _apply_file_change(target: Path, pfile: PatchedFile) -> None:
         raise exception_container[0]
 
 
-def apply_patch(repo_path: Path, patch: str, base_sha: str) -> PatchApplicationResult:
+def apply_patch(
+    repo_path: Path, patch: str, base_sha: str, *, skip_checkout: bool = False
+) -> PatchApplicationResult:
     """Main entry: ``git apply`` first, unidiff manual apply as fallback.
 
     Args:
         repo_path: Working directory (git repo preferred).
         patch: Unified diff.
         base_sha: Commit to reset the working tree to before applying.
+        skip_checkout: If True, skip the ``git checkout`` step (caller already
+            reset to ``base_sha``).
 
     Returns:
         The successful result (git or unidiff), or
         ``method_used="failed"`` when both attempts fail.
     """
-    result = apply_patch_git(repo_path, patch, base_sha)
+    result = apply_patch_git(repo_path, patch, base_sha, skip_checkout=skip_checkout)
     if result.success:
         return result
     logger.warning("git apply failed (%s), trying unidiff fallback", result.error)
