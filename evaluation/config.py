@@ -39,7 +39,10 @@ class EvalConfig(BaseSettings):
     repo_timeout_seconds: int = 300
     max_retries: int = 2
     flaky_threshold: float = 0.5  # if pass rate < 0.5 across retries → flaky
-    max_parallel: int = 4  # parallel test jobs (fallback/batch paths)
+    max_parallel: int = 16  # parallel test jobs (fallback/batch paths)
+    use_swebench_images: bool = (
+        True  # official per-repo swebench images; clone/install fallback  # noqa: E501
+    )
 
     # Quality gates (ADR-005, Master Plan S2)
     min_f2p_threshold: float = 0.15  # Quality floor: minimum F2P to pass
@@ -61,6 +64,10 @@ class EvalConfig(BaseSettings):
     # Comparison
     comparison_run_ids: str = ""  # comma-separated run IDs for champion selection
     proxy_champion_fallback: str = "baseline_14b"  # fallback when P4 inputs unavailable
+
+    # Eval tiers (EVAL-V5-REDESIGN §2)
+    tier_sizes: dict[str, int] = {"smoke": 20, "dev": 100, "final": 500, "full": 0}
+    tier_seed: int = 42  # deterministic subsets → paired significance
 
     model_config = SettingsConfigDict(
         env_prefix="EVAL_",
