@@ -50,6 +50,7 @@ BASE_IMAGE = (
         "zlib1g-dev",  # matplotlib
     )
     .pip_install(
+        # Test runner deps
         "pytest>=7.0,<8.0",  # <8: old repos import _pytest.monkeypatch.notset (removed in 8)
         "pytest-timeout>=2.3",
         "pytest-json-report>=1.5",
@@ -57,9 +58,16 @@ BASE_IMAGE = (
         "unidiff>=0.7",
         "pydantic>=2.10.0",
         "pydantic-settings>=2.7.0",
-        "numpy",  # matplotlib, scikit-learn
-        "setuptools>=65.0",  # many old repos
-        "wheel",  # build wheels
+        # Heavy common deps pre-installed to avoid per-repo compile (scikit-learn needs these)
+        "numpy",
+        "scipy",
+        "pandas",
+        "joblib",
+        "threadpoolctl",
+        "scikit-learn",
+        # Build deps
+        "setuptools>=65.0",
+        "wheel",
     )
 )
 
@@ -251,30 +259,53 @@ def _parse_stdout_report(stdout: str) -> dict[str, _Attempt] | None:
     return attempts or None
 
 
-def _run_pytest_once(
+def _run_pytest_once(  # noqa: PLR0912
     repo_path: Path,
     test_names: list[str],
     timeout: int,
+    python_cmd: list[str] | None = None,
 ) -> tuple[dict[str, _Attempt], list[str]]:
     """Run pytest once in ``repo_path`` and return per-name attempts.
 
     ``test_names`` empty means "run the full suite" (results keyed by node ID).
     The subprocess bound is capped below the Modal function timeout so the
     function can return gracefully instead of being killed.
+
+    ``python_cmd`` overrides the interpreter (e.g. ``["conda", "run", "-n",
+    "testbed", "python"]`` on official SWE-bench images).  Defaults to the
+    venv/python heuristic below.
     """
     import time
 
     start_time = time.time()
 
     # ponytail: derive venv python from repo_path (mirrors _install_repo logic)
-    python = sys.executable
-    if (Path("/test_cache") / repo_path.name / ".venv" / "bin" / "python").exists():
-        python = str(Path("/test_cache") / repo_path.name / ".venv" / "bin" / "python")
+    # Search for .venv created by _install_repo.  The venv lives at:
+    #   - {cache_dir}/{repo_name}/.venv  (cache_dir=/test_cache on Modal,
+    #     or {repos_dir} on local).  On local the venv is a SIBLING of the
+    #     repo dir, not in its parent chain.
+    if python_cmd is None:
+        python_cmd = [sys.executable]
+        _venv_candidates: list[Path] = []
+        _p = repo_path.parent
+        for _ in range(3):
+            _venv_candidates.append(_p / ".venv" / "bin" / "python")
+            _p = _p.parent
+        # Also try {grandparent}/{repo_name}/.venv (local nested repos like
+        # sphinx-doc/sphinx where venv is at repos_dir/sphinx/.venv)
+        gp = repo_path.parent.parent
+        _venv_candidates.append(gp / repo_path.name / ".venv" / "bin" / "python")
+        # Modal convention
+        _venv_candidates.append(Path("/test_cache") / repo_path.name / ".venv" / "bin" / "python")
+        for _c in _venv_candidates:
+            if _c.exists():
+                python_cmd = [str(_c)]
+                break
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         report_path = Path(tmp.name)
     cmd = [
-        python,
+        *python_cmd,
         "-m",
         "pytest",
         ".",
@@ -290,7 +321,9 @@ def _run_pytest_once(
     if test_names:
         cmd += ["-k", _build_k_expression(test_names)]
     if Path("/test_cache").is_dir():
-        cmd += ["-o", "cache_dir=/test_cache/pytest-cache"]
+        # ponytail: per-process cache dir — 16 containers sharing one
+        # pytest-cache dir contended on the volume lock; pid is unique per container
+        cmd += ["-o", f"cache_dir=/test_cache/pytest-cache-{os.getpid()}"]
     subprocess_timeout = min(max(120, timeout * max(len(test_names) * 3, 12) + 60), 240)
 
     # Add a safety margin to the timeout
@@ -343,6 +376,7 @@ def collect_test_results(
     test_names: list[str],
     timeout: int = 30,
     max_retries: int = 2,
+    python_cmd: list[str] | None = None,
 ) -> list[TestResult]:
     """Run the given tests with retries and return per-test results.
 
@@ -352,6 +386,7 @@ def collect_test_results(
             run the full suite once (baseline sanity).
         timeout: Per-test timeout in seconds (``pytest --timeout``).
         max_retries: Extra runs for tests that failed/errored (flaky detection).
+        python_cmd: Interpreter override (see ``_run_pytest_once``).
 
     Returns:
         One ``TestResult`` per requested test; status comes from
@@ -401,7 +436,7 @@ def collect_test_results(
             if not pending:
                 break
             run_names = pending
-        per_run, nodeids = _run_pytest_once(repo_path, run_names, timeout)
+        per_run, nodeids = _run_pytest_once(repo_path, run_names, timeout, python_cmd=python_cmd)
         if full_suite:
             for nodeid in nodeids:
                 attempts.setdefault(nodeid, []).append(per_run[nodeid])
@@ -481,19 +516,33 @@ def _ensure_checked_out(repo_dir: Path, base_sha: str) -> None:
 
 
 def _reset_to_base(repo_dir: Path, base_sha: str) -> None:
-    """Revert working tree to ``base_sha`` (drops applied patches and stray files)."""
-    _run_git(repo_dir, "reset", "--hard", base_sha)
+    """Revert working tree to ``base_sha`` (drops applied patches and stray files).
+
+    Raises RuntimeError if the reset fails (e.g. ``base_sha`` not present in
+    this checkout's history) — a silent no-op would evaluate the wrong state.
+    """
+    proc = _run_git(repo_dir, "reset", "--hard", base_sha)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"git reset --hard {base_sha} failed in {repo_dir}: {proc.stderr.strip()[:300]}"
+        )
     _run_git(repo_dir, "clean", "-fd")
 
 
-def _install_repo(repo_dir: Path, timeout: int = 300) -> None:
+def _install_repo(repo_dir: Path, timeout: int = 900, cache_dir: str | Path | None = None) -> None:
     """Install the repo package so tests can import it.
 
-    Uses a cached venv in /test_cache to avoid rebuilding on every Modal spin-up.
-    Tries pyproject.toml, setup.py, setup.cfg. Idempotent and fast on retry.
+    Uses a cached venv (default ``/test_cache`` for Modal, configurable for
+    local execution) to avoid rebuilding on every run.  Tries pyproject.toml,
+    setup.py, setup.cfg.  Idempotent and fast on retry.
+
+    Args:
+        repo_dir: Checked-out repository root.
+        timeout: Timeout for pip install in seconds.
+        cache_dir: Directory to store cached venvs.  Defaults to ``/test_cache``.
     """
     # ponytail: cache venv in persistent volume so pip install runs once per repo
-    test_cache = Path("/test_cache")
+    test_cache = Path(cache_dir or "/test_cache")
     repo_name = repo_dir.name
     venv_dir = test_cache / repo_name / ".venv"
     marker = venv_dir / (repo_dir.name + ".installed")
@@ -550,13 +599,154 @@ def _activate_venv(venv_dir: Path) -> None:
     os.environ["PATH"] = venv_bin + os.pathsep + env_path
 
 
+# ── SWE-bench official images ────────────────────────────────────────────────
+
+
+def munge_instance_id(instance_id: str) -> str:
+    """SWE-bench Docker-tag safety: ``django__django-10554`` -> ``django_1776_django-10554``."""
+    return instance_id.replace("__", "_1776_")
+
+
+def swebench_image(instance_id: str) -> modal.Image:
+    """Official prebuilt per-instance SWE-bench eval image.
+
+    ``swebench/sweb.eval.x86_64.<instance>:latest`` has ``/testbed`` checked
+    out at the instance's base commit (plus a marker "SWE-bench" commit on
+    top) and a conda env ``testbed`` with the project already installed —
+    zero clone, zero pip install at eval time.
+    """
+    return modal.Image.from_registry(
+        f"swebench/sweb.eval.x86_64.{munge_instance_id(instance_id)}:latest"
+    )
+
+
+def _execute_instance(  # noqa: PLR0913, PLR0917
+    repo_dir: Path,
+    base_sha: str,
+    test_patch: str | None,
+    generated_patch: str | None,
+    fail_to_pass: list[str],
+    pass_to_pass: list[str],
+    timeout: int,
+    max_retries: int,
+    python_cmd: list[str] | None = None,
+    reset_first: bool = True,
+) -> dict[str, Any]:
+    """Run the full per-instance eval test sequence against ``repo_dir``.
+
+    Assumes ``repo_dir`` is a git checkout whose history contains
+    ``base_sha`` (swebench image or cloned/installed repo).  Sequence:
+
+    1. Hard-reset to ``base_sha`` (drops any applied patches).
+    2. ``tests_before``: selected tests at base state (no retries).
+    3. Apply ground-truth ``test_patch`` -> ``tests_head`` -> ground truth.
+    4. Reset again; apply ``generated_patch`` -> ``tests_after`` (with retries).
+
+    Returns the same result-dict shape as ``run_tests_in_container``.
+    """
+    from evaluation.metrics import compute_f2p
+    from evaluation.patch_applier import apply_patch
+    from evaluation.schema import PatchApplicationResult
+
+    fail_to_pass = fail_to_pass or []
+    pass_to_pass = pass_to_pass or []
+    test_names = [*fail_to_pass, *pass_to_pass]
+
+    if reset_first:
+        _reset_to_base(repo_dir, base_sha)
+
+    # ponytail: baseline runs use max_retries=0 — flaky detection only matters for the final eval
+    tests_before = collect_test_results(
+        repo_dir, test_names, timeout=timeout, max_retries=0, python_cmd=python_cmd
+    )
+
+    tests_head: list[TestResult] = []
+    ground_truth: dict[str, Any] = {}
+    error: str | None = None
+    if test_patch:
+        patch_result = apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
+        if patch_result.success:
+            tests_head = collect_test_results(
+                repo_dir, test_names, timeout=timeout, max_retries=0, python_cmd=python_cmd
+            )
+            f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
+                tests_before, tests_head, fail_to_pass, pass_to_pass
+            )
+            ground_truth = {
+                "f2p": f2p,
+                "p2p": p2p,
+                "warning": f2p < _GT_F2P_THRESHOLD,
+            }
+            if f2p < _GT_F2P_THRESHOLD:
+                # Env drift / broken image: the test patch should make ALL
+                # F2P tests pass.  Without this the instance would score as a
+                # model failure indistinguishable from a genuine regression.
+                error = "ground truth F2P<100% (env drift or missing image?)"
+                logger.error("%s for %s", error, repo_dir)
+        else:
+            logger.warning("test_patch application failed for %s: %s", repo_dir, patch_result.error)
+    else:
+        logger.info("no test_patch for %s — skipping ground truth verification", repo_dir)
+
+    _reset_to_base(repo_dir, base_sha)
+
+    if error is not None:
+        # Ground truth broken → generated-patch tests are meaningless; short-circuit.
+        return {
+            "repo": repo_dir.name if str(repo_dir) == "/testbed" else str(repo_dir),
+            "base_sha": base_sha,
+            "tests_before": [t.model_dump() for t in tests_before],
+            "tests_head": [t.model_dump() for t in tests_head],
+            "tests_after": [],
+            "patch_application": {},
+            "ground_truth": ground_truth,
+            "error": error,
+        }
+
+    tests_after: list[TestResult] = []
+    if generated_patch:
+        patch_result = apply_patch(repo_dir, generated_patch, base_sha)
+        if patch_result.success:
+            tests_after = collect_test_results(
+                repo_dir,
+                test_names,
+                timeout=timeout,
+                max_retries=max_retries,
+                python_cmd=python_cmd,
+            )
+        else:
+            logger.warning(
+                "generated patch application failed for %s: %s",
+                repo_dir,
+                patch_result.error,
+            )
+    else:
+        patch_result = PatchApplicationResult(
+            success=False,
+            method_used="failed",
+            error="no generated patch provided",
+        )
+        logger.info("no generated patch for %s — skipping patch tests", repo_dir)
+
+    return {
+        "repo": repo_dir.name if str(repo_dir) == "/testbed" else str(repo_dir),
+        "base_sha": base_sha,
+        "tests_before": [t.model_dump() for t in tests_before],
+        "tests_head": [t.model_dump() for t in tests_head],
+        "tests_after": [t.model_dump() for t in tests_after],
+        "patch_application": patch_result.model_dump(),
+        "ground_truth": ground_truth,
+        "error": error,
+    }
+
+
 # ── Modal function ────────────────────────────────────────────────────────────
 
 
 @app.function(
     image=BASE_IMAGE,
     volumes={"/repo_cache": repo_volume, "/test_cache": test_volume},
-    timeout=300,
+    timeout=1800,  # 30 min: heavy repos (scikit-learn) need 10-15 min for pip install -e .
     gpu=None,  # CPU only for test execution
 )
 def run_tests_in_container(  # noqa: PLR0913, PLR0917
@@ -628,6 +818,7 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
 
     tests_head: list[TestResult] = []
     ground_truth: dict[str, Any] = {}
+    error: str | None = None
     if test_patch:
         # Caller already checked out base_sha; skip the redundant checkout
         patch_result = apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
@@ -644,18 +835,26 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
                 "warning": f2p < _GT_F2P_THRESHOLD,
             }
             if f2p < _GT_F2P_THRESHOLD:
-                logger.warning(
-                    "ground truth F2P=%.2f%% < 100%% for %s "
-                    "— test patch may be incomplete or repo state drifted",
-                    f2p * 100,
-                    repo,
-                )
+                error = "ground truth F2P<100% (env drift or install incomplete?)"
+                logger.error("%s for %s", error, repo)
         else:
             logger.warning("test_patch application failed for %s: %s", repo, patch_result.error)
     else:
         logger.info("no test_patch for %s — skipping ground truth verification", repo)
 
     _reset_to_base(repo_dir, base_sha)
+
+    if error is not None:
+        return {
+            "repo": repo,
+            "base_sha": base_sha,
+            "tests_before": [t.model_dump() for t in tests_before],
+            "tests_head": [t.model_dump() for t in tests_head],
+            "tests_after": [],
+            "patch_application": {},
+            "ground_truth": ground_truth,
+            "error": error,
+        }
 
     tests_after: list[TestResult] = []
     if generated_patch:
@@ -687,16 +886,128 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
         "tests_after": [t.model_dump() for t in tests_after],
         "patch_application": patch_result.model_dump(),
         "ground_truth": ground_truth,
+        "error": error,
     }
 
 
 # ── Batch Modal function ──────────────────────────────────────────────────
 
 
+def _run_swebench_instance_body(  # noqa: PLR0913, PLR0917
+    instance_id: str,
+    base_sha: str,
+    test_patch: str | None = None,
+    generated_patch: str | None = None,
+    fail_to_pass: list[str] | None = None,
+    pass_to_pass: list[str] | None = None,
+    timeout: int = 30,
+    max_retries: int = 2,
+) -> dict[str, Any]:
+    """Execute one SWE-bench instance inside an official swebench image.
+
+    ``swebench/sweb.eval.x86_64.<instance>:latest`` ships ``/testbed`` (the
+    repo with full git history, checked out at the instance base commit plus a
+    marker "SWE-bench" commit on top) and a conda env ``testbed`` with the
+    project already installed.  No clone, no pip install at eval time.
+
+    Registered once per REPO by ``swebench_fn`` (one image per repo is enough:
+    every instance's base commit exists in the image's git history, so
+    ``git reset --hard`` + the ground-truth check cover per-instance state).
+    """
+    repo_dir = Path("/testbed")
+
+    # ponytail: bake pytest-json-report/pytest-timeout into a custom image if
+    # this per-container install ever dominates (it's ~10-20s, parallel across
+    # instances, so leave it)
+    try:
+        probe = subprocess.run(
+            [
+                "conda",
+                "run",
+                "-n",
+                "testbed",
+                "python",
+                "-c",
+                "import pytest_jsonreport, pytest_timeout",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,  # we check returncode below
+        )
+        if probe.returncode != 0:
+            subprocess.run(
+                [
+                    "conda",
+                    "run",
+                    "-n",
+                    "testbed",
+                    "python",
+                    "-m",
+                    "pip",
+                    "install",
+                    "-q",
+                    "pytest-json-report",
+                    "pytest-timeout",
+                ],
+                timeout=180,
+                check=True,
+            )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+        logger.exception("test plugin setup failed for %s", instance_id)
+        return {
+            "repo": instance_id,
+            "base_sha": base_sha,
+            "error": f"plugin setup failed: {exc}",
+            "tests_before": [],
+            "tests_head": [],
+            "tests_after": [],
+            "patch_application": {},
+            "ground_truth": {},
+        }
+
+    result = _execute_instance(
+        repo_dir,
+        base_sha,
+        test_patch,
+        generated_patch,
+        fail_to_pass or [],
+        pass_to_pass or [],
+        timeout=timeout,
+        max_retries=max_retries,
+        python_cmd=["conda", "run", "-n", "testbed", "python"],
+    )
+    result["repo"] = instance_id  # /testbed name is useless; carry the real id
+    return result
+
+
+_swebench_fns: dict[str, Any] = {}
+
+
+def swebench_fn(repo: str, instance_id: str) -> Any:
+    """Lazily register ONE Modal function per repo on an official swebench image.
+
+    Modal 1.5.x cannot swap ``image`` per call (``with_options`` has no image
+    param), and images are per-instance, so we register one function per repo
+    on first use — taking any instance of that repo as the image (full git
+    history + editable install make it valid for every instance of the repo).
+    """
+    fn = _swebench_fns.get(repo)
+    if fn is None:
+        fn = app.function(
+            image=swebench_image(instance_id),
+            volumes={"/test_cache": test_volume},
+            timeout=900,  # 15 min per instance (conda install of 2 plugins + tests)
+            gpu=None,  # CPU only for test execution
+        )(_run_swebench_instance_body)
+        _swebench_fns[repo] = fn
+    return fn
+
+
 @app.function(
     image=BASE_IMAGE,
     volumes={"/repo_cache": repo_volume, "/test_cache": test_volume},
-    timeout=600,
+    timeout=3600,  # 60 min: batch runs multiple repos, each may need 15 min for pip install
     gpu=None,
 )
 def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
@@ -709,15 +1020,20 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
 ) -> list[dict[str, Any]]:
     """Execute test suites for multiple patches in a single container.
 
-    One container per repo: clone once, checkout once, run tests_before and
-    tests_head ONCE (shared base state), then run tests_after per patch.
+    One container per (repo, base_sha): clone once, checkout once, install
+    once, run ``tests_before`` once, then per job: apply ground-truth
+    ``test_patch`` (per-job, with a shared-head fast path when all jobs share
+    it), verify ground truth, reset, apply the generated patch and run
+    ``tests_after``.
 
     Args:
         repo: GitHub repo ``"owner/name"``.
         base_sha: Commit to evaluate against.
-        test_patch: Ground-truth test changes, or None.
+        test_patch: Default ground-truth test changes; jobs may override via
+            their own ``test_patch`` key (SWE-bench instances in the same repo
+            have distinct test patches).
         test_jobs: Per-job dicts with ``generated_patch``, ``fail_to_pass``,
-            ``pass_to_pass``.
+            ``pass_to_pass``, and optionally ``test_patch`` / ``instance_id``.
         timeout: Per-test timeout in seconds.
         max_retries: Extra attempts for failed/errored tests.
 
@@ -754,71 +1070,56 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
         return [dict(error_result) for _ in test_jobs]
 
     # ── Shared: tests_before (same base state for all jobs) ──
-    # Collect all test names across jobs for the shared baseline run
     all_test_names: list[str] = []
     for job in test_jobs:
         all_test_names.extend(job.get("fail_to_pass") or [])
         all_test_names.extend(job.get("pass_to_pass") or [])
     all_test_names = list(set(all_test_names))
 
-    tests_before = collect_test_results(
-        repo_dir, all_test_names, timeout=timeout, max_retries=max_retries
-    )
+    # ponytail: baseline runs use max_retries=0 — flaky detection only matters for the final eval
+    tests_before = collect_test_results(repo_dir, all_test_names, timeout=timeout, max_retries=0)
 
-    # ── Shared: tests_head (ground-truth verification, computed once) ──
-    tests_head: list[TestResult] = []
-    ground_truth: dict[str, Any] = {}
-    if test_patch:
-        # ponytail: _ensure_checked_out already set base_sha — skip redundant checkout
-        patch_result = apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
+    # ── Per-job ground-truth verification ──
+    # SWE-bench instances in the same repo have DIFFERENT test patches, so the
+    # old "shared tests_head from the first job" logic was wrong for jobs 2+.
+    # Fast path: when every job shares one test patch, run tests_head once.
+    job_test_patches = [job.get("test_patch") or test_patch or "" for job in test_jobs]
+    shared_test_patch = job_test_patches[0] if len(set(job_test_patches)) == 1 else None
+
+    shared_tests_head: list[TestResult] = []
+    if shared_test_patch:
+        patch_result = apply_patch(repo_dir, shared_test_patch, base_sha, skip_checkout=True)
         if patch_result.success:
             _install_repo(repo_dir)
             # ponytail: ground truth uses max_retries=0 — flaky detection is for eval only
-            tests_head = collect_test_results(
+            shared_tests_head = collect_test_results(
                 repo_dir, all_test_names, timeout=timeout, max_retries=0
             )
-            # Use first job's fail_to_pass/pass_to_pass for ground truth
-            first_job = test_jobs[0] if test_jobs else {}
-            f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
-                tests_before,
-                tests_head,
-                first_job.get("fail_to_pass") or [],
-                first_job.get("pass_to_pass") or [],
-            )
-            ground_truth = {
-                "f2p": f2p,
-                "p2p": p2p,
-                "warning": f2p < _GT_F2P_THRESHOLD,
-            }
-            if f2p < _GT_F2P_THRESHOLD:
-                logger.warning(
-                    "ground truth F2P=%.2f%% < 100%% for %s",
-                    f2p * 100,
-                    repo,
-                )
         else:
             logger.warning("test_patch application failed for %s: %s", repo, patch_result.error)
 
-    # ── Per-job: reset, apply generated patch, run tests_after ──
+    # ── Per-job: reset, ground truth, apply generated patch, run tests_after ──
     results: list[dict[str, Any]] = []
     for i, job in enumerate(test_jobs):
         # Check if we're taking too long
         elapsed = time.time() - start_time
-        batch_timeout_warn = 540
-        if elapsed > batch_timeout_warn:  # 9 minutes, leaving 1 minute for cleanup
-            logger.warning("Approaching timeout for %s, truncating remaining jobs", repo)
+        # ponytail: fn timeout is 3600s — warn/truncate only when <5 min real margin
+        # remains (calibrated to the slowest first container: pip install -e of a
+        # heavy repo like scikit-learn takes 10-15 min)
+        batch_timeout_warn = 3300  # 3600s fn timeout - 300s cleanup margin
+        if elapsed > batch_timeout_warn:
+            logger.warning("Approaching fn timeout for %s, truncating remaining jobs", repo)
             remaining_jobs = len(test_jobs) - i
             if remaining_jobs > 0:
-                # Return error results for remaining jobs
                 error_result = {
                     "repo": repo,
                     "base_sha": base_sha,
                     "error": "timeout approaching, truncated",
                     "tests_before": [t.model_dump() for t in tests_before],
-                    "tests_head": [t.model_dump() for t in tests_head],
+                    "tests_head": [],
                     "tests_after": [],
                     "patch_application": {},
-                    "ground_truth": ground_truth,
+                    "ground_truth": {},
                 }
                 results.extend([dict(error_result) for _ in range(remaining_jobs)])
             break
@@ -828,11 +1129,63 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
         )
         _reset_to_base(repo_dir, base_sha)
 
-        generated_patch = job.get("generated_patch") or ""
         fail_to_pass = job.get("fail_to_pass") or []
         pass_to_pass = job.get("pass_to_pass") or []
         job_test_names = [*fail_to_pass, *pass_to_pass]
 
+        # Ground-truth verification for THIS job's test patch
+        tests_head: list[TestResult] = []
+        ground_truth: dict[str, Any] = {}
+        job_error: str | None = None
+        job_test_patch = job_test_patches[i]
+        if job_test_patch:
+            if shared_tests_head:
+                tests_head = shared_tests_head
+            else:
+                patch_result = apply_patch(repo_dir, job_test_patch, base_sha, skip_checkout=True)
+                if patch_result.success:
+                    _install_repo(repo_dir)
+                    tests_head = collect_test_results(
+                        repo_dir, job_test_names, timeout=timeout, max_retries=0
+                    )
+                else:
+                    logger.warning(
+                        "test_patch application failed for %s: %s", repo, patch_result.error
+                    )
+            if tests_head:
+                f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
+                    tests_before, tests_head, fail_to_pass, pass_to_pass
+                )
+                ground_truth = {
+                    "f2p": f2p,
+                    "p2p": p2p,
+                    "warning": f2p < _GT_F2P_THRESHOLD,
+                }
+                if f2p < _GT_F2P_THRESHOLD:
+                    job_error = "ground truth F2P<100% (env drift or install incomplete?)"
+                    logger.error("%s for %s", job_error, repo)
+
+        _reset_to_base(repo_dir, base_sha)
+
+        if job_error is not None:
+            # env is broken — generated-patch tests would score as model failures
+            logger.error("Skipping generated-patch tests for %s: %s", repo, job_error)
+            results.append(
+                {
+                    "repo": repo,
+                    "base_sha": base_sha,
+                    "error": job_error,
+                    "tests_before": [t.model_dump() for t in tests_before],
+                    "tests_head": [t.model_dump() for t in tests_head],
+                    "tests_after": [],
+                    "patch_application": {},
+                    "ground_truth": ground_truth,
+                }
+            )
+            logger.info("Completed job %d/%d for %s (errored)", i + 1, len(test_jobs), repo)
+            continue
+
+        generated_patch = job.get("generated_patch") or ""
         if generated_patch:
             logger.info("Applying generated patch for job %d", i + 1)
             # ponytail: _reset_to_base already ran — skip the redundant checkout
