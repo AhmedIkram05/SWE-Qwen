@@ -39,6 +39,7 @@ class EvalConfig(BaseSettings):
     repo_timeout_seconds: int = 300
     max_retries: int = 2
     flaky_threshold: float = 0.5  # if pass rate < 0.5 across retries → flaky
+    max_parallel: int = 4  # parallel test jobs (fallback/batch paths)
 
     # Quality gates (ADR-005, Master Plan S2)
     min_f2p_threshold: float = 0.15  # Quality floor: minimum F2P to pass
