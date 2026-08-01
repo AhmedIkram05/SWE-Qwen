@@ -54,7 +54,7 @@ def run_prompt_ab_test(  # noqa: PLR0913, PLR0917 — spec-mandated public signa
             ``PromptLoader.available_templates`` (or the four known ones:
             ``system``, ``user``, ``assistant``, ``chat``).
         sample: Number of golden examples per template (0 = all), sampled
-            with ``config.ci_random_seed``.
+            with ``config.tier_seed``.
         run_id: Eval run id; generated if not provided.
 
     Returns:
@@ -68,12 +68,12 @@ def run_prompt_ab_test(  # noqa: PLR0913, PLR0917 — spec-mandated public signa
 
     examples = harness.load_examples("golden", run_id=run_id)
     if sample > 0:
-        examples = random.Random(config.ci_random_seed).sample(examples, min(sample, len(examples)))
+        examples = random.Random(config.tier_seed).sample(examples, min(sample, len(examples)))
         logger.info(
             "A/B test sampled %d of %d examples (seed=%d)",
             len(examples),
             sample,
-            config.ci_random_seed,
+            config.tier_seed,
         )
 
     results: list[EvalResult] = []
