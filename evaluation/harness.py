@@ -228,11 +228,13 @@ def _run_tests_batch_fallback(
     """Fallback: delegate to ``_run_tests`` per job (test-compatible).
 
     Uses explicit module lookup so monkeypatched ``_run_tests`` is picked up.
+    Runs jobs in parallel via ``ThreadPoolExecutor`` (up to ``max_parallel``).
     """
+    import concurrent.futures
+
     import evaluation.harness as _harness  # noqa: PLW0406 — intentional for monkeypatch support
 
-    results: list[dict[str, Any]] = []
-    for job in test_jobs:
+    def _run_one(job: dict[str, Any]) -> dict[str, Any]:
         example = EvalInput(
             instance_id=job.get("instance_id", ""),
             repo=repo,
@@ -244,10 +246,11 @@ def _run_tests_batch_fallback(
             pass_to_pass=job.get("pass_to_pass") or [],
             repo_domain="",
         )
-        results.append(
-            _harness._run_tests(example, job.get("generated_patch") or "", config)  # type: ignore[attr-defined]
-        )
-    return results
+        return _harness._run_tests(example, job.get("generated_patch") or "", config)  # type: ignore[attr-defined]
+
+    max_workers = config.max_parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        return list(pool.map(_run_one, test_jobs))
 
 
 # ── Data reading ─────────────────────────────────────────────────────────────
