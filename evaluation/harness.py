@@ -18,7 +18,9 @@ import csv
 import io
 import json
 import logging
+import math
 import random
+import statistics
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -126,8 +128,23 @@ def _generate_patches(
     if _inference_app in _APP_RUN_FAILED:
         raise RuntimeError("Modal disabled for this process (app.run() failed earlier)")
 
-    # Modal 1.x: @app.function() objects are not callable — invoke via .remote()
-    return generate_patches_batch.remote(model_name, variant, prompt_template, examples)  # type: ignore[no-any-return]
+    # Chunked remote calls: the fn timeout is 600s and the full tier (2,056
+    # instances × ~2K out tokens ≈ 4.1M tokens ≈ 17-20 min on A100-80GB) would
+    # be killed in one call. Sequential chunks reuse the SAME warm container
+    # (Modal keeps it ~minutes after each call) — model loaded once, no
+    # per-chunk cold start. GPU-bound wall time is unchanged; the timeout is
+    # the only thing this fixes.
+    _INFER_CHUNK_SIZE = 100  # ~200K out tokens ≈ ~1 min per call  # noqa: N806
+    patches: list[str] = []
+    for i in range(0, len(examples), _INFER_CHUNK_SIZE):
+        chunk = examples[i : i + _INFER_CHUNK_SIZE]
+        # Modal 1.x: @app.function() objects are not callable — invoke via .remote()
+        patches.extend(
+            generate_patches_batch.remote(  # type: ignore[no-any-return]
+                model_name, variant, prompt_template, chunk
+            )
+        )
+    return patches
 
 
 def _run_tests(example: EvalInput, generated_patch: str, config: EvalConfig) -> dict[str, Any]:
@@ -241,7 +258,9 @@ def _run_tests_batch_fallback(
             issue_body="",
             base_sha=base_sha,
             head_sha="",
-            test_patch=test_patch or "",
+            test_patch=job.get("test_patch")
+            or test_patch
+            or "",  # per-job patch, not group-first's
             fail_to_pass=job.get("fail_to_pass") or [],
             pass_to_pass=job.get("pass_to_pass") or [],
             repo_domain="",
@@ -251,6 +270,49 @@ def _run_tests_batch_fallback(
     max_workers = config.max_parallel
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         return list(pool.map(_run_one, test_jobs))
+
+
+def _run_tests_swebench(
+    instances: list[EvalInput],
+    patches: dict[str, str],
+    config: EvalConfig,
+) -> dict[str, dict[str, Any]]:
+    """Run instances on their OFFICIAL per-repo SWE-bench images.
+
+    One Modal container per instance; the function (and its swebench image)
+    is registered lazily per repo via ``swebench_fn`` — the image contains
+    the repo with full git history and a pre-installed conda env, so no
+    clone/install happens at eval time.
+
+    Returns ``{instance_id: result_dict}``.  Raises on ANY failure so callers
+    fall back to the clone/install batch path (coarse group-level fallback;
+    the swebench path is primary for SWE-bench Verified where every instance
+    has a prebuilt image).
+    """
+    import concurrent.futures
+
+    from evaluation.test_runner import app as _test_runner_app
+    from evaluation.test_runner import swebench_fn
+
+    _ensure_app_running(_test_runner_app)
+    if _test_runner_app in _APP_RUN_FAILED:
+        raise RuntimeError("Modal disabled for this process (app.run() failed earlier)")
+
+    def _run_one(example: EvalInput) -> tuple[str, dict[str, Any]]:
+        fn = swebench_fn(example.repo, example.instance_id)
+        return example.instance_id, fn.remote(  # type: ignore[no-any-return]
+            example.instance_id,
+            example.base_sha,
+            test_patch=example.test_patch or None,
+            generated_patch=patches.get(example.instance_id, ""),
+            fail_to_pass=example.fail_to_pass or [],
+            pass_to_pass=example.pass_to_pass or [],
+            timeout=config.test_timeout_seconds,
+            max_retries=config.max_retries,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_parallel) as pool:
+        return dict(pool.map(_run_one, instances))
 
 
 # ── Data reading ─────────────────────────────────────────────────────────────
@@ -458,13 +520,50 @@ class WandbLogger:
         self._wandb_run_id = run_id
         return self._wandb_mod
 
+    def _link_model_lineage(self, run: EvalRun, config: EvalConfig) -> None:
+        """Declare used model-checkpoint artifacts so logged eval artifacts get
+        a lineage edge (old plan §8: eval artifact references the Phase 4
+        ``model-qwen3-14b-{variant}`` checkpoint).  Must run BEFORE the eval
+        artifact is logged; missing artifacts are warned and skipped."""
+        wandb_mod = self._ensure_run(run.run_id)
+        if wandb_mod is None:
+            return
+        for variant in sorted({r.variant for r in run.results if r.variant}):
+            name = config.lora_artifact_pattern.format(variant=variant)
+            try:
+                wandb_mod.use_artifact(
+                    f"{config.wandb_entity}/{config.wandb_project}/{name}:latest"
+                )
+                logger.info("lineage: eval run %s uses artifact %s", run.run_id, name)
+            except Exception:  # noqa: BLE001 — W&B must never break the harness
+                logger.warning(
+                    "lineage: could not link artifact %s for run %s (missing checkpoint?)",
+                    name,
+                    run.run_id,
+                )
+
     def log_eval_run(self, run: EvalRun, config: EvalConfig) -> None:
         """Log a full eval run: per-example, aggregate and per-repo artifacts."""
+        self._link_model_lineage(run, config)
         if config.wandb_log_per_example:
             self.log_per_example(run.results, run.run_id)
         if config.wandb_log_aggregate:
             self.log_aggregate(run.aggregate, run.run_id)
         self.log_per_repo(run.aggregate, run.run_id)
+        wandb_mod = self._ensure_run(run.run_id)
+        if wandb_mod is None:
+            return
+        if run.cost_usd > 0:
+            wandb_mod.log({"eval/cost_usd": run.cost_usd})
+        try:
+            scalars: dict[str, float] = {}
+            for key, p in latency_percentiles(run.results).items():
+                scalars[f"eval/{key}/latency_p50"] = p["p50"]
+                scalars[f"eval/{key}/latency_p95"] = p["p95"]
+            if scalars:
+                wandb_mod.log(scalars)
+        except Exception:  # noqa: BLE001 — W&B must never break the harness
+            logger.warning("W&B latency percentile logging failed for run %s", run.run_id)
 
     def log_per_example(
         self,
@@ -580,6 +679,52 @@ class WandbLogger:
 
 
 # ── EvaluationHarness ────────────────────────────────────────────────────────
+
+
+# Approximate Modal list rates (2026).  Replace with actual billed amounts in
+# Phase 8 (observability/cost.py).  ponytail: constants, not config — tuning
+# the estimate is a copy-paste edit until Phase 8.
+_GPU_RATE_PER_MIN = 0.0167  # A10G-24GB ≈ $1.00/hr
+_VCPU_RATE_PER_HOUR = 0.008  # Modal CPU
+_TEST_MIN_PER_INSTANCE = 1.5  # est. wall min/instance on swebench images (repo-batched)
+_VCPUS_PER_TEST_CONTAINER = 2
+
+
+def latency_percentiles(results: list[EvalResult]) -> dict[str, dict[str, float]]:
+    """p50/p95 of per-example latency, keyed ``model/variant/prompt`` (mirrors
+    the aggregate scalar prefix).  Empty results -> ``{}``."""
+    groups: dict[str, list[float]] = {}
+    for r in results:
+        if r.latency_seconds > 0:
+            groups.setdefault(f"{r.model_name}/{r.variant}/{r.prompt_template}", []).append(
+                r.latency_seconds
+            )
+    out: dict[str, dict[str, float]] = {}
+    for key, latencies in groups.items():
+        latencies = sorted(latencies)  # noqa: PLW2901
+        p50 = statistics.median(latencies)
+        # Nearest-rank 95th percentile (matches common latency SLOs).
+        p95 = latencies[math.ceil(0.95 * len(latencies)) - 1] if len(latencies) > 1 else p50
+        out[key] = {"p50": round(p50, 4), "p95": round(p95, 4)}
+    return out
+
+
+def estimate_run_cost(results: list[EvalResult]) -> dict[str, float]:
+    """Estimate run cost: measured inference GPU time + estimated test CPU time.
+
+    Inference is *measured* (sum of per-example ``latency_seconds``, which the
+    vLLM container records); test time is an estimate because the runner does
+    not yet report wall-clock (Phase 8 will make it measured too).
+    """
+    inference_min = sum(r.latency_seconds for r in results) / 60.0
+    inference_usd = inference_min * _GPU_RATE_PER_MIN
+    test_hours = (len(results) * _TEST_MIN_PER_INSTANCE) / 60.0
+    test_usd = test_hours * _VCPUS_PER_TEST_CONTAINER * _VCPU_RATE_PER_HOUR
+    return {
+        "inference_usd": round(inference_usd, 4),
+        "tests_usd": round(test_usd, 4),
+        "total_usd": round(inference_usd + test_usd, 4),
+    }
 
 
 def _persist_run(run: EvalRun, config: EvalConfig) -> None:
@@ -764,6 +909,7 @@ class EvaluationHarness:
         prompt_template: str,
         generated_patch: str,
         output: dict[str, Any],
+        latency_seconds: float = 0.0,
     ) -> EvalResult:
         """Build EvalResult from pre-fetched test output (batch path).
 
@@ -775,6 +921,9 @@ class EvaluationHarness:
             generated_patch: Patch string already applied in container.
             output: Test result dict from ``run_tests_batch`` (same shape as
                 ``run_tests_in_container`` return).
+            latency_seconds: Per-instance inference latency; batch mode has no
+                per-instance timing, so callers amortize the single
+                ``_generate_patches`` call duration (default 0.0).
 
         Returns:
             EvalResult with f2p/p2p computed from the output payload.
@@ -807,12 +956,12 @@ class EvaluationHarness:
             tests_after=tests_after,
             f2p=f2p,
             p2p=p2p,
-            latency_seconds=0.0,
+            latency_seconds=latency_seconds,
             timestamp=datetime.now(UTC),
             error=error,
         )
 
-    def run_batch(  # noqa: PLR0912
+    def run_batch(  # noqa: PLR0912, PLR0915
         self,
         examples: list[EvalInput],
         model_name: str,
@@ -852,77 +1001,150 @@ class EvaluationHarness:
                 continue
             pending_repos[repo] = by_repo[repo]
 
-        # Generate patches for ALL pending examples in ONE call
-        all_pending: list[EvalInput] = []
-        for repo in sorted(pending_repos):
-            all_pending.extend(pending_repos[repo])
-
-        patches_map: dict[str, str] = {}
-        if all_pending:
-            patches = _generate_patches(model_name, variant, prompt_template, all_pending)
-            for i, example in enumerate(all_pending):
-                patches_map[example.instance_id] = patches[i] if i < len(patches) else ""
-
-        # Phase 2: per-repo test execution and checkpointing
-        new: list[EvalResult] = []
-        for repo in sorted(pending_repos):
-            repo_examples = pending_repos[repo]
-
-            # Build test jobs list
-            test_jobs: list[dict[str, Any]] = []
-            for example in repo_examples:
-                patch = patches_map.get(example.instance_id, "")
-                test_jobs.append(
-                    {
-                        "generated_patch": patch,
-                        "fail_to_pass": example.fail_to_pass or [],
-                        "pass_to_pass": example.pass_to_pass or [],
-                    }
-                )
-
-            # Run all tests for this repo in one container
-            batch_results = _run_tests_batch(
-                repo,
-                repo_examples[0].base_sha,
-                repo_examples[0].test_patch or None,
-                test_jobs,
-                self.config,
-            )
-
-            # Pair results back with examples
-            repo_results: list[EvalResult] = []
-            for i, example in enumerate(repo_examples):
-                if i < len(batch_results):
-                    result = self.run_example_from_output(
-                        example,
-                        model_name,
-                        variant,
-                        prompt_template,
-                        patches_map.get(example.instance_id, ""),
-                        batch_results[i],
-                    )
-                else:
-                    # Fallback if batch returned fewer results
-                    result = self.run_example(
-                        example,
-                        model_name,
-                        variant,
-                        prompt_template,
-                        generated_patch=patches_map.get(example.instance_id, ""),
-                    )
-                repo_results.append(result)
-            new.extend(repo_results)
-
+        # Phase 1: identify non-completed repos, collect all examples
+        pending_repos: dict[str, list[EvalInput]] = {}
+        for repo in sorted(by_repo):
             key = self.checkpoint_mgr.get_checkpoint_key(
                 run_id, repo, model_name, variant, prompt_template
             )
-            if repo_results:
+            if self.checkpoint_mgr.is_completed(key):
+                logger.info("skipping completed repo %s (checkpoint %s)", repo, key)
+                continue
+            pending_repos[repo] = by_repo[repo]
+
+        all_instances: list[EvalInput] = []
+        for repo in sorted(pending_repos):
+            all_instances.extend(pending_repos[repo])
+
+        # Generate patches for ALL pending examples in ONE call.  Measure the
+        # call so inference cost/latency can be amortized per instance.
+        patches_map: dict[str, str] = {}
+        per_instance_latency = 0.0
+        if all_instances:
+            _gen_start = time.monotonic()
+            patches = _generate_patches(model_name, variant, prompt_template, all_instances)
+            gen_seconds = max(time.monotonic() - _gen_start, 0.0)
+            per_instance_latency = gen_seconds / len(all_instances)
+            for i, example in enumerate(all_instances):
+                patches_map[example.instance_id] = patches[i] if i < len(patches) else ""
+
+        # Phase 2: test execution.  Swebench images first — ONE pool call over
+        # ALL pending instances.  Per-(repo, base_sha)-group calls would
+        # serialize: SWE-bench instances have unique base_shas → group size
+        # ~1 → effective concurrency ~1, 15-25x off the wall-time target.
+        # Fallback: clone/install batch path per (repo, base_sha) group.
+        swebench_results: dict[str, dict[str, Any]] = {}
+        if self.config.use_swebench_images:
+            _id_instances = [ex for ex in all_instances if ex.instance_id]
+            if _id_instances:
+                try:
+                    swebench_results = _run_tests_swebench(_id_instances, patches_map, self.config)
+                except Exception:  # noqa: BLE001 — swebench path failed, fall back
+                    logger.info(
+                        "swebench image path unavailable — falling back to batch "
+                        "for %d instance(s)",
+                        len(_id_instances),
+                    )
+
+        new: list[EvalResult] = []
+        results_by_repo: dict[str, list[EvalResult]] = {repo: [] for repo in pending_repos}
+        for repo in sorted(pending_repos):
+            repo_examples = pending_repos[repo]
+
+            # SWE-bench instances in one repo have DIFFERENT base commits and
+            # test patches — group by base_sha so each group evaluates against
+            # the right state.  (The old repo-only grouping was wrong for
+            # every instance but the first.)
+            by_base: dict[str, list[EvalInput]] = {}
+            for example in repo_examples:
+                by_base.setdefault(example.base_sha, []).append(example)
+
+            for base_sha in sorted(by_base):
+                group = by_base[base_sha]
+
+                # Build test jobs list (per-job test_patch + instance_id)
+                test_jobs: list[dict[str, Any]] = []
+                for example in group:
+                    patch = patches_map.get(example.instance_id, "")
+                    test_jobs.append(
+                        {
+                            "instance_id": example.instance_id,
+                            "generated_patch": patch,
+                            "fail_to_pass": example.fail_to_pass or [],
+                            "pass_to_pass": example.pass_to_pass or [],
+                            "test_patch": example.test_patch or "",
+                        }
+                    )
+
+                # Batch-fallback only for instances missing swebench results
+                # (swebench raised, or instance has no image id).  Preserves
+                # per-job test_patch so fallback results stay correct.
+                missing = [ex for ex in group if ex.instance_id not in swebench_results]
+                if missing:
+                    _by_id = {ex.instance_id: ex for ex in group}
+                    _fallback_jobs = [
+                        job
+                        for job in test_jobs
+                        if job["instance_id"] in {m.instance_id for m in missing}
+                    ]
+                    _fallback_results = _run_tests_batch(
+                        repo,
+                        base_sha,
+                        group[0].test_patch or None,
+                        _fallback_jobs,
+                        self.config,
+                    )
+                    for example, result in zip(missing, _fallback_results, strict=True):
+                        swebench_results[example.instance_id] = result
+
+                # Pair results back with examples
+                for example in group:
+                    result = swebench_results.get(example.instance_id)
+                    if result is not None:
+                        eval_result = self.run_example_from_output(
+                            example,
+                            model_name,
+                            variant,
+                            prompt_template,
+                            patches_map.get(example.instance_id, ""),
+                            result,
+                            latency_seconds=per_instance_latency,
+                        )
+                    else:
+                        # Runner returned fewer results — per-example path
+                        eval_result = self.run_example(
+                            example,
+                            model_name,
+                            variant,
+                            prompt_template,
+                            generated_patch=patches_map.get(example.instance_id, ""),
+                        )
+                    results_by_repo[repo].append(eval_result)
+
+            # Checkpoint per repo — but only when EVERY result is clean.
+            # Error results (truncation, ground-truth failure, container
+            # crash) must not be checkpointed, or --resume would skip the
+            # repo forever and the errors would be permanent F2P=0 rows.
+            repo_results = results_by_repo[repo]
+            new.extend(repo_results)
+            key = self.checkpoint_mgr.get_checkpoint_key(
+                run_id, repo, model_name, variant, prompt_template
+            )
+            errored = sum(1 for r in repo_results if r.error)
+            if repo_results and errored == 0:
                 payload: EvalResult | list[EvalResult] = (
                     repo_results[0] if len(repo_results) == 1 else repo_results
                 )
                 self.checkpoint_mgr.save_result(key, payload)
                 logger.info(
                     "checkpointed %d result(s) for %s under %s", len(repo_results), repo, key
+                )
+            elif repo_results:
+                logger.warning(
+                    "NOT checkpointing %s: %d/%d result(s) have errors — resume will retry",
+                    repo,
+                    errored,
+                    len(repo_results),
                 )
         return [*loaded, *new]
 
@@ -938,7 +1160,7 @@ class EvaluationHarness:
         Args:
             models: ``(model_name, variant)`` pairs.
             prompt_templates: Template names to evaluate (default ``["chat"]``).
-            sample: If > 0, random sample (seeded from ``ci_random_seed``).
+            sample: If > 0, random sample (seeded from ``tier_seed``).
             run_id: Eval run id; generated if not provided.
 
         Returns:
@@ -988,14 +1210,14 @@ class EvaluationHarness:
         started_at = datetime.now(UTC)
         examples = self.load_examples(split, run_id=run_id)
         if sample > 0:
-            examples = random.Random(self.config.ci_random_seed).sample(
+            examples = random.Random(self.config.tier_seed).sample(
                 examples, min(sample, len(examples))
             )
             logger.info(
                 "sampled %d of %d examples (seed=%d)",
                 len(examples),
                 sample,
-                self.config.ci_random_seed,
+                self.config.tier_seed,
             )
 
         results: list[EvalResult] = []
@@ -1013,6 +1235,7 @@ class EvaluationHarness:
             results=results,
             aggregate=self._aggregate(results),
             status="partial" if any(r.error for r in results) else "completed",
+            cost_usd=estimate_run_cost(results)["total_usd"],
         )
         _persist_run(run, self.config)
         try:
@@ -1020,11 +1243,12 @@ class EvaluationHarness:
         except Exception:  # noqa: BLE001 — W&B must never break the harness
             logger.warning("W&B logging failed for run %s", run_id, exc_info=True)
         logger.info(
-            "run %s (%s): %d results, status=%s",
+            "run %s (%s): %d results, status=%s, est. cost=$%.2f",
             run_id,
             split,
             len(results),
             run.status,
+            run.cost_usd,
         )
         return run
 
