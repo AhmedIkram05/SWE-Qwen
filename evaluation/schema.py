@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from evaluation.config import EvalConfig
 
 Status = Literal["passed", "failed", "errored", "skipped", "flaky"]
-Method = Literal["git_apply", "unidiff_fallback", "failed"]
+Method = Literal["git_apply", "unidiff_fallback", "failed", "none"]
 
 
 class TestResult(BaseModel):
@@ -151,6 +151,7 @@ class EvalRun(BaseModel):
     results: list[EvalResult]
     aggregate: list[F2PMetrics]
     status: Literal["running", "completed", "failed", "partial"]
+    cost_usd: float = 0.0  # estimated run cost (inference + test execution)
 
 
 def _to_test_list(value: Any) -> list[str]:
