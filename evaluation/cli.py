@@ -14,6 +14,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import NoReturn
@@ -24,7 +25,10 @@ from evaluation.comparison import (
     compare_and_report,
     extract_model_metrics,
     load_all_eval_runs,
+    paired_significance,
+    promote_champion_to_registry,
     proxy_champion_from_f2p_proxy,
+    revalidate_champion,
 )
 from evaluation.config import EvalConfig
 from evaluation.schema import EvalRun
@@ -32,6 +36,18 @@ from evaluation.schema import EvalRun
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODELS = "qwen3-14b:baseline_14b,qwen3-14b:higher_rank_14b,qwen3-14b:higher_lr_14b"
+
+# --mode presets: deterministic seed-42 subsets (see config.tier_seed).
+# smoke/dev/final evaluate the SWE-bench Verified split; full = whole golden set.
+_TIER_SPLITS = {
+    "smoke": "swebench_verified",
+    "dev": "swebench_verified",
+    "final": "swebench_verified",
+    "full": "golden",
+}
+
+# CI gate: fail if a variant's F2P drops more than this (absolute) vs stored baseline.
+_SMOKE_TOLERANCE = 0.05
 
 app = typer.Typer(
     name="eval",
@@ -48,9 +64,24 @@ def run(
     sample: int = typer.Option(0, help="0 = all"),
     resume: str | None = typer.Option(None, help="run_id to resume"),
     ci_mode: bool = typer.Option(False, help="sample=50, seed=42"),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help="smoke|dev|final|full preset (seed-42 subsets); smoke runs the CI F2P gate",
+    ),
+    backend: str = typer.Option("modal", help="modal|local"),
+    ollama_model: str = typer.Option("qwen2.5-coder:7b", help="Ollama model tag (local backend)"),
+    ollama_url: str = typer.Option("http://localhost:11434", help="Ollama base URL"),
 ) -> None:
     """Main evaluation entry point."""
     config = EvalConfig()
+    if mode is not None:
+        if mode not in config.tier_sizes:
+            raise typer.BadParameter(
+                f"unknown mode {mode!r}; expected one of {', '.join(config.tier_sizes)}"
+            )
+        split = _TIER_SPLITS[mode]
+        sample = config.tier_sizes[mode]
     pairs = _parse_model_pairs(models)
     templates = _parse_prompts(prompts)
     if not templates:
@@ -58,10 +89,22 @@ def run(
     if ci_mode:
         sample = config.ci_sample_size
     try:
-        eval_run = _dispatch(split, pairs, templates, sample, resume, config)
+        eval_run = _dispatch(
+            split,
+            pairs,
+            templates,
+            sample,
+            resume,
+            config,
+            backend=backend,
+            ollama_model=ollama_model,
+            ollama_url=ollama_url,
+        )
     except KeyboardInterrupt:
         _echo_interrupt(resume)
     _report_run(eval_run)
+    if mode == "smoke":
+        _smoke_gate(eval_run, config)
 
 
 @app.command()
@@ -160,6 +203,19 @@ def compare(
         raise typer.Exit(code=1)
     proxy_champion = _resolve_proxy_champion(proxy, golden_path, variant_adapter_map)
     typer.echo(compare_and_report(metrics, proxy_champion=proxy_champion))
+    champion = revalidate_champion(
+        metrics, proxy_champion or "", config.min_f2p_threshold, config.min_p2p_threshold
+    )
+    if champion:
+        promoted = promote_champion_to_registry(champion[0], config)
+        if promoted:
+            typer.echo(promoted)
+    if len(runs) >= 2:  # noqa: PLR2004
+        ranked_runs = sorted(runs, key=_run_best_f2p, reverse=True)
+        typer.echo(paired_significance(ranked_runs[0], ranked_runs[1]))
+    total_cost = sum(r.cost_usd for r in runs)
+    if total_cost > 0:
+        typer.echo(f"est. total cost across {len(runs)} run(s): ${total_cost:.2f}")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -205,9 +261,16 @@ def _dispatch(
     sample: int,
     resume: str | None,
     config: EvalConfig,
+    *,
+    backend: str = "modal",
+    ollama_model: str = "qwen2.5-coder:7b",
+    ollama_url: str = "http://localhost:11434",
 ) -> EvalRun:
     """Dispatch a run to the harness entry point for *split*."""
     from evaluation.harness import EvaluationHarness  # lazy: heavy deps
+
+    if backend == "local":
+        _patch_harness_backend(ollama_model=ollama_model, ollama_url=ollama_url)
 
     harness = EvaluationHarness(config)
     if split == "swebench_verified":
@@ -215,6 +278,28 @@ def _dispatch(
     if split == "golden":
         return harness.run_golden(pairs, prompt_templates=templates, sample=sample, run_id=resume)
     raise typer.BadParameter(f"unknown split {split!r}; expected 'golden' or 'swebench_verified'")
+
+
+def _patch_harness_backend(*, ollama_model: str, ollama_url: str) -> None:
+    """Monkeypatch harness indirection functions with local backends."""
+    import evaluation.harness as harness_mod
+    from evaluation.local_backend import generate_patches_local, run_tests_local
+
+    def _gen_patches(model_name, variant, prompt_template, examples):
+        return generate_patches_local(
+            model_name,
+            variant,
+            prompt_template,
+            examples,
+            ollama_model=ollama_model,
+            ollama_base_url=ollama_url,
+        )
+
+    def _run_tests(example, generated_patch, config):
+        return run_tests_local(example, generated_patch, config)
+
+    harness_mod._generate_patches = _gen_patches  # type: ignore[attr-defined]
+    harness_mod._run_tests = _run_tests  # type: ignore[attr-defined]
 
 
 def _resolve_proxy_champion(
@@ -234,11 +319,67 @@ def _resolve_proxy_champion(
     return "baseline_14b"
 
 
+def _run_best_f2p(run: EvalRun) -> float:
+    """Best f2p_rate across a run's aggregate groups (for ranking runs)."""
+    return max((m.f2p_rate for m in run.aggregate), default=0.0)
+
+
 def _report_run(eval_run: EvalRun) -> None:
     """Print the aggregate summary table and run_id for *eval_run*."""
     metrics = {f"{m.model_name}:{m.variant}": m for m in eval_run.aggregate}
     typer.echo(compare_and_report(metrics))
     typer.echo(f"run_id: {eval_run.run_id}")
+
+
+def _smoke_gate(eval_run: EvalRun, config: EvalConfig) -> None:
+    """CI regression gate: exit 1 if any model:variant F2P dropped > tolerance.
+
+    Baseline lives at ``{output_dir}/smoke_baseline.json`` as
+    ``{"model:variant:prompt": f2p_rate}``.  The first run writes the baseline
+    and passes; later runs fail when F2P < baseline - ``_SMOKE_TOLERANCE``.
+    """
+    baseline_path = config.output_dir / "smoke_baseline.json"
+    baseline: dict[str, float] = {}
+    if baseline_path.exists():
+        try:
+            baseline = json.loads(baseline_path.read_text())
+        except json.JSONDecodeError:
+            typer.echo(f"SMOKE GATE FAIL: corrupt baseline {baseline_path}", err=True)
+            raise typer.Exit(code=1) from None
+    # key by (model, variant, prompt) — a multi-prompt run must not let one
+    # template's rate silently mask another's
+    current = {
+        f"{m.model_name}:{m.variant}:{m.prompt_template}": m.f2p_rate for m in eval_run.aggregate
+    }
+    if not current:
+        typer.echo(
+            "SMOKE GATE FAIL: run produced no aggregate metrics (all repos checkpointed?)", err=True
+        )
+        raise typer.Exit(code=1)
+    if not baseline:
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text(json.dumps(current, indent=2) + "\n")
+        typer.echo(f"smoke baseline written: {baseline_path}")
+        return
+    failures = [
+        (key, rate, baseline[key])
+        for key, rate in current.items()
+        if key in baseline and rate < baseline[key] - _SMOKE_TOLERANCE
+    ]
+    # a variant previously gated that vanished from this run is also a failure
+    missing = [key for key in baseline if key not in current]
+    if failures or missing:
+        for key, rate, base in failures:
+            typer.echo(
+                f"SMOKE GATE FAIL: {key} f2p {rate:.2%} < baseline {base:.2%}"
+                f" (drop > {_SMOKE_TOLERANCE:.0%})"
+            )
+        for key in missing:
+            typer.echo(f"SMOKE GATE FAIL: {key} missing from this run (was in baseline)")
+        raise typer.Exit(code=1)
+    baseline.update(current)
+    baseline_path.write_text(json.dumps(baseline, indent=2) + "\n")
+    typer.echo("smoke gate passed; baseline updated")
 
 
 def _echo_interrupt(resume: str | None) -> NoReturn:
