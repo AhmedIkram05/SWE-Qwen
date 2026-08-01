@@ -88,7 +88,7 @@ docs = [
 swe-qwen = "swe_qwen.cli:app"
 data-pipeline = "data_engineering.run_pipeline:app"
 train = "training.qlora_train:app"
-eval = "evaluation.run_eval:app"
+eval = "evaluation.cli:app"
 serve = "inference.modal_serve:app"
 
 [build-system]
