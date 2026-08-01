@@ -728,7 +728,7 @@ def test_compare_and_report_markdown() -> None:
 
     md = compare_and_report(metrics, proxy_champion="baseline_14b")
 
-    header = "| model | variant | total | f2p_rate | p2p_rate | avg_latency | flaky_rate | note |"
+    header = "| model | variant | total | f2p_rate | f2p_95ci | p2p_rate | avg_latency | flaky_rate | note |"  # noqa: E501
     assert header in md
     assert "qwen3-14b" in md
     assert "higher_rank_14b" in md
@@ -796,7 +796,7 @@ def test_cli_compare_offline(config: EvalConfig, monkeypatch: pytest.MonkeyPatch
     result = CliRunner().invoke(cli_app, ["compare", "--run_ids", "run1"])
 
     assert result.exit_code == 0, result.output
-    assert "| model | variant | total | f2p_rate | p2p_rate |" in result.output
+    assert "| model | variant | total | f2p_rate | f2p_95ci | p2p_rate |" in result.output
     assert "qwen3-14b" in result.output
 
 
