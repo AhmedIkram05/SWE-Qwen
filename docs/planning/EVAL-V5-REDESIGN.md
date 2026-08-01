@@ -44,19 +44,35 @@ eval/  (ONE package, ONE CLI)
 running `pip install -e .` (~2-5 min setup) → ~10 min/instance → 2,056 instances
 = ~340 container-hours of pure setup. Untenable.
 
-**Fix — repo-batched containers on official SWE-bench images:**
+**Fix — official SWE-bench images, one Modal function per repo (implemented):**
 
-- One Modal CPU container **per repo** (~18 containers), all in parallel.
-- Base image: `swebench/sweb.eval.x86_64.{repo}` — the OFFICIAL evaluation
-  images: repo with full git history + conda env `testbed` pre-installed. Zero
-  env setup on our side; exact env SWE-bench ground truth was validated on.
+- Official SWE-bench eval images are per-*instance*:
+  `swebench/sweb.eval.x86_64.<instance_id munged>:latest` (`django__django-10554`
+  → `django_1776_django-10554`). Each contains `/testbed` checked out at the
+  instance's base commit (plus a "SWE-bench" marker commit on top — so
+  `git reset --hard <base_sha>` works offline; base_sha is always an ancestor),
+  and a conda env `testbed` with the project installed **editable**.
+- Modal 1.5.3 `Function.with_options` has **no `image` param** (image is fixed at
+  `@app.function` decoration) → `test_runner.py` registers **one function per
+  repo** (`swebench_fn` lazy registry, keyed by repo) using the repo's first
+  instance's image. Valid because every image for a repo contains the repo's
+  **full git history** → any instance's `base_sha` resolves, and reset+editable
+  install makes per-instance source state exact. Ground-truth verification
+  (F2P must be 100% on `test_patch`) catches any env mismatch.
 - Per instance, inside the container (cheap ops only):
-  1. `git worktree add /tmp/ws/{id} {base_sha}` — hardlinked objects, ~2-5 s
+  1. `git reset --hard <base_sha>` + `git clean -fd` (~2-5 s)
   2. apply ground-truth `test_patch` → `conda run -n testbed pytest -k "<f2p tests>"`
-  3. ground-truth verification (F2P must be 100% on test_patch — catches env drift)
+  3. ground-truth verification (F2P = 100% on test_patch — catches env drift)
   4. revert → apply generated patch → run same tests → collect F2P/P2P
-- **No pip install, no full clones per instance.** ~60-90 s/instance.
-- Concurrency: 1-2 containers per repo; all repos parallel.
+- One-time per container: `conda run -n testbed python -m pip install
+  pytest-json-report pytest-timeout` (~10-20 s; probe import first).
+- **No pip install of the project, no full clones per instance.** ~60-90 s/instance.
+- Concurrency: `max_parallel=16` instances in flight; all repos parallel.
+- **Fallback (existing, volume-cached):** if the swebench path fails (image
+  unavailable, bad env), `run_batch` falls back to the original
+  clone/checkout/install path — full clone + venv built once per repo **ever**
+  (`.installed` marker in `/test_cache/{repo}/.venv`, `.git` presence check),
+  reused by every container and every instance.
 
 | Tier | Containers | Wall time |
 |------|-----------|-----------|
@@ -65,13 +81,10 @@ running `pip install -e .` (~2-5 min setup) → ~10 min/instance → 2,056 insta
 | final (500) | 18 | ~20-25 min |
 | full (2,056) | 18 | ~40-60 min |
 
-**Fallback:** if a swebench image is unavailable/broken on Modal, build per-repo
-env once into Modal volume (`/test_cache/{repo}`: full clone + venv) — one-time
-~10 min/repo, reused by every instance thereafter.
-
 **Risks:** image pull size (~3-10 GB/repo, pulled once per repo — Modal caches);
 entrypoint quirks → ground-truth verification catches broken envs; conda
-activation inside Modal container (`conda run -n testbed`).
+activation inside Modal container (`conda run -n testbed`); Test/Dev images
+partially missing → those instances hit the clone/install fallback.
 
 | Tier | Size | Source | When | Est. cost |
 |------|------|--------|------|-----------|
@@ -147,7 +160,7 @@ python -m evaluation.cli compare --run-ids a,b,c   (existing + CI/McNemar/cost c
 | 3 | Tier plumbing in `cli.py`/`config.py` (`--mode`, seed-42 subsets) | 45 min |
 | 4 | Cost estimate in `harness.py` + `compare` report columns | 30 min |
 | 5 | Unit tests: stats (incl. paired-significance correctness), tiers, cost | 1 hr |
-| 6 | Run `pytest` full suite → all green (≥ 64 tests minus 13 deleted + new) | 15 min |
+| 6 | Run `pytest` full suite → all green (**663 tests passing**: 645 pre-review + 18 review-round-2 regression tests) | 15 min |
 | 7 | `smoke` e2e on Modal (20 instances, baseline_14b) → W&B artifacts | 1 hr |
 | 8 | Update IMPLEMENTATION-LOG (deviation) + README eval section | 20 min |
 
