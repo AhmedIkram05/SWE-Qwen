@@ -623,19 +623,18 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
             "ground_truth": {},
         }
 
-    tests_before = collect_test_results(
-        repo_dir, test_names, timeout=timeout, max_retries=max_retries
-    )
+    # ponytail: baseline runs use max_retries=0 — flaky detection only matters for the final eval
+    tests_before = collect_test_results(repo_dir, test_names, timeout=timeout, max_retries=0)
 
     tests_head: list[TestResult] = []
     ground_truth: dict[str, Any] = {}
     if test_patch:
-        patch_result = apply_patch(repo_dir, test_patch, base_sha)
+        # Caller already checked out base_sha; skip the redundant checkout
+        patch_result = apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
         if patch_result.success:
             _install_repo(repo_dir)
-            tests_head = collect_test_results(
-                repo_dir, test_names, timeout=timeout, max_retries=max_retries
-            )
+            # ponytail: ground truth also uses max_retries=0 — flaky detection is for eval only
+            tests_head = collect_test_results(repo_dir, test_names, timeout=timeout, max_retries=0)
             f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
                 tests_before, tests_head, fail_to_pass, pass_to_pass
             )
@@ -770,11 +769,13 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     tests_head: list[TestResult] = []
     ground_truth: dict[str, Any] = {}
     if test_patch:
-        patch_result = apply_patch(repo_dir, test_patch, base_sha)
+        # ponytail: _ensure_checked_out already set base_sha — skip redundant checkout
+        patch_result = apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
         if patch_result.success:
             _install_repo(repo_dir)
+            # ponytail: ground truth uses max_retries=0 — flaky detection is for eval only
             tests_head = collect_test_results(
-                repo_dir, all_test_names, timeout=timeout, max_retries=max_retries
+                repo_dir, all_test_names, timeout=timeout, max_retries=0
             )
             # Use first job's fail_to_pass/pass_to_pass for ground truth
             first_job = test_jobs[0] if test_jobs else {}
@@ -834,7 +835,8 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
 
         if generated_patch:
             logger.info("Applying generated patch for job %d", i + 1)
-            patch_result = apply_patch(repo_dir, generated_patch, base_sha)
+            # ponytail: _reset_to_base already ran — skip the redundant checkout
+            patch_result = apply_patch(repo_dir, generated_patch, base_sha, skip_checkout=True)
             if patch_result.success:
                 logger.info("Generated patch applied successfully, installing repo")
                 _install_repo(repo_dir)
