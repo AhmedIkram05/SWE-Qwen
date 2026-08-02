@@ -667,18 +667,16 @@ def test_get_llm_returns_cached_instance(monkeypatch: pytest.MonkeyPatch) -> Non
 
     from evaluation.inference import _get_llm
 
-    llm1 = _get_llm("qwen3-14b", "baseline_14b", None)
-    llm2 = _get_llm("qwen3-14b", "baseline_14b", None)
+    llm1 = _get_llm("qwen3-14b")
+    llm2 = _get_llm("qwen3-14b")
 
     assert llm1 is llm2
     assert call_count == 1  # LLM() constructed only once
     assert len(evaluation.inference._LLM_CACHE) == 1
 
 
-def test_get_llm_different_variants_separate_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Different (model, variant) keys get separate LLM instances."""
+def test_get_llm_same_model_same_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """C1: same base model => one LLM instance regardless of variant."""
     import evaluation.inference
 
     evaluation.inference._LLM_CACHE.clear()
@@ -711,12 +709,13 @@ def test_get_llm_different_variants_separate_cache(
 
     from evaluation.inference import _get_llm
 
-    llm_a = _get_llm("qwen3-14b", "variant_a", "/path/to/a")
-    llm_b = _get_llm("qwen3-14b", "variant_b", "/path/to/b")
+    # Same model_name, same LLM (cached)
+    llm_a = _get_llm("qwen3-14b")
+    llm_b = _get_llm("qwen3-14b")
 
-    assert llm_a is not llm_b
-    assert call_count == 2
-    assert len(evaluation.inference._LLM_CACHE) == 2
+    assert llm_a is llm_b
+    assert call_count == 1
+    assert len(evaluation.inference._LLM_CACHE) == 1
 
 
 # ── test_runner: batch function ───────────────────────────────────────────
@@ -728,3 +727,153 @@ def test_run_tests_batch_single_job() -> None:
 
     assert run_tests_batch is not None
     assert hasattr(run_tests_batch, "remote")
+
+
+# ── Baseline cache (T3) ────────────────────────────────────────────────────
+
+
+def test_baseline_cache_miss_when_no_file(tmp_path: Path) -> None:
+    """Loading a cache for an unregistered instance returns None."""
+    import evaluation.test_runner as tr_mod
+
+    original = tr_mod._BASELINE_CACHE_DIR
+    cache_root = tmp_path / "test_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    tr_mod._BASELINE_CACHE_DIR = cache_root
+    try:
+        result = tr_mod._load_baseline_cache("inst-1", "abc123")
+        assert result is None
+    finally:
+        tr_mod._BASELINE_CACHE_DIR = original
+
+
+def test_baseline_cache_hit_when_matching_base_sha(tmp_path: Path) -> None:
+    """Cache hit returns the stored dict when base_sha matches."""
+    import evaluation.test_runner as tr_mod
+
+    original = tr_mod._BASELINE_CACHE_DIR
+    cache_root = tmp_path / "test_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    tr_mod._BASELINE_CACHE_DIR = cache_root
+    try:
+        data = {"base_sha": "abc123", "tests_before": [], "tests_head": [], "ground_truth": {}}
+        tr_mod._save_baseline_cache("inst-1", data)
+        assert (cache_root / "inst-1.json").is_file()
+
+        loaded = tr_mod._load_baseline_cache("inst-1", "abc123")
+        assert loaded is not None
+        assert loaded["base_sha"] == "abc123"
+    finally:
+        tr_mod._BASELINE_CACHE_DIR = original
+
+
+def test_baseline_cache_miss_on_base_sha_mismatch(tmp_path: Path) -> None:
+    """Cache with different base_sha returns None (stale)."""
+    import evaluation.test_runner as tr_mod
+
+    original = tr_mod._BASELINE_CACHE_DIR
+    cache_root = tmp_path / "test_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    tr_mod._BASELINE_CACHE_DIR = cache_root
+    try:
+        tr_mod._save_baseline_cache(
+            "inst-1",
+            {"base_sha": "oldsha", "tests_before": [], "tests_head": [], "ground_truth": {}},
+        )
+        loaded = tr_mod._load_baseline_cache("inst-1", "newsha")
+        assert loaded is None
+    finally:
+        tr_mod._BASELINE_CACHE_DIR = original
+
+
+def test_baseline_cache_corrupt_json(tmp_path: Path) -> None:
+    """Corrupt JSON file returns None, not an exception."""
+    import evaluation.test_runner as tr_mod
+
+    original = tr_mod._BASELINE_CACHE_DIR
+    cache_root = tmp_path / "test_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    (cache_root / "bad-inst.json").write_text("{{not json", encoding="utf-8")
+    tr_mod._BASELINE_CACHE_DIR = cache_root
+    try:
+        result = tr_mod._load_baseline_cache("bad-inst", "abc")
+        assert result is None
+    finally:
+        tr_mod._BASELINE_CACHE_DIR = original
+
+
+def test_baseline_cache_missing_base_sha_field(tmp_path: Path) -> None:
+    """Cache with no base_sha field returns None (no match)."""
+    import evaluation.test_runner as tr_mod
+
+    original = tr_mod._BASELINE_CACHE_DIR
+    cache_root = tmp_path / "test_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    (cache_root / "no-sha.json").write_text('{"tests_before": []}', encoding="utf-8")
+    tr_mod._BASELINE_CACHE_DIR = cache_root
+    try:
+        result = tr_mod._load_baseline_cache("no-sha", "abc")
+        assert result is None  # base_sha missing → can't match
+    finally:
+        tr_mod._BASELINE_CACHE_DIR = original
+
+
+# ── Repo-verified markers (T4) ──────────────────────────────────────────────
+
+
+def test_repo_not_verified_initially(tmp_path: Path) -> None:
+    """Fresh repo returns False for _is_repo_verified."""
+    import evaluation.test_runner as tr_mod
+
+    original = tr_mod._VERIFIED_DIR
+    tr_mod._VERIFIED_DIR = tmp_path / "test_cache" / "_verified"
+    tr_mod._VERIFIED_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        assert not tr_mod._is_repo_verified("owner/repo")
+    finally:
+        tr_mod._VERIFIED_DIR = original
+
+
+def test_mark_repo_verified_creates_file(tmp_path: Path) -> None:
+    """After _mark_repo_verified, _is_repo_verified returns True."""
+    import evaluation.test_runner as tr_mod
+
+    original = tr_mod._VERIFIED_DIR
+    tr_mod._VERIFIED_DIR = tmp_path / "test_cache" / "_verified"
+    tr_mod._VERIFIED_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        assert not tr_mod._is_repo_verified("a/b")
+        tr_mod._mark_repo_verified("a/b")
+        assert tr_mod._is_repo_verified("a/b")
+    finally:
+        tr_mod._VERIFIED_DIR = original
+
+
+def test_repo_slashes_mapped_to_underscores(tmp_path: Path) -> None:
+    """Repo names with slashes are stored with underscores in the marker filename."""
+    import evaluation.test_runner as tr_mod
+
+    original = tr_mod._VERIFIED_DIR
+    tr_mod._VERIFIED_DIR = tmp_path / "test_cache" / "_verified"
+    tr_mod._VERIFIED_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        tr_mod._mark_repo_verified("owner/repo")
+        assert tr_mod._verified_marker_path("owner/repo").name == "owner_repo"
+        assert tr_mod._verified_marker_path("a/b/c").name == "a_b_c"
+    finally:
+        tr_mod._VERIFIED_DIR = original
+
+
+def test_repos_independent_verified_status(tmp_path: Path) -> None:
+    """Verifying one repo does not mark another."""
+    import evaluation.test_runner as tr_mod
+
+    original = tr_mod._VERIFIED_DIR
+    tr_mod._VERIFIED_DIR = tmp_path / "test_cache" / "_verified"
+    tr_mod._VERIFIED_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        tr_mod._mark_repo_verified("repo-a")
+        assert tr_mod._is_repo_verified("repo-a")
+        assert not tr_mod._is_repo_verified("repo-b")
+    finally:
+        tr_mod._VERIFIED_DIR = original
