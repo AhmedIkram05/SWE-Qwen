@@ -114,12 +114,16 @@ def _generate_patches(
     variant: str,
     prompt_template: str,
     examples: list[EvalInput],
+    max_new_tokens: int = 2048,
 ) -> list[str]:
     """Generate patches for *examples* via ``evaluation.inference``.
 
     Thin wrapper over the Modal ``generate_patches_batch`` function (imported
     lazily) so the harness never touches Modal at import time and tests can
     replace this function wholesale.
+
+    Args:
+        max_new_tokens: Maximum completion length (per-tier C2 config).
     """
     from evaluation.inference import app as _inference_app
     from evaluation.inference import generate_patches_batch
@@ -138,10 +142,13 @@ def _generate_patches(
     patches: list[str] = []
     for i in range(0, len(examples), _INFER_CHUNK_SIZE):
         chunk = examples[i : i + _INFER_CHUNK_SIZE]
-        # Modal 1.x: @app.function() objects are not callable — invoke via .remote()
         patches.extend(
             generate_patches_batch.remote(  # type: ignore[no-any-return]
-                model_name, variant, prompt_template, chunk
+                model_name,
+                variant,
+                prompt_template,
+                chunk,
+                max_new_tokens=max_new_tokens,
             )
         )
     return patches
@@ -169,6 +176,8 @@ def _run_tests(example: EvalInput, generated_patch: str, config: EvalConfig) -> 
         pass_to_pass=example.pass_to_pass,
         timeout=config.test_timeout_seconds,
         max_retries=config.max_retries,
+        instance_id=example.instance_id,
+        verify_mode=config.verify_mode,
     )
 
 
@@ -232,6 +241,7 @@ def _run_tests_batch_modal(
         test_jobs,
         timeout=config.test_timeout_seconds,
         max_retries=config.max_retries,
+        verify_mode=config.verify_mode,
     )
 
 
@@ -309,6 +319,7 @@ def _run_tests_swebench(
             pass_to_pass=example.pass_to_pass or [],
             timeout=config.test_timeout_seconds,
             max_retries=config.max_retries,
+            verify_mode=config.verify_mode,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_parallel) as pool:
@@ -681,10 +692,10 @@ class WandbLogger:
 # ── EvaluationHarness ────────────────────────────────────────────────────────
 
 
-# Approximate Modal list rates (2026).  Replace with actual billed amounts in
-# Phase 8 (observability/cost.py).  ponytail: constants, not config — tuning
-# the estimate is a copy-paste edit until Phase 8.
-_GPU_RATE_PER_MIN = 0.0167  # A10G-24GB ≈ $1.00/hr
+# Approximate Modal list rates (2026).  C3: Rate changed from A10G ($0.0167/min)
+# to A100-80GB ($0.0417/min) because ``inference.py`` hardcodes A100-80GB.
+# Update when config.inference_gpu switches to a different GPU tier.
+_GPU_RATE_PER_MIN = 0.0417  # A100-80GB ≈ $2.50/hr (was 0.0167 for A10G)
 _VCPU_RATE_PER_HOUR = 0.008  # Modal CPU
 _TEST_MIN_PER_INSTANCE = 1.5  # est. wall min/instance on swebench images (repo-batched)
 _VCPUS_PER_TEST_CONTAINER = 2
@@ -961,19 +972,23 @@ class EvaluationHarness:
             error=error,
         )
 
-    def run_batch(  # noqa: PLR0912, PLR0915
+    def run_batch(  # noqa: PLR0912, PLR0915, PLR0913, PLR0917
         self,
         examples: list[EvalInput],
         model_name: str,
         variant: str,
         prompt_template: str,
         run_id: str,
+        max_new_tokens: int = 2048,
     ) -> list[EvalResult]:
         """Run a batch with per-repo checkpoint resume.
 
         Generates patches for ALL non-completed examples in a single
         ``_generate_patches`` call (one Modal container lifetime), then
         processes per-repo for tests and checkpointing.
+
+        Args:
+            max_new_tokens: Maximum generation length (per-tier C2 config).
         """
         if not examples:
             return []
@@ -990,18 +1005,7 @@ class EvaluationHarness:
         for example in examples:
             by_repo.setdefault(example.repo, []).append(example)
 
-        # Phase 1: identify non-completed repos, collect all examples
-        pending_repos: dict[str, list[EvalInput]] = {}
-        for repo in sorted(by_repo):
-            key = self.checkpoint_mgr.get_checkpoint_key(
-                run_id, repo, model_name, variant, prompt_template
-            )
-            if self.checkpoint_mgr.is_completed(key):
-                logger.info("skipping completed repo %s (checkpoint %s)", repo, key)
-                continue
-            pending_repos[repo] = by_repo[repo]
-
-        # Phase 1: identify non-completed repos, collect all examples
+        # Phase 1: identify non-completed repos
         pending_repos: dict[str, list[EvalInput]] = {}
         for repo in sorted(by_repo):
             key = self.checkpoint_mgr.get_checkpoint_key(
@@ -1016,23 +1020,32 @@ class EvaluationHarness:
         for repo in sorted(pending_repos):
             all_instances.extend(pending_repos[repo])
 
-        # Generate patches for ALL pending examples in ONE call.  Measure the
-        # call so inference cost/latency can be amortized per instance.
-        patches_map: dict[str, str] = {}
+        # C4: reuse generated_patches from checkpointed results where available.
+        # Build a set of instance_ids that already have patches from loaded results.
+        loaded_patches: dict[str, str] = {
+            r.instance_id: r.generated_patch for r in loaded if r.generated_patch
+        }
+
+        # Only generate patches for instances WITHOUT cached patches
+        patches_map: dict[str, str] = dict(loaded_patches)
+        new_instances = [ex for ex in all_instances if ex.instance_id not in loaded_patches]
         per_instance_latency = 0.0
-        if all_instances:
+        if new_instances:
             _gen_start = time.monotonic()
-            patches = _generate_patches(model_name, variant, prompt_template, all_instances)
+            patches = _generate_patches(
+                model_name,
+                variant,
+                prompt_template,
+                new_instances,
+                max_new_tokens=max_new_tokens,
+            )
             gen_seconds = max(time.monotonic() - _gen_start, 0.0)
-            per_instance_latency = gen_seconds / len(all_instances)
-            for i, example in enumerate(all_instances):
+            per_instance_latency = gen_seconds / max(len(all_instances), 1)
+            for i, example in enumerate(new_instances):
                 patches_map[example.instance_id] = patches[i] if i < len(patches) else ""
 
         # Phase 2: test execution.  Swebench images first — ONE pool call over
-        # ALL pending instances.  Per-(repo, base_sha)-group calls would
-        # serialize: SWE-bench instances have unique base_shas → group size
-        # ~1 → effective concurrency ~1, 15-25x off the wall-time target.
-        # Fallback: clone/install batch path per (repo, base_sha) group.
+        # ALL pending instances (both freshly-generated and cached patches).
         swebench_results: dict[str, dict[str, Any]] = {}
         if self.config.use_swebench_images:
             _id_instances = [ex for ex in all_instances if ex.instance_id]
@@ -1051,10 +1064,6 @@ class EvaluationHarness:
         for repo in sorted(pending_repos):
             repo_examples = pending_repos[repo]
 
-            # SWE-bench instances in one repo have DIFFERENT base commits and
-            # test patches — group by base_sha so each group evaluates against
-            # the right state.  (The old repo-only grouping was wrong for
-            # every instance but the first.)
             by_base: dict[str, list[EvalInput]] = {}
             for example in repo_examples:
                 by_base.setdefault(example.base_sha, []).append(example)
@@ -1062,7 +1071,6 @@ class EvaluationHarness:
             for base_sha in sorted(by_base):
                 group = by_base[base_sha]
 
-                # Build test jobs list (per-job test_patch + instance_id)
                 test_jobs: list[dict[str, Any]] = []
                 for example in group:
                     patch = patches_map.get(example.instance_id, "")
@@ -1076,12 +1084,8 @@ class EvaluationHarness:
                         }
                     )
 
-                # Batch-fallback only for instances missing swebench results
-                # (swebench raised, or instance has no image id).  Preserves
-                # per-job test_patch so fallback results stay correct.
                 missing = [ex for ex in group if ex.instance_id not in swebench_results]
                 if missing:
-                    _by_id = {ex.instance_id: ex for ex in group}
                     _fallback_jobs = [
                         job
                         for job in test_jobs
@@ -1094,12 +1098,9 @@ class EvaluationHarness:
                         _fallback_jobs,
                         self.config,
                     )
-                    # zip without strict: runner may return fewer results,
-                    # unmatched examples fall through to the per-example path.
                     for example, result in zip(missing, _fallback_results):  # noqa: B905
                         swebench_results[example.instance_id] = result
 
-                # Pair results back with examples
                 for example in group:
                     result = swebench_results.get(example.instance_id)
                     if result is not None:
@@ -1113,7 +1114,6 @@ class EvaluationHarness:
                             latency_seconds=per_instance_latency,
                         )
                     else:
-                        # Runner returned fewer results — per-example path
                         eval_result = self.run_example(
                             example,
                             model_name,
@@ -1123,10 +1123,6 @@ class EvaluationHarness:
                         )
                     results_by_repo[repo].append(eval_result)
 
-            # Checkpoint per repo — but only when EVERY result is clean.
-            # Error results (truncation, ground-truth failure, container
-            # crash) must not be checkpointed, or --resume would skip the
-            # repo forever and the errors would be permanent F2P=0 rows.
             repo_results = results_by_repo[repo]
             new.extend(repo_results)
             key = self.checkpoint_mgr.get_checkpoint_key(
@@ -1207,7 +1203,14 @@ class EvaluationHarness:
         sample: int,
         run_id: str | None,
     ) -> EvalRun:
-        """Shared runner: load → sample → per-combo batches → aggregate → log."""
+        """Shared runner: load → sample → per-combo batches → aggregate → log.
+
+        T1: Combos run in parallel via ThreadPoolExecutor (max_workers = number
+        of combos) so gen+test for different (model, variant, template) combos
+        overlap — wall time is roughly the slowest combo, not the sum of all.
+        """
+        import concurrent.futures
+
         run_id = run_id or make_run_id()
         started_at = datetime.now(UTC)
         examples = self.load_examples(split, run_id=run_id)
@@ -1222,10 +1225,44 @@ class EvaluationHarness:
                 self.config.tier_seed,
             )
 
+        # Determine max_new_tokens from tier config by matching sample size.
+        # Sorted by size ascending so the smallest enclosing tier wins.
+        max_new_tokens = 2048
+        if sample == 0 or sample >= 1500:  # noqa: PLR2004
+            max_new_tokens = self.config.tier_max_new_tokens.get("full", 2048)
+        else:
+            for _tier, _size in sorted(self.config.tier_sizes.items(), key=lambda x: x[1]):
+                if _size > 0 and sample <= _size:
+                    max_new_tokens = self.config.tier_max_new_tokens.get(_tier, 1024)
+                    break
+
+        # T1: run all (model, variant, template) combos in parallel.
+        combos = [
+            (model_name, variant, template)
+            for model_name, variant in models
+            for template in prompt_templates
+        ]
+        all_results: list[list[EvalResult]] = [None] * len(combos)  # type: ignore[list-item]
+
+        def _run_combo(idx: int) -> None:
+            model_name, variant, template = combos[idx]
+            all_results[idx] = self.run_batch(
+                examples,
+                model_name,
+                variant,
+                template,
+                run_id,
+                max_new_tokens=max_new_tokens,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(combos)) as pool:
+            # ponytail: consume the lazy iterator so exceptions propagate
+            list(pool.map(_run_combo, range(len(combos))))
+
         results: list[EvalResult] = []
-        for model_name, variant in models:
-            for template in prompt_templates:
-                results.extend(self.run_batch(examples, model_name, variant, template, run_id))
+        for batch_results in all_results:
+            if batch_results:
+                results.extend(batch_results)
         self.results.extend(results)
 
         run = EvalRun(
