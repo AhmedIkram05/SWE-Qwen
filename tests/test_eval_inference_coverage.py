@@ -393,30 +393,29 @@ class TestResolveAdapterPath:
 
 class TestGetLLM:
     def test_creates_llm(self, fake_vllm):
-        llm = _get_llm("Qwen/Qwen3-14B", "baseline_14b", None)
+        llm = _get_llm("Qwen/Qwen3-14B")
         assert fake_vllm["llm"] == {
             "model": "Qwen/Qwen3-14B",
-            "enable_lora": False,
+            "enable_lora": True,  # C1: always True to support both baseline and LoRA variants
             "gpu_memory_utilization": 0.85,
         }
         assert fake_vllm["llm_instances"] == 1
         assert llm is not None
 
     def test_cache_hit(self, fake_vllm):
-        first = _get_llm("m1", "v1", None)
-        second = _get_llm("m1", "v1", None)
+        first = _get_llm("m1")
+        second = _get_llm("m1")
         assert first is second
         assert fake_vllm["llm_instances"] == 1
 
-    def test_cache_keyed_by_model_and_variant(self, fake_vllm):
-        _get_llm("m1", "v1", None)
-        _get_llm("m1", "v2", None)
-        _get_llm("m2", "v1", None)
-        assert fake_vllm["llm_instances"] == 3
+    def test_cache_keyed_by_model_only(self, fake_vllm):
+        _get_llm("m1")
+        _get_llm("m2")
+        assert fake_vllm["llm_instances"] == 2  # C1: same model = same LLM regardless of variant
 
     def test_lora_enabled_with_adapter(self, fake_vllm):
-        _get_llm("m1", "v1", "/tmp/adapter")
-        assert fake_vllm["llm"]["enable_lora"] is True
+        _get_llm("m1")
+        assert fake_vllm["llm"]["enable_lora"] is True  # C1: always True
 
 
 # ── generate_patches_batch (Modal body via .local) ────────────────────────
@@ -432,7 +431,7 @@ class TestGeneratePatchesBatch:
         def fake_resolve(variant, config):
             seen["resolve"] = (variant, config is not None)
 
-        def fake_get_llm(model_name, variant, adapter_path):
+        def fake_get_llm(model_name, adapter_path=None):
             return llm
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
@@ -467,7 +466,7 @@ class TestGeneratePatchesBatch:
         def fake_resolve(variant, config):
             return "/tmp/lora-adapter"
 
-        def fake_get_llm(model_name, variant, adapter_path):
+        def fake_get_llm(model_name, adapter_path=None):
             return llm
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
@@ -494,7 +493,7 @@ class TestGeneratePatchesBatch:
         def fake_resolve(variant, config):
             return None
 
-        def fake_get_llm(model_name, variant, adapter_path):
+        def fake_get_llm(model_name, adapter_path=None):
             return RawLLM()
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
@@ -502,3 +501,60 @@ class TestGeneratePatchesBatch:
 
         out = generate_patches_batch.local("qwen3-14b", "baseline_14b", "chat", [_example()])
         assert out == ["diff --git a/fix.py b/fix.py\n@@ -1 +1 @@"]
+
+
+# ── C1: shared LLM across variants ─────────────────────────────────────────
+
+
+class TestSharedLLM:
+    def test_same_model_different_variants_return_same_llm(self, fake_vllm):
+        """C1: _get_llm caches by model_name only, so different variants share the same LLM."""
+        import evaluation.inference as inf
+
+        inf._LLM_CACHE.clear()
+        instance_ids: list[int] = []
+
+        class _TrackingLLM:
+            def __init__(self, **kw):
+                instance_ids.append(id(self))
+
+        class _TrackingSamplingParams:
+            def __init__(self, **kw):
+                self.kwargs = kw
+
+        fake_vllm_v2 = types.ModuleType("vllm")
+        fake_vllm_v2.LLM = _TrackingLLM
+        fake_vllm_v2.SamplingParams = _TrackingSamplingParams
+        lora2 = types.ModuleType("vllm.lora")
+        lora_req2 = types.ModuleType("vllm.lora.request")
+        lora_req2.LoRARequest = type(
+            "LoRARequest", (), {"__init__": lambda s, **kw: setattr(s, "kwargs", kw)}
+        )
+        lora2.request = lora_req2
+
+        monkeypatch2 = pytest.MonkeyPatch()
+        monkeypatch2.setattr(inf, "resolve_hf_id", lambda _: "fake/model")
+        monkeypatch2.setitem(sys.modules, "vllm", fake_vllm_v2)
+        monkeypatch2.setitem(sys.modules, "vllm.lora", lora2)
+        monkeypatch2.setitem(sys.modules, "vllm.lora.request", lora_req2)
+
+        from evaluation.inference import _get_llm
+
+        # Both calls: same model_name → same LLM instance
+        llm_a = _get_llm("qwen3-14b")
+        llm_b = _get_llm("qwen3-14b")
+        assert llm_a is llm_b
+        assert len(instance_ids) == 1  # one LLM constructed
+
+        # Different model_name → different LLM instance
+        llm_c = _get_llm("qwen3-30b")
+        assert len(instance_ids) == 2
+
+        monkeypatch2.undo()
+
+    def test_generate_patches_batch_has_local_for_testing(self):
+        """C3: generate_patches_batch.local delegates to _generate_patches_batch_body."""
+        from evaluation.inference import generate_patches_batch
+
+        assert hasattr(generate_patches_batch, "local")
+        assert callable(generate_patches_batch.local)
