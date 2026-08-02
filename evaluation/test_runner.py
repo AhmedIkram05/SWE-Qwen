@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -547,16 +548,26 @@ def _install_repo(repo_dir: Path, timeout: int = 900, cache_dir: str | Path | No
     venv_dir = test_cache / repo_name / ".venv"
     marker = venv_dir / (repo_dir.name + ".installed")
 
+    pyvenv_cfg = venv_dir / "pyvenv.cfg"
     if marker.exists():
-        logger.info("reusing cached venv for %s", repo_dir)
-        sys.prefix = str(venv_dir)
-        # activate venv for subsequent subprocess calls
-        _activate_venv(venv_dir)
-        return
+        # Rebuild stale venvs created without --system-site-packages (they lack
+        # pytest, which only lives in the base image python).  ponytail: check
+        # cfg text once, rebuild once, then fast path forever.
+        stale = pyvenv_cfg.is_file() and "system_site_packages = true" not in pyvenv_cfg.read_text()
+        if stale:
+            logger.warning("rebuilding stale venv for %s (missing system site packages)", repo_dir)
+            shutil.rmtree(venv_dir, ignore_errors=True)
+            marker.unlink(missing_ok=True)
+        else:
+            logger.info("reusing cached venv for %s", repo_dir)
+            sys.prefix = str(venv_dir)
+            # activate venv for subsequent subprocess calls
+            _activate_venv(venv_dir)
+            return
 
     if not venv_dir.exists():
         subprocess.run(
-            [sys.executable, "-m", "venv", str(venv_dir)],
+            [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
             capture_output=True,
             timeout=30,
             check=True,
