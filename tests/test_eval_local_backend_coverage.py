@@ -13,6 +13,7 @@ import types
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from evaluation import schema as eschema
@@ -76,6 +77,15 @@ def fake_httpx(monkeypatch) -> dict[str, Any]:
         return FakeResp(payload)
 
     fake = types.ModuleType("httpx")
+
+    # generate_patches_local lazily pulls peft/transformers/huggingface_hub
+    # (which import httpx.HTTPError/Response/Client at import time). Delegate
+    # anything the fake doesn't define back to the real httpx so those imports
+    # still work while `post` below stays scripted.
+    def _delegate(name: str):
+        return getattr(httpx, name)
+
+    fake.__getattr__ = _delegate
     fake.post = post
     monkeypatch.setitem(sys.modules, "httpx", fake)
     return state

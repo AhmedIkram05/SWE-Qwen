@@ -148,7 +148,7 @@ ignore = [
     "PLC0415", # import at top-level — lazy imports in Modal functions are intentional
 ]
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "ARG001", "ARG002", "PLR2004", "B018", "F841", "E741", "SIM117", "PLR0913", "PLR0917", "E402"]
+"tests/*" = ["S101", "ARG001", "ARG002", "ARG005", "PLR2004", "B018", "F841", "E741", "SIM117", "PLR0913", "PLR0917", "E402"]
 "*.py" = ["T201"]
 "data_engineering/cli.py" = ["B008", "PLR0913", "PLR0917", "W292"]
 "evaluation/cli.py" = ["B008", "PLR0913", "PLR0917"]
