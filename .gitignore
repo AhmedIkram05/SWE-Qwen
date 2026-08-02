@@ -233,6 +233,7 @@ wandb/
 .modal/
 models/
 
+
 # Service account keys (GCP)
 *-sa-key.json
 *-service-account-key.json
@@ -282,3 +283,4 @@ data/*/
 # Evaluation harness runtime output
 data/eval_checkpoints/
 data/eval_results/
+data/golden.jsonl
