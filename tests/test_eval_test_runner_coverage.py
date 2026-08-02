@@ -160,8 +160,10 @@ class TestQuoteKName:
     def test_spaces_quoted(self):
         assert tr._quote_k_name("test with space") == '"test with space"'
 
-    def test_quotes_and_backslash_escaped(self):
-        assert tr._quote_k_name('te"st\\x') == '"te\\"st\\\\x"'
+    def test_quotes_and_backslash_stripped(self):
+        # pytest's -k parser rejects embedded quotes/backslashes (no escape
+        # support), so they are stripped rather than escaped.
+        assert tr._quote_k_name('te"st\\x') == "testx"
 
     def test_parametrize_suffix_quoted(self):
         assert tr._quote_k_name("test_x[1]") == '"test_x[1]"'

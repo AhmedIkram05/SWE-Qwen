@@ -157,9 +157,15 @@ def _quote_k_name(name: str) -> str:
     # Strip file path from full node ID: ``tests/foo.py::test_bar`` → ``test_bar``
     if "::" in name:
         name = name.split("::", 1)[1]
-    if any(c in name for c in " \t'\"()[]{}&|!~,;:"):
-        escaped = name.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
+    # pytest's -k parser does NOT support backslash-escapes inside quoted
+    # strings, so drop characters that would break it (stray quotes / slashes
+    # leak in from corrupted golden test-name fragments). A name that empties
+    # out contributes nothing to the OR-expression.
+    name = name.replace("\\", "").replace('"', "")
+    if not name:
+        return name
+    if any(c in name for c in " \t'()[]{}&|!~,;:"):
+        return f'"{name}"'
     return name
 
 
