@@ -241,6 +241,16 @@ def _attempts_from_report(
             logger.debug(
                 "_attempts_from_report: unmatched name=%r (nodeids: %d)", name, len(nodeids)
             )
+    if test_names and len(by_name) < len(test_names):
+        logger.warning(
+            "pytest matched %d/%d requested names in %s; unseen names (first 5): %s; "
+            "sample nodeids (first 5): %s",
+            len(by_name),
+            len(test_names),
+            len(nodeids),
+            [n for n in test_names if n not in by_name][:5],
+            nodeids[:5],
+        )
     return by_name, nodeids
 
 
@@ -260,7 +270,7 @@ def _parse_stdout_report(stdout: str) -> dict[str, _Attempt] | None:
     return attempts or None
 
 
-def _run_pytest_once(  # noqa: PLR0912
+def _run_pytest_once(  # noqa: PLR0912, PLR0915
     repo_path: Path,
     test_names: list[str],
     timeout: int,
@@ -367,12 +377,41 @@ def _run_pytest_once(  # noqa: PLR0912
     except Exception as e:
         logger.warning("Failed to cleanup report file %s: %s", report_path, e)
     if report is None:
-        logger.warning("pytest JSON report missing in %s — falling back to stdout parse", repo_path)
+        logger.warning(
+            "pytest JSON report missing in %s (rc=%s) — falling back to stdout parse; "
+            "stderr tail:\n%s",
+            repo_path,
+            proc.returncode,
+            (proc.stderr or "")[-2000:],
+        )
         attempts = _parse_stdout_report(proc.stdout)
         if attempts is not None:
             return attempts, list(attempts)
         return ({n: _errored_attempt("pytest produced no report") for n in test_names}, [])
-    return _attempts_from_report(report, test_names)
+    attempts, nodeids = _attempts_from_report(report, test_names)
+    if not nodeids and test_names:
+        # diagnostics: why did pytest collect nothing at all?
+        coll_errors = []
+        for c in report.get("collectors") or []:
+            if not isinstance(c, dict):
+                continue
+            for r in c.get("result") or []:
+                if not isinstance(r, dict):
+                    continue
+                lp = r.get("longrepr")
+                if isinstance(lp, str) and lp not in coll_errors:
+                    coll_errors.append(lp)
+        logger.warning(
+            "pytest collected 0/%d tests in %s (rc=%s); stdout tail:\n%s\nstderr tail:\n%s\n"
+            "collector errors:\n%s",
+            len(test_names),
+            repo_path,
+            proc.returncode,
+            (proc.stdout or "")[-2000:],
+            (proc.stderr or "")[-2000:],
+            "\n---\n".join(coll_errors)[-4000:],
+        )
+    return attempts, nodeids
 
 
 def collect_test_results(
@@ -599,7 +638,9 @@ def _install_repo(repo_dir: Path, timeout: int = 900, cache_dir: str | Path | No
                 cwd=repo_dir,
             )
         logger.warning(
-            "repo installation may be incomplete for %s: %s", repo_dir, proc.stderr[:200]
+            "repo installation may be incomplete for %s. stderr tail:\n%s",
+            repo_dir,
+            (proc.stderr or "")[:4000],
         )
 
     marker.touch()
@@ -1170,6 +1211,21 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
                 f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
                     tests_before, tests_head, fail_to_pass, pass_to_pass
                 )
+                _before_names = {t.name for t in tests_before}
+                _head_names = {t.name for t in tests_head}
+                logger.info(
+                    "ground truth for %s: f2p=%.2f p2p=%.2f | before: %d/%d collected, "
+                    "head: %d/%d collected | f2p missed in before: %s | f2p missed in head: %s",
+                    repo,
+                    f2p,
+                    p2p,
+                    len(tests_before),
+                    len(job_test_names),
+                    len(tests_head),
+                    len(job_test_names),
+                    [n for n in fail_to_pass if n not in _before_names][:3],
+                    [n for n in fail_to_pass if n not in _head_names][:3],
+                )
                 ground_truth = {
                     "f2p": f2p,
                     "p2p": p2p,
@@ -1201,7 +1257,12 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
 
         generated_patch = job.get("generated_patch") or ""
         if generated_patch:
-            logger.info("Applying generated patch for job %d", i + 1)
+            logger.info(
+                "Applying generated patch for job %d (%d bytes):\n%s",
+                i + 1,
+                len(generated_patch),
+                generated_patch[:800],
+            )
             # ponytail: _reset_to_base already ran — skip the redundant checkout
             patch_result = apply_patch(repo_dir, generated_patch, base_sha, skip_checkout=True)
             if patch_result.success:
