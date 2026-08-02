@@ -170,6 +170,19 @@ def _quote_k_name(name: str) -> str:
     return "".join(c for c in name if _K_IDENT_RE.match(c))
 
 
+def _dedup_names(names: list[str]) -> list[str]:
+    """Remove names that are truncated parametrize IDs from SWE-bench.
+
+    SWE-bench HF data stores test names from output logs, and some
+    parametrize IDs are truncated (e.g. ``test_parse_noqa[noqa:`` vs
+    the full ``test_parse_noqa[noqa:-expected3]``).  A valid pytest
+    node ID that is parametrized *always* ends with ``]``.  Any name
+    that has an opening ``[`` but no trailing ``]`` is a truncated
+    prefix and can never match a real collected test.
+    """
+    return [n for n in names if not ("[" in n and not n.endswith("]"))]
+
+
 def _build_k_expression(test_names: list[str]) -> str:
     """Build a pytest ``-k`` expression selecting the given test names."""
     tokens = [t for t in (_quote_k_name(n) for n in test_names) if t]
@@ -450,6 +463,9 @@ def collect_test_results(
     from evaluation.schema import TestResult
 
     names = [n for n in test_names if n]
+    # Remove names that are strict substrings of another name (corrupted
+    # prefix duplicates from SWE-bench HF data truncation).
+    names = _dedup_names(names)
     full_suite = not names
     attempts: dict[str, list[_Attempt]] = {}
 
@@ -662,6 +678,68 @@ def _activate_venv(venv_dir: Path) -> None:
     os.environ["PATH"] = venv_bin + os.pathsep + env_path
 
 
+# ── Baseline cache (T3: reuse tests_before/tests_head across variants) ────────
+
+
+_BASELINE_CACHE_DIR = Path("/test_cache") / "instance_baselines"
+_VERIFIED_DIR = Path("/test_cache") / ".verified"
+
+
+def _baseline_cache_path(instance_id: str) -> Path:
+    """Path to the cached baseline for *instance_id*."""
+    return _BASELINE_CACHE_DIR / f"{instance_id}.json"
+
+
+def _load_baseline_cache(instance_id: str, base_sha: str) -> dict[str, Any] | None:
+    """Load cached tests_before/tests_head/ground_truth for *instance_id*.
+
+    Returns None if no cache exists or the cached base_sha doesn't match.
+    """
+    path = _baseline_cache_path(instance_id)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("base_sha") != base_sha:
+            logger.debug("baseline cache stale for %s (base_sha mismatch)", instance_id)
+            return None
+        return data  # noqa: TRY300
+    except (OSError, json.JSONDecodeError):
+        logger.warning("corrupt baseline cache for %s", instance_id)
+        return None
+
+
+def _save_baseline_cache(instance_id: str, data: dict[str, Any]) -> None:
+    """Atomically save baseline cache for *instance_id*."""
+    _BASELINE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _baseline_cache_path(instance_id)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        logger.warning("failed to write baseline cache for %s", instance_id)
+
+
+# ── Repo-verified marker (T4: once-per-repo ground-truth verification) ────
+
+
+def _verified_marker_path(repo: str) -> Path:
+    """Path to the verification marker for *repo* (slashes → underscores)."""
+    return _VERIFIED_DIR / repo.replace("/", "_")
+
+
+def _is_repo_verified(repo: str) -> bool:
+    """Return True if this repo's environment has been verified."""
+    return _verified_marker_path(repo).is_file()
+
+
+def _mark_repo_verified(repo: str) -> None:
+    """Write the verification marker for *repo*."""
+    _VERIFIED_DIR.mkdir(parents=True, exist_ok=True)
+    _verified_marker_path(repo).touch(exist_ok=True)
+
+
 # ── SWE-bench official images ────────────────────────────────────────────────
 
 
@@ -683,7 +761,7 @@ def swebench_image(instance_id: str) -> modal.Image:
     )
 
 
-def _execute_instance(  # noqa: PLR0913, PLR0917
+def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     repo_dir: Path,
     base_sha: str,
     test_patch: str | None,
@@ -694,6 +772,8 @@ def _execute_instance(  # noqa: PLR0913, PLR0917
     max_retries: int,
     python_cmd: list[str] | None = None,
     reset_first: bool = True,
+    instance_id: str = "",
+    verify_mode: str = "all",
 ) -> dict[str, Any]:
     """Run the full per-instance eval test sequence against ``repo_dir``.
 
@@ -702,7 +782,11 @@ def _execute_instance(  # noqa: PLR0913, PLR0917
 
     1. Hard-reset to ``base_sha`` (drops any applied patches).
     2. ``tests_before``: selected tests at base state (no retries).
+       → Uses baseline cache when *instance_id* is non-empty and cache exists.
     3. Apply ground-truth ``test_patch`` -> ``tests_head`` -> ground truth.
+       → Skips ground truth when *verify_mode* is ``"once_per_repo"`` and the
+         repo marker exists (first-verifier already validated the env).
+       → Also uses baseline cache when available.
     4. Reset again; apply ``generated_patch`` -> ``tests_after`` (with retries).
 
     Returns the same result-dict shape as ``run_tests_in_container``.
@@ -714,49 +798,100 @@ def _execute_instance(  # noqa: PLR0913, PLR0917
     fail_to_pass = fail_to_pass or []
     pass_to_pass = pass_to_pass or []
     test_names = [*fail_to_pass, *pass_to_pass]
+    repo_name = repo_dir.name if str(repo_dir) == "/testbed" else str(repo_dir)
 
     if reset_first:
         _reset_to_base(repo_dir, base_sha)
 
-    # ponytail: baseline runs use max_retries=0 — flaky detection only matters for the final eval
-    tests_before = collect_test_results(
-        repo_dir, test_names, timeout=timeout, max_retries=0, python_cmd=python_cmd
-    )
-
+    # ── Load or compute tests_before + tests_head (baseline cache) ──
+    tests_before: list[TestResult] = []
     tests_head: list[TestResult] = []
     ground_truth: dict[str, Any] = {}
     error: str | None = None
-    if test_patch:
-        patch_result = apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
-        if patch_result.success:
-            tests_head = collect_test_results(
-                repo_dir, test_names, timeout=timeout, max_retries=0, python_cmd=python_cmd
-            )
-            f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
-                tests_before, tests_head, fail_to_pass, pass_to_pass
-            )
-            ground_truth = {
-                "f2p": f2p,
-                "p2p": p2p,
-                "warning": f2p < _GT_F2P_THRESHOLD,
-            }
-            if f2p < _GT_F2P_THRESHOLD:
-                # Env drift / broken image: the test patch should make ALL
-                # F2P tests pass.  Without this the instance would score as a
-                # model failure indistinguishable from a genuine regression.
-                error = "ground truth F2P<100% (env drift or missing image?)"
-                logger.error("%s for %s", error, repo_dir)
-        else:
-            logger.warning("test_patch application failed for %s: %s", repo_dir, patch_result.error)
+    cached_baseline: dict[str, Any] | None = None
+
+    if instance_id:
+        cached_baseline = _load_baseline_cache(instance_id, base_sha)
+
+    if cached_baseline is not None:
+        # ponytail: reuse cached before/head — identical across variants
+        from evaluation.schema import TestResult
+
+        tests_before = [
+            TestResult.model_validate(t) for t in (cached_baseline.get("tests_before") or [])
+        ]
+        tests_head = [
+            TestResult.model_validate(t) for t in (cached_baseline.get("tests_head") or [])
+        ]
+        ground_truth = cached_baseline.get("ground_truth") or {}
+        logger.info(
+            "baseline cache HIT for %s (%d before, %d head tests)",
+            instance_id or repo_name,
+            len(tests_before),
+            len(tests_head),
+        )
+
     else:
-        logger.info("no test_patch for %s — skipping ground truth verification", repo_dir)
+        # ponytail: baseline runs use max_retries=0 — flaky detection only matters for final eval
+        tests_before = collect_test_results(
+            repo_dir, test_names, timeout=timeout, max_retries=0, python_cmd=python_cmd
+        )
+
+        # Ground-truth verification
+        repo_key = repo_name
+        skip_gt = verify_mode == "once_per_repo" and _is_repo_verified(repo_key)
+        if test_patch and not skip_gt:
+            patch_result = apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
+            if patch_result.success:
+                tests_head = collect_test_results(
+                    repo_dir, test_names, timeout=timeout, max_retries=0, python_cmd=python_cmd
+                )
+                f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
+                    tests_before, tests_head, fail_to_pass, pass_to_pass
+                )
+                ground_truth = {
+                    "f2p": f2p,
+                    "p2p": p2p,
+                    "warning": f2p < _GT_F2P_THRESHOLD,
+                }
+                if f2p < _GT_F2P_THRESHOLD:
+                    error = "ground truth F2P<100% (env drift or missing image?)"
+                    logger.error("%s for %s", error, repo_dir)
+                # First successful verification → mark repo as verified
+                elif verify_mode == "once_per_repo" and not _is_repo_verified(repo_key):
+                    _mark_repo_verified(repo_key)
+                    logger.info("repo %s verified (marker written)", repo_key)
+            else:
+                logger.warning(
+                    "test_patch application failed for %s: %s", repo_dir, patch_result.error
+                )
+        elif skip_gt:
+            logger.info(
+                "ground truth SKIPPED for %s (repo already verified, verify_mode=%s)",
+                repo_name,
+                verify_mode,
+            )
+            ground_truth = {"f2p": 1.0, "p2p": 1.0, "warning": False, "skipped": True}
+        else:
+            logger.info("no test_patch for %s — skipping ground truth verification", repo_name)
+
+        # Save baseline cache for reuse across variants
+        if instance_id and not error:
+            _save_baseline_cache(
+                instance_id,
+                {
+                    "base_sha": base_sha,
+                    "tests_before": [t.model_dump() for t in tests_before],
+                    "tests_head": [t.model_dump() for t in tests_head],
+                    "ground_truth": ground_truth,
+                },
+            )
 
     _reset_to_base(repo_dir, base_sha)
 
     if error is not None:
-        # Ground truth broken → generated-patch tests are meaningless; short-circuit.
         return {
-            "repo": repo_dir.name if str(repo_dir) == "/testbed" else str(repo_dir),
+            "repo": repo_name,
             "base_sha": base_sha,
             "tests_before": [t.model_dump() for t in tests_before],
             "tests_head": [t.model_dump() for t in tests_head],
@@ -789,10 +924,10 @@ def _execute_instance(  # noqa: PLR0913, PLR0917
             method_used="failed",
             error="no generated patch provided",
         )
-        logger.info("no generated patch for %s — skipping patch tests", repo_dir)
+        logger.info("no generated patch for %s — skipping patch tests", repo_name)
 
     return {
-        "repo": repo_dir.name if str(repo_dir) == "/testbed" else str(repo_dir),
+        "repo": repo_name,
         "base_sha": base_sha,
         "tests_before": [t.model_dump() for t in tests_before],
         "tests_head": [t.model_dump() for t in tests_head],
@@ -812,7 +947,7 @@ def _execute_instance(  # noqa: PLR0913, PLR0917
     timeout=1800,  # 30 min: heavy repos (scikit-learn) need 10-15 min for pip install -e .
     gpu=None,  # CPU only for test execution
 )
-def run_tests_in_container(  # noqa: PLR0913, PLR0917
+def run_tests_in_container(  # noqa: PLR0913, PLR0917, PLR0912
     repo: str,
     base_sha: str,
     test_patch: str | None = None,
@@ -821,6 +956,8 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
     pass_to_pass: list[str] | None = None,
     timeout: int = 30,
     max_retries: int = 2,
+    instance_id: str = "",
+    verify_mode: str = "all",
 ) -> dict[str, Any]:
     """Execute the eval test suite for one instance in an isolated container.
 
@@ -833,6 +970,11 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
     6. Revert to ``base_sha``; if ``generated_patch``: apply it and re-run ->
        ``tests_after``.
 
+    When *instance_id* is provided and a baseline cache exists, steps 3-5 are
+    skipped in favour of cached results (T3).  When *verify_mode* is
+    ``"once_per_repo"``, ground-truth verification runs only for the first
+    instance of each repo (T4).
+
     Args:
         repo: ``"owner/name"`` of the GitHub repository.
         base_sha: Commit to evaluate against (pre-fix state).
@@ -842,6 +984,9 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
         pass_to_pass: Test names that should keep passing.
         timeout: Per-test timeout in seconds.
         max_retries: Extra attempts for failed/errored tests (flaky detection).
+        instance_id: SWE-bench instance id (used for cache key; empty = no cache).
+        verify_mode: ``"all"`` (verify every instance), ``"once_per_repo"``
+            (first instance per repo, then skip), or ``"none"`` (skip entirely).
 
     Returns:
         Dict with ``tests_before``/``tests_head``/``tests_after``
@@ -850,13 +995,9 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
         (``{"f2p", "p2p", "warning"}``; empty when no ``test_patch``).
         An ``"error"`` key on repo preparation failure.
     """
-    from evaluation.metrics import compute_f2p
-    from evaluation.patch_applier import apply_patch
-    from evaluation.schema import PatchApplicationResult
 
     fail_to_pass = fail_to_pass or []
     pass_to_pass = pass_to_pass or []
-    test_names = [*fail_to_pass, *pass_to_pass]
     repo_dir = Path("/repo_cache") / repo
 
     try:
@@ -876,81 +1017,18 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917
             "ground_truth": {},
         }
 
-    # ponytail: baseline runs use max_retries=0 — flaky detection only matters for the final eval
-    tests_before = collect_test_results(repo_dir, test_names, timeout=timeout, max_retries=0)
-
-    tests_head: list[TestResult] = []
-    ground_truth: dict[str, Any] = {}
-    error: str | None = None
-    if test_patch:
-        # Caller already checked out base_sha; skip the redundant checkout
-        patch_result = apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
-        if patch_result.success:
-            _install_repo(repo_dir)
-            # ponytail: ground truth also uses max_retries=0 — flaky detection is for eval only
-            tests_head = collect_test_results(repo_dir, test_names, timeout=timeout, max_retries=0)
-            f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
-                tests_before, tests_head, fail_to_pass, pass_to_pass
-            )
-            ground_truth = {
-                "f2p": f2p,
-                "p2p": p2p,
-                "warning": f2p < _GT_F2P_THRESHOLD,
-            }
-            if f2p < _GT_F2P_THRESHOLD:
-                error = "ground truth F2P<100% (env drift or install incomplete?)"
-                logger.error("%s for %s", error, repo)
-        else:
-            logger.warning("test_patch application failed for %s: %s", repo, patch_result.error)
-    else:
-        logger.info("no test_patch for %s — skipping ground truth verification", repo)
-
-    _reset_to_base(repo_dir, base_sha)
-
-    if error is not None:
-        return {
-            "repo": repo,
-            "base_sha": base_sha,
-            "tests_before": [t.model_dump() for t in tests_before],
-            "tests_head": [t.model_dump() for t in tests_head],
-            "tests_after": [],
-            "patch_application": {},
-            "ground_truth": ground_truth,
-            "error": error,
-        }
-
-    tests_after: list[TestResult] = []
-    if generated_patch:
-        patch_result = apply_patch(repo_dir, generated_patch, base_sha)
-        if patch_result.success:
-            _install_repo(repo_dir)
-            tests_after = collect_test_results(
-                repo_dir, test_names, timeout=timeout, max_retries=max_retries
-            )
-        else:
-            logger.warning(
-                "generated patch application failed for %s: %s",
-                repo,
-                patch_result.error,
-            )
-    else:
-        patch_result = PatchApplicationResult(
-            success=False,
-            method_used="failed",
-            error="no generated patch provided",
-        )
-        logger.info("no generated patch for %s — skipping patch tests", repo)
-
-    return {
-        "repo": repo,
-        "base_sha": base_sha,
-        "tests_before": [t.model_dump() for t in tests_before],
-        "tests_head": [t.model_dump() for t in tests_head],
-        "tests_after": [t.model_dump() for t in tests_after],
-        "patch_application": patch_result.model_dump(),
-        "ground_truth": ground_truth,
-        "error": error,
-    }
+    return _execute_instance(
+        repo_dir,
+        base_sha,
+        test_patch,
+        generated_patch,
+        fail_to_pass,
+        pass_to_pass,
+        timeout=timeout,
+        max_retries=max_retries,
+        instance_id=instance_id,
+        verify_mode=verify_mode,
+    )
 
 
 # ── Batch Modal function ──────────────────────────────────────────────────
@@ -965,6 +1043,7 @@ def _run_swebench_instance_body(  # noqa: PLR0913, PLR0917
     pass_to_pass: list[str] | None = None,
     timeout: int = 30,
     max_retries: int = 2,
+    verify_mode: str = "all",
 ) -> dict[str, Any]:
     """Execute one SWE-bench instance inside an official swebench image.
 
@@ -972,6 +1051,10 @@ def _run_swebench_instance_body(  # noqa: PLR0913, PLR0917
     repo with full git history, checked out at the instance base commit plus a
     marker "SWE-bench" commit on top) and a conda env ``testbed`` with the
     project already installed.  No clone, no pip install at eval time.
+
+    Uses the baseline cache (T3) to skip tests_before/tests_head when this
+    instance has already been evaluated in the shared ``/test_cache`` volume.
+    Honours *verify_mode* for once-per-repo ground-truth (T4).
 
     Registered once per REPO by ``swebench_fn`` (one image per repo is enough:
     every instance's base commit exists in the image's git history, so
@@ -996,7 +1079,7 @@ def _run_swebench_instance_body(  # noqa: PLR0913, PLR0917
             capture_output=True,
             text=True,
             timeout=120,
-            check=False,  # we check returncode below
+            check=False,
         )
         if probe.returncode != 0:
             subprocess.run(
@@ -1039,6 +1122,8 @@ def _run_swebench_instance_body(  # noqa: PLR0913, PLR0917
         timeout=timeout,
         max_retries=max_retries,
         python_cmd=["conda", "run", "-n", "testbed", "python"],
+        instance_id=instance_id,
+        verify_mode=verify_mode,
     )
     result["repo"] = instance_id  # /testbed name is useless; carry the real id
     return result
@@ -1080,6 +1165,7 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     test_jobs: list[dict[str, Any]],
     timeout: int = 30,
     max_retries: int = 2,
+    verify_mode: str = "all",
 ) -> list[dict[str, Any]]:
     """Execute test suites for multiple patches in a single container.
 
@@ -1088,6 +1174,9 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     ``test_patch`` (per-job, with a shared-head fast path when all jobs share
     it), verify ground truth, reset, apply the generated patch and run
     ``tests_after``.
+
+    Uses baseline cache (T3) when jobs carry ``instance_id`` keys, and
+    honours *verify_mode* for once-per-repo ground-truth (T4).
 
     Args:
         repo: GitHub repo ``"owner/name"``.
@@ -1099,6 +1188,7 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
             ``pass_to_pass``, and optionally ``test_patch`` / ``instance_id``.
         timeout: Per-test timeout in seconds.
         max_retries: Extra attempts for failed/errored tests.
+        verify_mode: Ground-truth verification mode.
 
     Returns:
         List of result dicts (same shape as ``run_tests_in_container`` return),
@@ -1158,18 +1248,16 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
             shared_tests_head = collect_test_results(
                 repo_dir, all_test_names, timeout=timeout, max_retries=0
             )
+            if verify_mode == "once_per_repo" and not _is_repo_verified(repo):
+                _mark_repo_verified(repo)
         else:
             logger.warning("test_patch application failed for %s: %s", repo, patch_result.error)
 
     # ── Per-job: reset, ground truth, apply generated patch, run tests_after ──
     results: list[dict[str, Any]] = []
     for i, job in enumerate(test_jobs):
-        # Check if we're taking too long
         elapsed = time.time() - start_time
-        # ponytail: fn timeout is 3600s — warn/truncate only when <5 min real margin
-        # remains (calibrated to the slowest first container: pip install -e of a
-        # heavy repo like scikit-learn takes 10-15 min)
-        batch_timeout_warn = 3300  # 3600s fn timeout - 300s cleanup margin
+        batch_timeout_warn = 3300
         if elapsed > batch_timeout_warn:
             logger.warning("Approaching fn timeout for %s, truncating remaining jobs", repo)
             remaining_jobs = len(test_jobs) - i
@@ -1195,58 +1283,84 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
         fail_to_pass = job.get("fail_to_pass") or []
         pass_to_pass = job.get("pass_to_pass") or []
         job_test_names = [*fail_to_pass, *pass_to_pass]
+        job_instance_id = job.get("instance_id") or ""
 
-        # Ground-truth verification for THIS job's test patch
+        # Use baseline cache or compute tests_head
         tests_head: list[TestResult] = []
         ground_truth: dict[str, Any] = {}
         job_error: str | None = None
         job_test_patch = job_test_patches[i]
-        if job_test_patch:
-            if shared_tests_head:
-                tests_head = shared_tests_head
+        cached = _load_baseline_cache(job_instance_id, base_sha) if job_instance_id else None
+
+        if cached is not None:
+            tests_head = [TestResult.model_validate(t) for t in (cached.get("tests_head") or [])]
+            ground_truth = cached.get("ground_truth") or {}
+            logger.info("baseline cache hit for job %s", job_instance_id)
+
+        elif job_test_patch:
+            skip_gt = verify_mode == "once_per_repo" and _is_repo_verified(repo)
+            if skip_gt:
+                ground_truth = {"f2p": 1.0, "p2p": 1.0, "warning": False, "skipped": True}
             else:
-                patch_result = apply_patch(repo_dir, job_test_patch, base_sha, skip_checkout=True)
-                if patch_result.success:
-                    _install_repo(repo_dir)
-                    tests_head = collect_test_results(
-                        repo_dir, job_test_names, timeout=timeout, max_retries=0
-                    )
+                if shared_tests_head:
+                    tests_head = shared_tests_head
                 else:
-                    logger.warning(
-                        "test_patch application failed for %s: %s", repo, patch_result.error
+                    patch_result = apply_patch(
+                        repo_dir, job_test_patch, base_sha, skip_checkout=True
                     )
-            if tests_head:
-                f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
-                    tests_before, tests_head, fail_to_pass, pass_to_pass
+                    if patch_result.success:
+                        _install_repo(repo_dir)
+                        tests_head = collect_test_results(
+                            repo_dir, job_test_names, timeout=timeout, max_retries=0
+                        )
+                    else:
+                        logger.warning(
+                            "test_patch application failed for %s: %s", repo, patch_result.error
+                        )
+                if tests_head:
+                    f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
+                        tests_before, tests_head, fail_to_pass, pass_to_pass
+                    )
+                    _before_names = {t.name for t in tests_before}
+                    _head_names = {t.name for t in tests_head}
+                    logger.info(
+                        "ground truth for %s: f2p=%.2f p2p=%.2f | before: %d/%d collected, "
+                        "head: %d/%d collected | f2p missed in before: %s | f2p missed in head: %s",
+                        repo,
+                        f2p,
+                        p2p,
+                        len(tests_before),
+                        len(job_test_names),
+                        len(tests_head),
+                        len(job_test_names),
+                        [n for n in fail_to_pass if n not in _before_names][:3],
+                        [n for n in fail_to_pass if n not in _head_names][:3],
+                    )
+                    ground_truth = {
+                        "f2p": f2p,
+                        "p2p": p2p,
+                        "warning": f2p < _GT_F2P_THRESHOLD,
+                    }
+                    if f2p < _GT_F2P_THRESHOLD:
+                        job_error = "ground truth F2P<100% (env drift or install incomplete?)"
+                        logger.error("%s for %s", job_error, repo)
+                    elif verify_mode == "once_per_repo" and not _is_repo_verified(repo):
+                        _mark_repo_verified(repo)
+
+            if job_instance_id and not job_error:
+                _save_baseline_cache(
+                    job_instance_id,
+                    {
+                        "base_sha": base_sha,
+                        "tests_before": [],
+                        "tests_head": [t.model_dump() for t in tests_head],
+                        "ground_truth": ground_truth,
+                    },
                 )
-                _before_names = {t.name for t in tests_before}
-                _head_names = {t.name for t in tests_head}
-                logger.info(
-                    "ground truth for %s: f2p=%.2f p2p=%.2f | before: %d/%d collected, "
-                    "head: %d/%d collected | f2p missed in before: %s | f2p missed in head: %s",
-                    repo,
-                    f2p,
-                    p2p,
-                    len(tests_before),
-                    len(job_test_names),
-                    len(tests_head),
-                    len(job_test_names),
-                    [n for n in fail_to_pass if n not in _before_names][:3],
-                    [n for n in fail_to_pass if n not in _head_names][:3],
-                )
-                ground_truth = {
-                    "f2p": f2p,
-                    "p2p": p2p,
-                    "warning": f2p < _GT_F2P_THRESHOLD,
-                }
-                if f2p < _GT_F2P_THRESHOLD:
-                    job_error = "ground truth F2P<100% (env drift or install incomplete?)"
-                    logger.error("%s for %s", job_error, repo)
 
         _reset_to_base(repo_dir, base_sha)
 
         if job_error is not None:
-            # env is broken — generated-patch tests would score as model failures
             logger.error("Skipping generated-patch tests for %s: %s", repo, job_error)
             results.append(
                 {
@@ -1265,22 +1379,12 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
 
         generated_patch = job.get("generated_patch") or ""
         if generated_patch:
-            logger.info(
-                "Applying generated patch for job %d (%d bytes):\n%s",
-                i + 1,
-                len(generated_patch),
-                generated_patch[:800],
-            )
-            # ponytail: _reset_to_base already ran — skip the redundant checkout
             patch_result = apply_patch(repo_dir, generated_patch, base_sha, skip_checkout=True)
             if patch_result.success:
-                logger.info("Generated patch applied successfully, installing repo")
                 _install_repo(repo_dir)
-                logger.info("Running tests_after for job %d (%d tests)", i + 1, len(job_test_names))
                 tests_after = collect_test_results(
                     repo_dir, job_test_names, timeout=timeout, max_retries=max_retries
                 )
-                logger.info("Completed tests_after for job %d", i + 1)
             else:
                 logger.warning(
                     "generated patch application failed for %s: %s",
