@@ -285,7 +285,7 @@ def _patch_harness_backend(*, ollama_model: str, ollama_url: str) -> None:
     import evaluation.harness as harness_mod
     from evaluation.local_backend import generate_patches_local, run_tests_local
 
-    def _gen_patches(model_name, variant, prompt_template, examples):
+    def _gen_patches(model_name, variant, prompt_template, examples, **kwargs):
         return generate_patches_local(
             model_name,
             variant,
@@ -300,6 +300,12 @@ def _patch_harness_backend(*, ollama_model: str, ollama_url: str) -> None:
 
     harness_mod._generate_patches = _gen_patches  # type: ignore[attr-defined]
     harness_mod._run_tests = _run_tests  # type: ignore[attr-defined]
+    harness_mod._run_tests_batch_modal = _raise_modal_disabled  # type: ignore[attr-defined]
+
+
+def _raise_modal_disabled(*args, **kwargs):
+    """Stub for local runs — skip Modal container, go straight to fallback."""
+    raise RuntimeError("Modal batch disabled for local backend")
 
 
 def _resolve_proxy_champion(
