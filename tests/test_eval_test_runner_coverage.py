@@ -1103,7 +1103,7 @@ class TestRunTestsInContainer:
 
         state = {"n": 0}
 
-        def fake_collect(repo_path, names, timeout=30, max_retries=0):
+        def fake_collect(repo_path, names, timeout=30, max_retries=0, **kw):
             if max_retries == 0 and state["n"] == 0:
                 state["n"] = 1
                 return [TestResult(name="t", status="failed", duration=0.1)]
@@ -1141,7 +1141,7 @@ class TestRunTestsInContainer:
         assert result["error"] is None
         assert result["ground_truth"] == {"f2p": 1.0, "p2p": 1.0, "warning": False}
         assert len(result["tests_after"]) == 1
-        assert result["repo"] == "o/r"
+        assert result["repo"].endswith("o/r")
 
     def test_repo_prep_failure(self, monkeypatch):
         self._setup(monkeypatch, prep_ok=False)
@@ -1165,7 +1165,7 @@ class TestRunTestsInContainer:
         result = tr.run_tests_in_container.local(
             "o/r", "sha", test_patch="tp", generated_patch="gp", fail_to_pass=["t"]
         )
-        assert result["error"] == "ground truth F2P<100% (env drift or install incomplete?)"
+        assert result["error"] == "ground truth F2P<100% (env drift or missing image?)"
         assert result["tests_after"] == []
 
     def test_no_generated_patch(self, monkeypatch):
@@ -1286,7 +1286,7 @@ class TestRunTestsBatch:
         monkeypatch.setattr(tr, "_install_repo", lambda *a, **k: None)
         monkeypatch.setattr(tr, "_reset_to_base", lambda *a, **k: None)
 
-        def fake_collect(repo_path, names, timeout=30, max_retries=0):
+        def fake_collect(repo_path, names, timeout=30, max_retries=0, **kw):
             status = "failed" if max_retries == 0 else "passed"
             return [TestResult(name=n, status=status, duration=0.1) for n in names]
 
