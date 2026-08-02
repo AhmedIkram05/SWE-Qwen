@@ -39,10 +39,14 @@ class EvalConfig(BaseSettings):
     repo_timeout_seconds: int = 300
     max_retries: int = 2
     flaky_threshold: float = 0.5  # if pass rate < 0.5 across retries → flaky
-    max_parallel: int = 16  # parallel test jobs (fallback/batch paths)
+    max_parallel: int = 64  # parallel test jobs (swebench + fallback paths)
     use_swebench_images: bool = (
         True  # official per-repo swebench images; clone/install fallback  # noqa: E501
     )
+    # Ground-truth verification mode: "all" = every instance,
+    # "once_per_repo" = first instance per repo verifies, rest skip
+    # "none" = skip entirely (dev iteration only, risk of silent env drift).
+    verify_mode: str = "once_per_repo"
 
     # Quality gates (ADR-005, Master Plan S2)
     min_f2p_threshold: float = 0.15  # Quality floor: minimum F2P to pass
@@ -68,6 +72,15 @@ class EvalConfig(BaseSettings):
     # Eval tiers (EVAL-V5-REDESIGN §2)
     tier_sizes: dict[str, int] = {"smoke": 20, "dev": 100, "final": 500, "full": 0}
     tier_seed: int = 42  # deterministic subsets → paired significance
+    # Per-tier max_new_tokens: shorter output faster/cheaper gen for smoke/dev
+    tier_max_new_tokens: dict[str, int] = {
+        "smoke": 768,
+        "dev": 768,
+        "final": 2048,
+        "full": 2048,
+    }
+    # Inference GPU: A100-80GB is required for 14B bf16; a10g-24gb works for ≤7B
+    inference_gpu: str = "a100-80gb"
 
     model_config = SettingsConfigDict(
         env_prefix="EVAL_",
