@@ -90,18 +90,19 @@ class TestOfflinePipelineComponents:
         # Full node ID with file path
         name = "tests/test_blueprints.py::test_blueprint_specific_error_handling"
         quoted = _quote_k_name(name)
-        # Should strip file path and quote properly
-        assert "::" not in quoted or quoted.startswith('"')
+        # Should strip file path
+        assert quoted == "test_blueprint_specific_error_handling"
 
         # Simple test name
         name = "test_simple"
         quoted = _quote_k_name(name)
         assert quoted == "test_simple"
 
-        # Test name with special chars
+        # Test name with special chars: pytest 7's -k grammar has no quoting,
+        # so characters outside the ident set are stripped (never quoted).
         name = "test[param=value]"
         quoted = _quote_k_name(name)
-        assert quoted.startswith('"') and quoted.endswith('"')
+        assert quoted == "test[paramvalue]"
 
     def test_patch_application_edge_cases(self):
         """Test patch application with various edge cases."""

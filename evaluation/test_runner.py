@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -143,35 +144,36 @@ def _errored_attempt(message: str) -> _Attempt:
 _MISSING_ATTEMPT = _errored_attempt("test not collected by pytest")
 
 
+# pytest ``-k`` expression grammar (pytest 7 ``_pytest.mark.expression``)
+# has no quoted-string support at all: each token must match the ident
+# regex ``(\w|:|\+|\-|\.|\[|\]|\\|/)+``. Any character outside that set
+# (space, ``"``, ``'``, ``(``, ``)``, ``{``, ``&``, ``|``, ``!``, ``;``, ...)
+# aborts parsing with ``unexpected character`` and pytest exits rc=4, so the
+# whole selector fails. The only safe strategy is to keep every character
+# inside the ident set and emit bare tokens.
+# ponytail: single char under `\w` etc (real names carry no back/quote)
+_K_IDENT_RE = re.compile(r"[\w\-\+\.:/\[\]]")
+
+
 def _quote_k_name(name: str) -> str:
-    """Quote a test name for a pytest ``-k`` expression if it needs it.
+    """Sanitize one test name into a bare pytest ``-k`` ident token.
 
-    pytest ``-k`` is a boolean expression on test IDs. Full node IDs
-    (``path/to/file.py::test_name``) don't work because ``:`` is not a
-    valid ``-k`` operator. Strip the file path and keep only the test
-    function name (plus any parametrize suffix).
-
-    Names containing other special characters are wrapped in double quotes
-    with backslash-escapes.
+    pytest ``-k`` is a boolean expression on test IDs and has no quoting.
+    Full node IDs (``path/to/file.py::test_name``) are stripped to the final
+    segment, then every character outside the ident set (from corrupted
+    golden fragments) is dropped. An empty result contributes nothing to the
+    OR-expression and is skipped by the caller.
     """
     # Strip file path from full node ID: ``tests/foo.py::test_bar`` → ``test_bar``
     if "::" in name:
         name = name.split("::", 1)[1]
-    # pytest's -k parser does NOT support backslash-escapes inside quoted
-    # strings, so drop characters that would break it (stray quotes / slashes
-    # leak in from corrupted golden test-name fragments). A name that empties
-    # out contributes nothing to the OR-expression.
-    name = name.replace("\\", "").replace('"', "")
-    if not name:
-        return name
-    if any(c in name for c in " \t'()[]{}&|!~,;:"):
-        return f'"{name}"'
-    return name
+    return "".join(c for c in name if _K_IDENT_RE.match(c))
 
 
 def _build_k_expression(test_names: list[str]) -> str:
     """Build a pytest ``-k`` expression selecting the given test names."""
-    return " or ".join(_quote_k_name(n) for n in test_names)
+    tokens = [t for t in (_quote_k_name(n) for n in test_names) if t]
+    return " or ".join(tokens)
 
 
 def _failure_text(test: dict[str, Any]) -> str:

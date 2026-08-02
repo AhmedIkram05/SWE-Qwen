@@ -157,16 +157,20 @@ class TestQuoteKName:
     def test_node_id_strips_file_path(self):
         assert tr._quote_k_name("tests/foo.py::test_bar") == "test_bar"
 
-    def test_spaces_quoted(self):
-        assert tr._quote_k_name("test with space") == '"test with space"'
+    def test_space_stripped(self):
+        # pytest 7's -k parser has no quoted strings: any character outside
+        # the ident set aborts parsing, so spaces are stripped (names still
+        # match via substring).
+        assert tr._quote_k_name("test with space") == "testwithspace"
 
     def test_quotes_and_backslash_stripped(self):
         # pytest's -k parser rejects embedded quotes/backslashes (no escape
         # support), so they are stripped rather than escaped.
         assert tr._quote_k_name('te"st\\x') == "testx"
 
-    def test_parametrize_suffix_quoted(self):
-        assert tr._quote_k_name("test_x[1]") == '"test_x[1]"'
+    def test_parametrize_suffix_bare(self):
+        # Brackets are part of the ident grammar, so no quoting is needed.
+        assert tr._quote_k_name("test_x[1]") == "test_x[1]"
 
 
 class TestBuildKExpression:
