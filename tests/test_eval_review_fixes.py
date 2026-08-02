@@ -166,8 +166,8 @@ class TestEstimateRunCost:
         r = _result("a")
         r.latency_seconds = 120.0
         cost = self._cost([r])
-        # 120s/60 × $0.0167/min
-        assert cost["inference_usd"] == pytest.approx(2.0 * 0.0167)
+        # 120s/60 × $0.0417/min (A100-80GB, C3 rate fix)
+        assert cost["inference_usd"] == pytest.approx(2.0 * 0.0417)
 
 
 # ── paired_significance ──────────────────────────────────────────────────────
