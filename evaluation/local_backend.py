@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -222,6 +223,28 @@ def _ensure_local_repo(repo: str, repo_dir: Path, base_sha: str) -> None:
         timeout=60,
         check=True,
     )
+    # Install the package in editable mode so its conftest / imports work
+    # during test collection.  Silently skip on failure — some old repos
+    # are incompatible with Python 3.14 (e.g. matplotlib builds from
+    # source), and the user will see the collection error as a pytest
+    # failure downstream.
+    if not (repo_dir / ".installed").exists():
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", str(repo_dir)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=True,
+            )
+            (repo_dir / ".installed").touch()
+        except Exception:
+            logger.warning(
+                "pip install -e failed for %s at %s — tests will fail if "
+                "conftest imports the package",
+                repo,
+                repo_dir,
+            )
 
 
 def _error_response(example: Any, error: str) -> dict[str, Any]:
