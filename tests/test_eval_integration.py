@@ -58,13 +58,15 @@ PASSING_PAYLOAD = {
 }
 
 
-def _fake_generate(model: str, variant: str, template: str, examples: list[EvalInput]) -> list[str]:
+def _fake_generate(
+    model: str, variant: str, template: str, examples: list[EvalInput], **kwargs: object
+) -> list[str]:
     """Stand-in for ``_generate_patches``: one canned patch per example."""
     return [FIX_PATCH] * len(examples)
 
 
 def _fake_generate_empty(
-    model: str, variant: str, template: str, examples: list[EvalInput]
+    model: str, variant: str, template: str, examples: list[EvalInput], **kwargs: object
 ) -> list[str]:
     return []
 
@@ -855,7 +857,7 @@ def test_run_batch_generates_once_per_repo(
     generate_calls: list[list[EvalInput]] = []
 
     def _tracking_generate(
-        model: str, variant: str, template: str, examples: list[EvalInput]
+        model: str, variant: str, template: str, examples: list[EvalInput], **kw: object
     ) -> list[str]:
         generate_calls.append(list(examples))
         return [FIX_PATCH] * len(examples)
@@ -884,7 +886,7 @@ def test_run_example_with_generated_patch(
     generate_calls: list[tuple[str, str, str, list[EvalInput]]] = []
 
     def _tracking_generate(
-        model: str, variant: str, template: str, examples: list[EvalInput]
+        model: str, variant: str, template: str, examples: list[EvalInput], **kw: object
     ) -> list[str]:
         generate_calls.append((model, variant, template, list(examples)))
         return [FIX_PATCH] * len(examples)
@@ -1075,3 +1077,110 @@ def test_run_tests_batch_produces_results(
     assert batch_args[0] == "owner/repo"
     assert batch_args[1] == "abc123"
     assert len(batch_args[3]) == 3
+
+
+# ── C4: Patches reused from checkpoint on resume ────────────────────────────
+
+
+def test_run_batch_reuses_patches_from_checkpoint(
+    config: EvalConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C4: Checkpointed patches are reused; _generate_patches only called for NEW instances."""
+    from evaluation.harness import EvaluationHarness
+
+    harness = EvaluationHarness(config)
+    examples = [_make_input("demo-1"), _make_input("demo-2")]
+    generate_call_count: int = 0
+
+    def _counting_generate(
+        model: str, variant: str, template: str, instances: list, **kw: object
+    ) -> list[str]:
+        nonlocal generate_call_count
+        generate_call_count += 1
+        return [FIX_PATCH] * len(instances)
+
+    monkeypatch.setattr("evaluation.harness._generate_patches", _counting_generate)
+    monkeypatch.setattr("evaluation.harness._run_tests", _fake_run_tests)
+
+    # First run: patches generated (1 call)
+    first = harness.run_batch(examples, "qwen3-14b", "baseline_14b", "chat", "first-run")
+    assert len(first) == 2
+    assert generate_call_count == 1  # C4: initial generation
+
+    # Second run (resume): patches should come from checkpoint, NOT _generate_patches
+    generate_call_count = 0
+    second = harness.run_batch(examples, "qwen3-14b", "baseline_14b", "chat", "first-run")
+    assert len(second) == 2
+    assert generate_call_count == 0  # C4: zero new generate calls — reused from checkpoint
+    assert {r.instance_id for r in second} == {"demo-1", "demo-2"}
+    assert {r.generated_patch for r in second} == {FIX_PATCH}
+
+
+def test_run_batch_generates_only_for_new_instances_on_partial_resume(
+    config: EvalConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C4: Partial resume — checkpointed instances skip gen, only new instances generate."""
+    from evaluation.harness import EvaluationHarness
+
+    harness = EvaluationHarness(config)
+    examples_a = [_make_input("a-1"), _make_input("a-2")]
+    examples_b = [_make_input("b-3", repo="other/repo")]
+
+    generated_ids: list[str] = []
+
+    def _tracking_generate(
+        model: str, variant: str, template: str, instances: list, **kw: object
+    ) -> list[str]:
+        nonlocal generated_ids
+        generated_ids.extend(ex.instance_id for ex in instances)
+        return [FIX_PATCH] * len(instances)
+
+    monkeypatch.setattr("evaluation.harness._generate_patches", _tracking_generate)
+    monkeypatch.setattr("evaluation.harness._run_tests", _fake_run_tests)
+
+    # Run first batch (a-1, a-2)
+    first = harness.run_batch(examples_a, "qwen3-14b", "baseline_14b", "chat", "partial-resume")
+    assert len(first) == 2
+    assert len(generated_ids) == 2
+    assert "a-1" in generated_ids
+    assert "a-2" in generated_ids
+
+    # Second batch: a-1, a-2 from checkpoint (same repo, same key) + new b-3 (different repo)
+    generated_ids = []
+    combined = harness.run_batch(
+        examples_a + examples_b, "qwen3-14b", "baseline_14b", "chat", "partial-resume"
+    )
+    assert len(combined) == 3
+    # C4: b-3 (new repo) triggers a new generate call
+    assert len(generated_ids) == 1
+    assert generated_ids[0] == "b-3"
+
+
+# ── T4: verify_mode plumbing ────────────────────────────────────────────────
+
+
+def test__run_tests_passes_verify_mode(config: EvalConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """T4: _run_tests passes verify_mode and instance_id to the container function."""
+    import evaluation.harness as h_mod
+    from evaluation.harness import _run_tests
+
+    received_kw: dict = {}
+
+    def _stub_remote(*args: object, **kw: object) -> dict:
+        nonlocal received_kw
+        received_kw = kw
+        return PASSING_PAYLOAD
+
+    monkeypatch.setattr(h_mod, "_ensure_app_running", lambda app: None)
+    monkeypatch.setattr(
+        "evaluation.test_runner.run_tests_in_container",
+        type("_Fn", (), {"remote": _stub_remote})(),
+    )
+    monkeypatch.setattr("evaluation.test_runner.app", type("_App", (), {"run": lambda: None})())
+
+    config_v = EvalConfig(**{**config.model_dump(), "verify_mode": "once_per_repo"})
+    example = _make_input("verify-mode-test")
+    _run_tests(example, FIX_PATCH, config_v)
+
+    assert received_kw.get("verify_mode") == "once_per_repo"
+    assert received_kw.get("instance_id") == "verify-mode-test"
