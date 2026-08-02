@@ -313,6 +313,7 @@ def _run_pytest_once(  # noqa: PLR0912
         "-q",
         "--tb=short",
         "-rA",
+        "--continue-on-collection-errors",
         "--timeout",
         str(timeout),
         "--json-report",
@@ -349,20 +350,22 @@ def _run_pytest_once(  # noqa: PLR0912
             repo_path,
             exc_info=True,
         )
+        report_path.unlink(missing_ok=True)
         return ({n: _errored_attempt("pytest invocation timed out") for n in test_names}, [])
-    finally:
-        try:
-            report_path.unlink(missing_ok=True)
-        except Exception as e:
-            logger.warning("Failed to cleanup report file %s: %s", report_path, e)
 
     # Check if we're taking too long overall
     elapsed = time.time() - start_time
     modal_timeout_warn = 250
-    if elapsed > modal_timeout_warn:  # Close to Modal function timeout
+    if elapsed > modal_timeout_warn:  # Close to pytest function timeout
         logger.warning("pytest execution took %.1fs, approaching limit", elapsed)
 
     report = _load_json_report(report_path)
+    # ponytail: report_path is a NamedTemporaryFile suffixed .json; must exist
+    # until read — unlink here, after loading, not in a bare finally.
+    try:
+        report_path.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning("Failed to cleanup report file %s: %s", report_path, e)
     if report is None:
         logger.warning("pytest JSON report missing in %s — falling back to stdout parse", repo_path)
         attempts = _parse_stdout_report(proc.stdout)
