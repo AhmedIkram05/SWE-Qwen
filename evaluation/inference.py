@@ -78,47 +78,48 @@ _GPU_MAP: dict[str, str] = {
 }
 
 # ── LLM singleton cache ───────────────────────────────────────────────────
-# ponytail: process-level singleton keyed by (model_name, variant).
+# ponytail: process-level singleton keyed by model_name only (NOT variant).
 # vLLM LLM() is expensive to construct (28 GB model load + CUDA graph capture).
-# Inside a Modal container the process lives for the container lifetime, so
-# caching avoids cold-start on every generate_patches_batch call.
-_LLM_CACHE: dict[tuple[str, str], Any] = {}
+# Cache ONE LLM per base model; all variants share it via per-call LoRA requests.
+# vLLM 0.26+ loads LoRA adapters on-demand: set enable_lora=True and pass
+# lora_request or None per generate call.  This avoids 3× model loads when
+# evaluating 3 variants on the same base model.
+_LLM_CACHE: dict[str, Any] = {}
 _LLM_LOCK = threading.Lock()
 
 
 def _get_llm(
     model_name: str,
-    variant: str,
-    adapter_path: str | None,
+    adapter_path: str | None = None,
 ) -> Any:
-    """Return a cached vLLM ``LLM`` instance for *(model_name, variant)*.
+    """Return a cached vLLM ``LLM`` instance for *model_name* (cached once).
 
-    On first call the model is loaded (expensive). Subsequent calls return
-    the cached instance. The LoRA adapter is applied on first use if present.
+    First call loads the model (expensive). Subsequent calls (any variant)
+    return the same instance.  ``enable_lora=True`` so both baseline (None)
+    and LoRA variants work on the same loaded model.
 
     Args:
         model_name: ``models.yaml`` key or full Hugging Face ID.
-        variant: Variant key for adapter lookup & cache key.
-        adapter_path: Local path to LoRA adapter (``None`` for baseline).
+        adapter_path: Ignored at load time (LoRA loaded per-call via
+            ``lora_request`` on ``llm.generate()``).
 
     Returns:
         A ``vllm.LLM`` instance (cached after first creation).
     """
     from vllm import LLM
 
-    cache_key = (model_name, variant)
     with _LLM_LOCK:
-        if cache_key in _LLM_CACHE:
-            return _LLM_CACHE[cache_key]
+        if model_name in _LLM_CACHE:
+            return _LLM_CACHE[model_name]
 
         llm = LLM(
             model=resolve_hf_id(model_name),
-            enable_lora=adapter_path is not None,
+            enable_lora=True,  # allow both LoRA and non-LoRA generations
             gpu_memory_utilization=0.85,
         )
-        # ponytail: in vLLM 0.26+ LoRA adapters are loaded on-demand via
-        # lora_request param on llm.generate(); no pre-load needed here.
-        _LLM_CACHE[cache_key] = llm
+        # ponytail: one LLM per base model; LoRA adapters loaded on-demand
+        # per generate() call via lora_request param.
+        _LLM_CACHE[model_name] = llm
         return llm
 
 
@@ -312,16 +313,54 @@ def resolve_adapter_path(variant: str, config: EvalConfig | None = None) -> str 
         return None
 
 
-# ── Modal function ────────────────────────────────────────────────────────────
+# ── Lazy-registered inference functions (one per GPU config) ──────────────
+
+# ponytail: Modal 1.5.x requires ``gpu`` at decoration time; we register one
+# function per GPU tier lazily so the harness can switch via config.inference_gpu.
+# A100-80GB is required for 14B bf16; A10G-24GB fits ≤7B quantized models.
+_inference_fns: dict[str, Any] = {}
 
 
-@app.function(
-    image=vllm_image,
-    gpu="A100-80GB",  # A100-80GB: bf16 14B fits, 3-4x gen speed vs A10G
-    volumes={"/models": model_volume},
-    timeout=600,
-    secrets=[modal.Secret.from_name("wandb-secret"), modal.Secret.from_name("hf-secret")],
-)
+def _get_inference_fn(gpu: str) -> Any:
+    """Lazily register and return the inference function for *gpu*.
+
+    Args:
+        gpu: Modal GPU spec (e.g. ``"A100-80GB"``, ``"A10G:1"``).
+    """
+    fn = _inference_fns.get(gpu)
+    if fn is None:
+
+        def _fn(  # noqa: PLR0913, PLR0917
+            model_name: str,
+            variant: str,
+            prompt_template: str,
+            examples: list[EvalInput],
+            max_new_tokens: int = 2048,
+            temperature: float = 0.1,
+            top_p: float = 0.95,
+        ) -> list[str]:
+            """Generate patches (body — registered per GPU tier)."""
+            return _generate_patches_batch_body(
+                model_name,
+                variant,
+                prompt_template,
+                examples,
+                max_new_tokens,
+                temperature,
+                top_p,
+            )
+
+        fn = app.function(
+            image=vllm_image,
+            gpu=gpu,
+            volumes={"/models": model_volume},
+            timeout=600,
+            secrets=[modal.Secret.from_name("wandb-secret"), modal.Secret.from_name("hf-secret")],
+        )(_fn)
+        _inference_fns[gpu] = fn
+    return fn
+
+
 def generate_patches_batch(  # noqa: PLR0913, PLR0917
     model_name: str,
     variant: str,
@@ -332,6 +371,39 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
     top_p: float = 0.95,
 ) -> list[str]:
     """Generate candidate fix patches for a batch of eval examples.
+
+    Dispatches to the GPU tier configured by ``EvalConfig.inference_gpu``.
+    See ``_generate_patches_batch_body`` for full docs.
+    """
+    from evaluation.config import EvalConfig
+
+    config = EvalConfig()
+    gpu = _GPU_MAP.get(config.inference_gpu, "A100-80GB")
+    fn = _get_inference_fn(gpu)
+    return fn.remote(
+        model_name,
+        variant,
+        prompt_template,
+        examples,
+        max_new_tokens,
+        temperature,
+        top_p,
+    )
+
+
+# ── Core generation body (shared by all GPU tiers) ────────────────────────
+
+
+def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
+    model_name: str,
+    variant: str,
+    prompt_template: str,
+    examples: list[EvalInput],
+    max_new_tokens: int = 2048,
+    temperature: float = 0.1,
+    top_p: float = 0.95,
+) -> list[str]:
+    """Generate candidate fix patches for a batch of eval examples (body).
 
     1. Resolve the LoRA adapter for ``variant`` (``None`` for baseline).
     2. Load the model (``resolve_hf_id(model_name)``) with vLLM, enabling LoRA
@@ -364,7 +436,7 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
     else:
         logger.info("no LoRA adapter for variant %s — using base model %s", variant, model_name)
 
-    llm = _get_llm(model_name, variant, adapter_path)
+    llm = _get_llm(model_name)
     prompts = [render_patch_prompt(example, template_name=prompt_template) for example in examples]
     sampling_params = SamplingParams(
         max_tokens=max_new_tokens, temperature=temperature, top_p=top_p
@@ -382,3 +454,7 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
     )
     outputs = llm.generate(prompts, sampling_params, lora_request=lora_req)
     return [extract_patch(output.outputs[0].text) for output in outputs]
+
+
+# Testing backward-compat: .local() calls the body directly (no Modal container)
+generate_patches_batch.local = _generate_patches_batch_body  # type: ignore[attr-defined]
