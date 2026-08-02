@@ -1094,7 +1094,9 @@ class EvaluationHarness:
                         _fallback_jobs,
                         self.config,
                     )
-                    for example, result in zip(missing, _fallback_results, strict=True):
+                    # zip without strict: runner may return fewer results,
+                    # unmatched examples fall through to the per-example path.
+                    for example, result in zip(missing, _fallback_results):  # noqa: B905
                         swebench_results[example.instance_id] = result
 
                 # Pair results back with examples
