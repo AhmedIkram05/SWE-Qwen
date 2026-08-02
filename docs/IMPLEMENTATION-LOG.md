@@ -772,10 +772,27 @@ Closed three audit-listed gaps (user-approved) plus three DoD items:
 
 ### Metrics / Observations
 
-- **668 tests passing** (was 663; +3 gap features, +2 stats), all offline
+- **936 tests passing** (was 663 at v5; +3 gap features, +2 stats, +268 coverage tests from later arcs), all offline — see Root-Cause Fixes section above
 - Test-exec wall estimate: smoke ~3-5 min, dev ~8-10 min, final ~20-25 min, full ~40-60 min (vs old ~10 min/instance)
 - Est. project eval spend: ~$20-25 one-time + ~$0.10 per CI smoke run
 - **Deferred:** CI eval workflow (Phase 7), execution feedback (v2), Optuna (v2); live Modal smoke pending user credentials
+
+---
+
+### Root-Cause Fixes + Suite Greening (2026-08-02) — **936 tests passing**
+
+User reported "git applying of patches never works on modal or locally so i dont know if the stats compute correctly". Investigated with a known-good golden-patch oracle (sphinx-doc/sphinx); proved patch-apply + stats math correct. All historical 0% results traced to ONE harness bug:
+
+| Item | Fix | Where |
+|------|-----|-------|
+| **ROOT CAUSE: `_run_pytest_once` unlinked the pytest JSON report in `finally` BEFORE `_load_json_report` read it** → every run logged 'JSON report missing' → stdout-parse fallback failed → every test recorded 'failed'/'pytest produced no report' (explains all 10 historical run files, Modal + local) | Moved unlink after `_load_json_report`; timeout path unlinks then returns; removed duplicated except block | evaluation/test_runner.py |
+| pytest-json-report / pytest-timeout missing from local test env | Installed into `.venv` + added `pytest-timeout>=2.3.1`, `pytest-json-report>=1.5.0` to `dev` optional-deps | pyproject.toml |
+| `--backend local` still routed test-exec to Modal (swebench_fn unpatched) | Callout added: `_patch_harness_backend` only patches `_generate_patches`+`_run_tests`; local Verified-run test-exec goes to Modal by design | documented |
+| harness `zip(missing, fallback, strict=True)` crashed when runner returned fewer results — contradicted its own per-example fallback below | dropped `strict=True` | harness.py |
+| 5 stale unit tests (failed identically on git-stash baseline): `.remote()` vs plain-call chunk test; `event_log.index('use:')` exact-match on prefixed entries; `'latency_p50' in c` dict key-equality (keys are full `eval/...` paths); `mkdir(parents=True)` on existing tmp_path; typer wraps long BadParameter text across lines | updated tests (`.remote` stub class, startswith scans, `any(... in k)`, `exist_ok=True`, stable-fragment assert); _FakeArtifact now captures `contents` at add_file time (harness unlinks temp file after log) | tests/test_eval_harness_coverage.py, tests/test_eval_cli_coverage.py |
+| httpx import failure — bare stub `sys.modules['httpx']` broke `huggingface_hub` deferred imports | fake delegates unknown attrs to real httpx (`__getattr__`), keeps scripted `post` | tests/test_eval_local_backend_coverage.py |
+
+Suite: 936 passed (0 failed), ~302 s (~5 min).
 
 ---
 
