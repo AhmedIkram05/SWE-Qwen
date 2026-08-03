@@ -457,7 +457,12 @@ def _derive_files_from_grep(repo_path: Path, names: list[str]) -> list[str]:
     Falls back gracefully (empty list) when ``git`` is unavailable or the
     repo is not a git worktree — the caller will use a full-dir walk instead.
     """
-    pattern = "|".join(rf"^[[:space:]]*(def |async def ).*\b{re.escape(n)}\(" for n in names)
+    # NOTE: ``\b`` is PCRE-only and not supported by ``git grep -E``.
+    # Omitting the word boundary is safe — test names from SWE-bench are
+    # unique enough.  The ``\(`` anchor at the end prevents matching a
+    # name as a substring of a longer function (e.g. ``test_cookie`` won't
+    # match ``test_cookie_settings`` because there's no ``(`` at that position).
+    pattern = "|".join(rf"^[[:space:]]*(def |async def ).*{re.escape(n)}\(" for n in names)
     try:
         r = subprocess.run(
             ["git", "grep", "-l", "-E", pattern, "--", "*.py"],
