@@ -391,6 +391,51 @@ def _write_framework_conftest(repo_path: Path) -> None:
     )
 
 
+def _derive_test_files(repo_path: Path, test_names: list[str]) -> list[str]:
+    """Map SWE-bench test names to repo-relative test file paths.
+
+    Supports two name shapes found in the golden dataset:
+
+    - ``test_x(mod.path.Class)`` (django style) → ``tests/mod/path.py``
+    - ``mod/path.py::test_x[...]`` (sqlfluff nodeid style) → ``mod/path.py``
+
+    Plain names (sympy ``test_PythonCodePrinter``) and names that don't
+    resolve to an existing file (mangled golden docstrings like
+    ``set_cookie()accepts...``) are dropped; the caller falls back to a
+    full-dir collect when nothing resolves.
+
+    Passing explicit files instead of ``.`` has two benefits: it bypasses
+    pytest's ``python_files`` glob (django's ``tests.py`` matches neither
+    ``test_*.py`` nor ``*_test.py``, so dir-walks silently skip it), and it
+    cuts collection cost from the whole tree to a handful of files — the
+    dominant Modal cost driver at 50-100 instances.
+    """
+    files: list[str] = []
+    seen: set[str] = set()
+    for name in test_names:
+        rel: str | None = None
+        if "(" in name:
+            module = name.split("(", 1)[1].rsplit(".", 1)[0].strip(")").strip()
+            cands: list[str] = []
+            if module.startswith("tests."):
+                cands.append(module.replace(".", "/") + ".py")
+            elif module:
+                cands.append("tests/" + module.replace(".", "/") + ".py")
+                cands.append(module.replace(".", "/") + ".py")
+            for cand in cands:
+                if (repo_path / cand).is_file():
+                    rel = cand
+                    break
+        elif "::" in name:
+            head = name.split("::", 1)[0]
+            if head.endswith(".py") and (repo_path / head).is_file():
+                rel = head
+        if rel and rel not in seen:
+            seen.add(rel)
+            files.append(rel)
+    return files
+
+
 def _run_pytest_once(  # noqa: PLR0912, PLR0915
     repo_path: Path,
     test_names: list[str],
@@ -438,11 +483,18 @@ def _run_pytest_once(  # noqa: PLR0912, PLR0915
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         report_path = Path(tmp.name)
+    # ponytail: collect only the files the requested tests live in — a
+    # full-dir walk costs minutes on sympy/django and skips django's
+    # tests.py modules (pytest python_files glob). Fall back to "." when
+    # no path is derivable (plain sympy names, mangled golden docstrings).
+    pytest_paths = _derive_test_files(repo_path, test_names) if test_names else []
+    if not pytest_paths:
+        pytest_paths = ["."]
     cmd = [
         *python_cmd,
         "-m",
         "pytest",
-        ".",
+        *pytest_paths,
         "-q",
         "--tb=short",
         "-rA",

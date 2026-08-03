@@ -379,6 +379,68 @@ class TestParseStdoutReport:
         assert tr._parse_stdout_report("random noise\n") is None
 
 
+# ── _derive_test_files ──────────────────────────────────────────────────────
+
+
+class TestDeriveTestFiles:
+    def test_name_class_format_maps_to_tests_module(self, tmp_path):
+        # SWE-bench name(class) → tests/<module dots → path>.py
+        p = tmp_path / "tests" / "responses"
+        p.mkdir(parents=True)
+        (p / "test_cookie.py").write_text("")
+        files = tr._derive_test_files(
+            tmp_path, ["test_delete_cookie_samesite(responses.test_cookie.DeleteCookieTests)"]
+        )
+        assert files == ["tests/responses/test_cookie.py"]
+
+    def test_tests_py_named_module_resolved(self, tmp_path):
+        # django's sessions_tests/tests.py — skipped by dir-walk (python_files
+        # glob), must be passed explicitly.
+        p = tmp_path / "tests" / "sessions_tests"
+        p.mkdir(parents=True)
+        (p / "tests.py").write_text("")
+        files = tr._derive_test_files(
+            tmp_path, ["test_session_delete_on_end(sessions_tests.tests.SessionMiddlewareTests)"]
+        )
+        assert files == ["tests/sessions_tests/tests.py"]
+
+    def test_nodeid_format_maps_to_file(self, tmp_path):
+        # sqlfluff-style nodeid → strip ::test tail, keep file
+        p = tmp_path / "test" / "cli"
+        p.mkdir(parents=True)
+        (p / "commands_test.py").write_text("")
+        files = tr._derive_test_files(
+            tmp_path, ["test/cli/commands_test.py::test__linter__get_runner_processes[512-1-1]"]
+        )
+        assert files == ["test/cli/commands_test.py"]
+
+    def test_plain_names_fallback_empty(self, tmp_path):
+        # sympy-style plain names → no path derivable → caller falls back to "."
+        assert tr._derive_test_files(tmp_path, ["test_PythonCodePrinter"]) == []
+
+    def test_mangled_docstring_name_excluded(self, tmp_path):
+        # golden-data garbage like "set_cookie()acceptsanawaredatetimeasexpirationtime."
+        # has no resolvable module file — excluded, never crashes.
+        files = tr._derive_test_files(
+            tmp_path, ["set_cookie()acceptsanawaredatetimeasexpirationtime."]
+        )
+        assert files == []
+
+    def test_dedup_and_missing_files_skipped(self, tmp_path):
+        p = tmp_path / "tests" / "cache"
+        p.mkdir(parents=True)
+        (p / "tests.py").write_text("")
+        files = tr._derive_test_files(
+            tmp_path,
+            [
+                "test_x(cache.tests.CacheTests)",
+                "test_y(cache.tests.CacheTests)",
+                "test_z(nonexistent.mod.Class)",
+            ],
+        )
+        assert files == ["tests/cache/tests.py"]
+
+
 # ── _run_pytest_once ────────────────────────────────────────────────────────
 
 
