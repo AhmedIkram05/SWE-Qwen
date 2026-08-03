@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import NoReturn
 
@@ -74,6 +75,12 @@ def run(
     ollama_url: str = typer.Option("http://localhost:11434", help="Ollama base URL"),
 ) -> None:
     """Main evaluation entry point."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
     config = EvalConfig()
     if mode is not None:
         if mode not in config.tier_sizes:
