@@ -812,7 +812,13 @@ def test_baseline_cache_hit_when_matching_base_sha(tmp_path: Path) -> None:
     cache_root.mkdir(parents=True, exist_ok=True)
     tr_mod._BASELINE_CACHE_DIR = cache_root
     try:
-        data = {"base_sha": "abc123", "tests_before": [], "tests_head": [], "ground_truth": {}}
+        data = {
+            "version": 2,
+            "base_sha": "abc123",
+            "tests_before": [],
+            "tests_head": [],
+            "ground_truth": {},
+        }
         tr_mod._save_baseline_cache("inst-1", data)
         assert (cache_root / "inst-1.json").is_file()
 

@@ -995,6 +995,43 @@ class TestExecuteInstance:
         assert result["error"] is None
         assert len(result["tests_after"]) == 1
 
+    def test_gold_patch_flow_ordering(self, tmp_path, monkeypatch):
+        import evaluation.patch_applier
+
+        repo_dir, resets = self._setup(monkeypatch, tmp_path)
+        applied: list[tuple[str, bool]] = []
+        monkeypatch.setattr(
+            evaluation.patch_applier,
+            "apply_patch",
+            lambda repo_path, patch, base_sha, skip_checkout=False: (
+                applied.append((patch, skip_checkout)) or _fake_apply(True)
+            ),
+        )
+        result = tr._execute_instance(
+            repo_dir,
+            "sha",
+            "test_patch",
+            "generated_patch",
+            ["test_a"],
+            [],
+            timeout=30,
+            max_retries=2,
+            gold_patch="gold_patch",
+        )
+        # order: test_patch → collect before → gold_patch → collect head →
+        # reset → test_patch → generated → collect after
+        assert applied == [
+            ("test_patch", True),
+            ("gold_patch", True),
+            ("test_patch", True),
+            ("generated_patch", True),
+        ]
+        assert resets == ["sha", "sha"]
+        assert result["ground_truth"] == {"f2p": 1.0, "p2p": 1.0, "warning": False}
+        assert len(result["tests_before"]) == 1
+        assert len(result["tests_head"]) == 1
+        assert result["tests_after"][0]["status"] == "passed"
+
     def test_test_patch_apply_failed(self, tmp_path, monkeypatch):
         import evaluation.patch_applier
 
@@ -1206,11 +1243,20 @@ class TestSwebenchInstanceBody:
 
         monkeypatch.setattr(tr, "_execute_instance", fake_exec)
         result = tr._run_swebench_instance_body(
-            "django__django-10554", "sha", "tp", "gp", ["t"], [], timeout=30, max_retries=2
+            "django__django-10554",
+            "sha",
+            "tp",
+            "gold",
+            "gp",
+            ["t"],
+            [],
+            timeout=30,
+            max_retries=2,
         )
         assert len(calls) == 1  # only the probe
         assert result["repo"] == "django__django-10554"
         assert captured["kwargs"]["python_cmd"] == ["conda", "run", "-n", "testbed", "python"]
+        assert captured["kwargs"]["gold_patch"] == "gold"
 
     def test_probe_failure_installs_plugins(self, monkeypatch):
         calls = []
@@ -1222,15 +1268,18 @@ class TestSwebenchInstanceBody:
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         monkeypatch.setattr(tr.subprocess, "run", fake_run)
-        monkeypatch.setattr(
-            tr,
-            "_execute_instance",
-            lambda *a, **k: {"repo": "/testbed", "base_sha": a[1], "error": None},
-        )
-        result = tr._run_swebench_instance_body("inst", "sha", "tp", "gp", ["t"], [])
+        captured_kwargs: dict = {}
+
+        def fake_exec(*a, **k):
+            captured_kwargs.update(k)
+            return {"repo": "/testbed", "base_sha": a[1], "error": None}
+
+        monkeypatch.setattr(tr, "_execute_instance", fake_exec)
+        result = tr._run_swebench_instance_body("inst", "sha", "tp", "gold", "gp", ["t"], [])
         assert len(calls) == 2
         assert "pip" in calls[1] and "install" in calls[1]
         assert result["error"] is None
+        assert captured_kwargs["gold_patch"] == "gold"
 
     def test_plugin_setup_timeout_error(self, monkeypatch):
         def boom(cmd, *a, **k):
@@ -1344,6 +1393,40 @@ class TestRunTestsBatch:
         assert len(results) == 2
         assert "tpA" in applied and "tpB" in applied
         assert all(r["ground_truth"]["f2p"] == 1.0 for r in results)
+
+    def test_per_job_gold_patch_flow(self, monkeypatch):
+        import evaluation.patch_applier
+
+        self._setup(monkeypatch)
+        applied: list[str] = []
+        monkeypatch.setattr(
+            evaluation.patch_applier,
+            "apply_patch",
+            lambda repo_path, patch, base_sha, skip_checkout=False: (
+                applied.append(patch) or _fake_apply(True)
+            ),
+        )
+        jobs = [
+            {
+                "test_patch": "tpA",
+                "gold_patch": "gA",
+                "generated_patch": "genA",
+                "fail_to_pass": ["t1"],
+            },
+            {
+                "test_patch": "tpB",
+                "gold_patch": "gB",
+                "generated_patch": "genB",
+                "fail_to_pass": ["t1"],
+            },
+        ]
+        results = tr.run_tests_batch.local("o/r", "sha", "tp", jobs)
+        assert len(results) == 2
+        # per job: test_patch → gold_patch (head) → reset → test_patch → generated (after)
+        assert applied == ["tpA", "gA", "tpA", "genA", "tpB", "gB", "tpB", "genB"]
+        assert all(r["ground_truth"]["f2p"] == 1.0 for r in results)
+        assert all(len(r["tests_head"]) == 1 for r in results)
+        assert all(len(r["tests_after"]) == 1 for r in results)
 
     def test_job_ground_truth_f2p_below_threshold(self, monkeypatch):
         self._setup(monkeypatch, f2p=0.0)

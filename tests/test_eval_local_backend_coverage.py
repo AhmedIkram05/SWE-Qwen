@@ -191,6 +191,7 @@ def _patched_runner(monkeypatch) -> dict[str, Any]:
 
     monkeypatch.setattr(pa, "apply_patch", fake_apply)
     monkeypatch.setattr(tr, "collect_test_results", fake_collect)
+    monkeypatch.setattr(tr, "_reset_to_base", lambda repo_dir, base_sha: None)
     return state
 
 
@@ -226,6 +227,41 @@ class TestRunTestsLocal:
         ]
         assert _patched_runner["collect_calls"][0][2] == 11
         assert _patched_runner["collect_calls"][0][3] == 3
+
+    def test_test_patch_and_gold_flow(self, _patched_runner):
+        ex = _example(
+            test_patch="diff --git a/tests/test_models.py b/tests/test_models.py",
+            gold_patch="diff --git a/models.py b/models.py",
+        )
+        _patched_runner["collect_results"] = [
+            [
+                eschema.TestResult(
+                    name="tests/test_models.py::test_x", status="failed", duration=0.5
+                )
+            ],
+            [
+                eschema.TestResult(
+                    name="tests/test_models.py::test_x", status="passed", duration=0.4
+                )
+            ],
+            [
+                eschema.TestResult(
+                    name="tests/test_models.py::test_x", status="passed", duration=0.4
+                )
+            ],
+        ]
+        _patched_runner["apply_results"] = [
+            PatchApplicationResult(success=True, method_used="git_apply", error=None),
+            PatchApplicationResult(success=True, method_used="git_apply", error=None),
+            PatchApplicationResult(success=True, method_used="git_apply", error=None),
+            PatchApplicationResult(success=True, method_used="git_apply", error=None),
+        ]
+        out = run_tests_local(ex, "DIFF", _cfg())
+        assert out["ground_truth"] == {"f2p": 1.0, "p2p": 1.0, "warning": False}
+        assert len(out["tests_head"]) == 1
+        assert len(out["tests_after"]) == 1
+        # applies: test_patch → gold_patch → generated_patch (all skip_checkout)
+        assert _patched_runner["apply_calls"][3] is True
 
     def test_patch_apply_failure_skips_after(self, _patched_runner, caplog):
         _patched_runner["collect_results"] = [
