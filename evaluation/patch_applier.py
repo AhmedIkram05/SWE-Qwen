@@ -146,26 +146,26 @@ def apply_patch_git(
     try:
         _run_git(repo_path, ["apply", "--check", "--quiet", "-"], patch)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        # Some repos (sqlfluff, astropy) use a ``src/`` layout.  The model
-        # may generate patch paths without the prefix; retry with
-        # ``--directory=src/`` when the target file doesn't exist at the
-        # bare path but does exist under ``src/``.
-        src_dir = repo_path / "src"
-        if src_dir.is_dir():
-            files = _files_from_patch(patch)
-            if files and any(
-                not (repo_path / f).exists() and (src_dir / f).exists() for f in files
-            ):
-                try:
-                    _run_git(
-                        repo_path,
-                        ["apply", "--check", "--directory=src/", "--quiet", "-"],
-                        patch,
-                    )
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                    pass  # directory retry also failed; report original error
-                else:
-                    _run_git(repo_path, ["apply", "--directory=src/", "-"], patch)
+        # The model may generate patch paths that don't match the repo's
+        # layout (missing ``src/`` prefix, wrong nesting).  Try common
+        # ``--directory`` prefixes when the target file doesn't exist at
+        # the bare path but exists under a known prefix.
+        files = _files_from_patch(patch)
+        if files:
+            for prefix in ("src", "packages", "lib"):
+                prefix_dir = repo_path / prefix
+                if prefix_dir.is_dir() and any(
+                    not (repo_path / f).exists() and (prefix_dir / f).exists() for f in files
+                ):
+                    try:
+                        _run_git(
+                            repo_path,
+                            ["apply", "--check", f"--directory={prefix}/", "--quiet", "-"],
+                            patch,
+                        )
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                        continue
+                    _run_git(repo_path, ["apply", f"--directory={prefix}/", "-"], patch)
                     return PatchApplicationResult(
                         success=True,
                         method_used="git_apply",
