@@ -257,14 +257,12 @@ def apply_patch_unidiff(repo_path: Path, patch: str) -> PatchApplicationResult:
             try:
                 _apply_file_change(target, pfile)
             except FileNotFoundError:
-                # Some repos (sqlfluff, astropy) use a ``src/`` layout.
-                # Retry with the ``src/`` prefix when available.
-                if (repo_path / "src").is_dir():
-                    rel = "src/" + pfile.path
-                    target = repo_path / rel
-                    _apply_file_change(target, pfile)
-                else:
+                resolved = _find_target(repo_path, pfile.path)
+                if resolved is None:
                     raise
+                rel = str(resolved.relative_to(repo_path))
+                target = resolved
+                _apply_file_change(target, pfile)
             files_modified.append(rel)
     except Exception as exc:
         logger.warning("manual unidiff apply failed in %s: %s", repo_path, exc)
