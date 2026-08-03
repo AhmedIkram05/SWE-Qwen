@@ -125,7 +125,7 @@ class TestGeneratePatchesLocal:
             temperature=0.3,
             top_p=0.8,
         )
-        assert out == ["diff --git a/one.py b/one.py\n@@", "diff --git a/two.py b/two.py\n@@"]
+        assert out == ["diff --git a/one.py b/one.py\n@@\n", "diff --git a/two.py b/two.py\n@@\n"]
 
         assert len(fake_httpx["posts"]) == 2
         url, body, timeout = fake_httpx["posts"][0]
