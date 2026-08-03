@@ -172,6 +172,23 @@ class TestQuoteKName:
         # Brackets are part of the ident grammar, so no quoting is needed.
         assert tr._quote_k_name("test_x[1]") == "test_x[1]"
 
+    def test_swebench_name_class_suffix_stripped(self):
+        # SWE-bench golden names are "test_foo(TestClass.Module)": the class
+        # path must be dropped so the bare name still matches nodeids.
+        assert (
+            tr._quote_k_name("test_delete_cookie_samesite(responses.test_cookie.DeleteCookieTests)")
+            == "test_delete_cookie_samesite"
+        )
+
+    def test_question_mark_never_in_expression(self):
+        # pytest 7's -k parser rejects "?" ("unexpected character") and aborts
+        # the WHOLE selector, so parametrize IDs containing it must have it
+        # stripped even though the nodeid keeps it.
+        assert "?" not in tr._quote_k_name("test_parse_noqa[noqa?-SQLParseError]")
+        expr = tr._build_k_expression(["test_parse_noqa[noqa?-SQLParseError]", "test_lint"])
+        assert "?" not in expr
+        assert "test_lint" in expr
+
 
 class TestBuildKExpression:
     def test_single(self):

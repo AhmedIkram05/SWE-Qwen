@@ -599,7 +599,7 @@ def test_wandb_logger_inits_run_on_first_log(
     assert init_kwargs["entity"] == config.wandb_entity
     assert init_kwargs["project"] == config.wandb_project
     assert init_kwargs["name"] == "init-run"  # run name is the run_id itself
-    assert init_kwargs["reinit"] is True
+    assert init_kwargs["reinit"] == "finish_previous"  # wandb 0.28 deprecates boolean reinit
     # artifact logged once per call, naming unchanged
     assert fake.artifact_names == ["eval-aggregate-init-run", "eval-aggregate-init-run"]
 
