@@ -126,40 +126,40 @@ class _FakeLLM:
 class TestExtractPatch:
     def test_diff_fenced_block(self):
         text = "reasoning...\n```diff\ndiff --git a/x.py b/x.py\n@@ -1 +1 @@\n```\nafter"
-        assert extract_patch(text) == "diff --git a/x.py b/x.py\n@@ -1 +1 @@"
+        assert extract_patch(text) == "diff --git a/x.py b/x.py\n@@ -1 +1 @@\n"
 
     def test_diff_fenced_takes_last(self):
         text = "```diff\ndiff --git a/one b/one\n```\n```diff\ndiff --git a/two b/two\n```"
-        assert extract_patch(text) == "diff --git a/two b/two"
+        assert extract_patch(text) == "diff --git a/two b/two\n"
 
     def test_diff_fenced_starting_with_plusplus(self):
         text = "```diff\n+++ b/x.py\n@@ -1 +1 @@\n```"
-        assert extract_patch(text) == "+++ b/x.py\n@@ -1 +1 @@"
+        assert extract_patch(text) == "+++ b/x.py\n@@ -1 +1 @@\n"
 
     def test_generic_fence_with_language_tag(self):
         text = "```python\nprint('x')\n```\n```\ndiff --git a/a b/b\n```"
-        assert extract_patch(text) == "diff --git a/a b/b"
+        assert extract_patch(text) == "diff --git a/a b/b\n"
 
     def test_xml_fence_fallback_to_generic(self):
         text = "```xml\n<changes>\n</changes>\n```\n```\ndiff --git a/a.py b/a.py\n@@ -1 +1 @@\n```"
-        assert extract_patch(text) == "diff --git a/a.py b/a.py\n@@ -1 +1 @@"
+        assert extract_patch(text) == "diff --git a/a.py b/a.py\n@@ -1 +1 @@\n"
 
     def test_no_fences_diff_at_end(self):
         text = "some reasoning text\ndiff --git a/x b/y\n@@ -1 +1 @@\n"
-        assert extract_patch(text) == "diff --git a/x b/y\n@@ -1 +1 @@"
+        assert extract_patch(text) == "diff --git a/x b/y\n@@ -1 +1 @@\n"
 
     def test_no_fences_rfind_takes_last(self):
         text = "diff --git a/one b/one\nnoise\ndiff --git a/two b/two\n@@ -1 +1 @@\n"
-        assert extract_patch(text) == "diff --git a/two b/two\n@@ -1 +1 @@"
+        assert extract_patch(text) == "diff --git a/two b/two\n@@ -1 +1 @@\n"
 
     def test_diff_fence_with_non_diff_body_returns_whole(self):
         # ```diff fence whose body is not diff-like: no fallback match, no bare
         # "diff --git" → the entire (stripped) text is returned as-is.
         text = "hello\n```diff\nnot a real diff\n```\nworld"
-        assert extract_patch(text) == text.strip()
+        assert extract_patch(text) == text.strip() + "\n"
 
     def test_no_diff_anywhere_returns_stripped(self):
-        assert extract_patch("  just some words  ") == "just some words"
+        assert extract_patch("  just some words  ") == "just some words\n"
 
     def test_empty(self):
         assert extract_patch("") == ""
@@ -500,7 +500,7 @@ class TestGeneratePatchesBatch:
         monkeypatch.setattr(inf, "_get_llm", fake_get_llm)
 
         out = generate_patches_batch.local("qwen3-14b", "baseline_14b", "chat", [_example()])
-        assert out == ["diff --git a/fix.py b/fix.py\n@@ -1 +1 @@"]
+        assert out == ["diff --git a/fix.py b/fix.py\n@@ -1 +1 @@\n"]
 
 
 # ── C1: shared LLM across variants ─────────────────────────────────────────
