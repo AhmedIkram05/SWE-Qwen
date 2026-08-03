@@ -846,6 +846,17 @@ def _install_repo(repo_dir: Path, timeout: int = 900, cache_dir: str | Path | No
             check=True,
         )
 
+    # ponytail: skip editable install for pytest source repos (the source
+    # checkout registers pytest11 entry points that override the proper
+    # pytest installation, causing ``TypeError: required field 'lineno'
+    # missing from alias`` during test collection).  Create the marker
+    # so we don't retry on the next run.
+    if (repo_dir / "src/_pytest").is_dir() or (repo_dir / "_pytest").is_dir():
+        logger.info("skipping editable install for %s (is the pytest source)", repo_dir.name)
+        marker.touch()
+        _activate_venv(venv_dir)
+        return
+
     pip = venv_dir / "bin" / "pip"
     proc = subprocess.run(
         [str(pip), "install", "-e", str(repo_dir), "--quiet", "--disable-pip-version-check"],
@@ -876,6 +887,19 @@ def _install_repo(repo_dir: Path, timeout: int = 900, cache_dir: str | Path | No
 
     marker.touch()
     _activate_venv(venv_dir)
+
+    # ponytail: sympy editable install at old cached base (c4e836c) lacks
+    # ``equal_valued`` which torch importers in the project venv need.
+    # Pin a compatible version so the full test suite doesn't break.
+    if (repo_dir / "sympy" / "__init__.py").is_file():
+        python = venv_dir / "bin" / "python"
+        subprocess.run(
+            [str(python), "-m", "pip", "install", "--quiet", "sympy==1.13.3"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
 
 
 def _activate_venv(venv_dir: Path) -> None:
