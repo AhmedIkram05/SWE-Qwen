@@ -152,7 +152,9 @@ _MISSING_ATTEMPT = _errored_attempt("test not collected by pytest")
 # whole selector fails. The only safe strategy is to keep every character
 # inside the ident set and emit bare tokens.
 # ponytail: single char under `\w` etc (real names carry no back/quote)
-_K_IDENT_RE = re.compile(r"[\w\-\+\.:/\[\]\?]")
+# NOTE: `?` intentionally excluded — pytest -k expression parser rejects it
+# ("unexpected character '?'", rc=4) and aborts the WHOLE selector.
+_K_IDENT_RE = re.compile(r"[\w\-\+\.:/\[\]]")
 
 
 def _bare_test_name(name: str) -> str:
@@ -324,11 +326,68 @@ def _write_framework_conftest(repo_path: Path) -> None:
     conftest = repo_path / "conftest.py"
     if conftest.exists():
         return
+    # runtests.py registers every tests/ subpackage (dir with __init__.py, not
+    # in SUBDIRS_TO_SKIP) as a top-level app label, with tests/ on sys.path so
+    # ``import sessions_tests`` resolves. Mirror that so test models (e.g.
+    # sessions_tests.models.CustomSession) collect under raw pytest.
+    skip = {
+        "__pycache__",
+        "gis_tests",
+        "urls",
+        "wsgi",
+        "runtests",
+        "data",
+        "import_error_package",
+        "test_runner_apps",
+    }
+    test_labels = sorted(
+        d.name
+        for d in (repo_path / "tests").iterdir()
+        if d.is_dir() and (d / "__init__.py").is_file() and d.name not in skip
+    )
+    _django_apps = [
+        "django.contrib.contenttypes",
+        "django.contrib.auth",
+        "django.contrib.sites",
+        "django.contrib.sessions",
+        "django.contrib.messages",
+        "django.contrib.admin.apps.SimpleAdminConfig",
+        "django.contrib.staticfiles",
+    ] + test_labels
     conftest.write_text(
-        "import os\n"
+        "import os, sys\n"
         "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')\n"
         "import django\n"
+        "from django.conf import settings\n"
+        "# Mirrors tests/runtests.py: put tests/ on sys.path and register\n"
+        "# ALWAYS_INSTALLED_APPS + per-test-module app labels, so modules\n"
+        "# importing contrib models or test models collect under pytest.\n"
+        "sys.path.insert(0, os.path.join(os.getcwd(), 'tests'))\n"
+        f"settings.INSTALLED_APPS = list(settings.INSTALLED_APPS) + {_django_apps!r}\n"
+        "# Mirrors runtests.py setup(): SITE_ID/ROOT_URLCONF/MIDDLEWARE and\n"
+        "# no-migrations for contrib apps, so session/contrib tests run.\n"
+        "settings.SITE_ID = 1\n"
+        "settings.ROOT_URLCONF = 'urls'\n"
+        "settings.MIDDLEWARE = [\n"
+        "    'django.contrib.sessions.middleware.SessionMiddleware',\n"
+        "    'django.middleware.common.CommonMiddleware',\n"
+        "    'django.middleware.csrf.CsrfViewMiddleware',\n"
+        "    'django.contrib.auth.middleware.AuthenticationMiddleware',\n"
+        "    'django.contrib.messages.middleware.MessageMiddleware',\n"
+        "]\n"
+        "settings.MIGRATION_MODULES = {'auth': None, 'contenttypes': None, 'sessions': None}\n"
         "django.setup()\n"
+        "# Create the test DB like runtests.py's DiscoverRunner: raw pytest\n"
+        "# never builds one, so NAME-less sqlite tests error with\n"
+        "# ImproperlyConfigured otherwise. In-memory DB, dies with process.\n"
+        "try:\n"
+        "    from django.test.runner import DiscoverRunner\n"
+        "    from django.test.utils import setup_test_environment\n"
+        "    setup_test_environment()\n"
+        "    DiscoverRunner(verbosity=0, interactive=False).setup_databases()\n"
+        "except Exception as exc:  # noqa: BLE001 — degrade: DB tests error, rest run\n"
+        "    import sys as _sys\n"
+        "    print(f'[conftest] DB bootstrap failed: {exc!r}', file=_sys.stderr)\n"
     )
 
 
