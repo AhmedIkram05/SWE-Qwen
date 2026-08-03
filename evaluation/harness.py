@@ -171,6 +171,7 @@ def _run_tests(example: EvalInput, generated_patch: str, config: EvalConfig) -> 
         example.repo,
         example.base_sha,
         test_patch=example.test_patch,
+        gold_patch=example.gold_patch or None,
         generated_patch=generated_patch,
         fail_to_pass=example.fail_to_pass,
         pass_to_pass=example.pass_to_pass,
@@ -271,6 +272,7 @@ def _run_tests_batch_fallback(
             test_patch=job.get("test_patch")
             or test_patch
             or "",  # per-job patch, not group-first's
+            gold_patch=job.get("gold_patch") or "",
             fail_to_pass=job.get("fail_to_pass") or [],
             pass_to_pass=job.get("pass_to_pass") or [],
             repo_domain="",
@@ -314,6 +316,7 @@ def _run_tests_swebench(
             example.instance_id,
             example.base_sha,
             test_patch=example.test_patch or None,
+            gold_patch=example.gold_patch or None,
             generated_patch=patches.get(example.instance_id, ""),
             fail_to_pass=example.fail_to_pass or [],
             pass_to_pass=example.pass_to_pass or [],
@@ -1081,6 +1084,7 @@ class EvaluationHarness:
                             "fail_to_pass": example.fail_to_pass or [],
                             "pass_to_pass": example.pass_to_pass or [],
                             "test_patch": example.test_patch or "",
+                            "gold_patch": example.gold_patch or "",
                         }
                     )
 

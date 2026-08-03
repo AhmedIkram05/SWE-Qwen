@@ -45,6 +45,7 @@ class EvalInput(BaseModel):
     base_sha: str
     head_sha: str
     test_patch: str  # ground truth test changes
+    gold_patch: str = ""  # ground truth fix patch (patch_diff)
     fail_to_pass: list[str]  # test names that should fail → pass
     pass_to_pass: list[str]  # test names that should pass → pass
     repo_domain: str
@@ -77,6 +78,9 @@ class EvalInput(BaseModel):
         base_sha = metadata.get("base_sha") or record.get("base_commit") or ""
         head_sha = metadata.get("head_sha") or record.get("environment_setup_commit") or ""
         test_patch = metadata.get("test_patch") or record.get("test_patch") or ""
+        gold_patch = (
+            record.get("patch_diff") or record.get("patch") or metadata.get("gold_patch") or ""
+        )
         fail_to_pass = (
             test_results.get("failed")
             or record.get("FAIL_TO_PASS")
@@ -97,6 +101,7 @@ class EvalInput(BaseModel):
             base_sha=str(base_sha),
             head_sha=str(head_sha),
             test_patch=str(test_patch),
+            gold_patch=str(gold_patch),
             fail_to_pass=_to_test_list(fail_to_pass),
             pass_to_pass=_to_test_list(pass_to_pass),
             repo_domain=str(record.get("repo_domain") or "unknown"),
