@@ -248,10 +248,67 @@ def _apply_file_change(target: Path, pfile: PatchedFile) -> None:
         raise exception_container[0]
 
 
+def _repair_hunk_headers(patch: str) -> str:
+    """Recompute ``@@`` hunk line counts from the hunk bodies.
+
+    Small models frequently emit ``@@ -l,o +l,n @@`` headers whose counts
+    don't match the actual hunk content (e.g. ``+102,14`` for an 11-line
+    hunk). Both ``git apply`` ("corrupt patch") and unidiff ("Hunk is
+    shorter than expected") reject these outright even when the hunk
+    content is otherwise correct. Counting the real lines and rewriting
+    the header fixes the most common patch-apply failure.
+    """
+    import re
+
+    header_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+    out: list[str] = []
+    hunk_ctx: list[str] = []  # body lines collected since the last @@ header
+    in_hunk = False
+
+    def flush() -> None:
+        nonlocal hunk_ctx, in_hunk
+        if not in_hunk:
+            return
+        old_count = sum(1 for l in hunk_ctx if not l.startswith(("+", "\\")))  # noqa: E741
+        new_count = sum(1 for l in hunk_ctx if not l.startswith(("-", "\\")))  # noqa: E741
+        header = out.pop()  # the @@ line we appended while collecting
+        m = header_re.match(header)
+        if m:
+            old_start, old_n, new_start, new_n = m.groups()
+            old_spec = f"{old_start},{old_count}" if old_n is not None else old_start
+            new_spec = f"{new_start},{new_count}" if new_n is not None else new_start
+            section = header[m.end() :]  # keep trailing section name (e.g. " def foo():")
+            out.append(f"@@ -{old_spec} +{new_spec} @@{section}")
+        else:  # malformed header; leave as-is
+            out.append(header)
+        out.extend(hunk_ctx)
+        hunk_ctx = []
+        in_hunk = False
+
+    for line in patch.splitlines(keepends=True):
+        if line.startswith("@@"):
+            flush()
+            out.append(line)  # placeholder; body comes next
+            in_hunk = True
+        elif in_hunk and line.startswith(("diff ", "--- ", "+++ ")):
+            flush()  # next file's header lines end the current hunk
+            out.append(line)
+        elif in_hunk:
+            hunk_ctx.append(line)
+        else:
+            out.append(line)
+    flush()
+    return "".join(out)
+
+
 def apply_patch(
     repo_path: Path, patch: str, base_sha: str, *, skip_checkout: bool = False
 ) -> PatchApplicationResult:
     """Main entry: ``git apply`` first, unidiff manual apply as fallback.
+
+    If both fail and the patch looks malformed (hunk headers with
+    miscounted line numbers — a common LLM output error), the headers are
+    recomputed from the hunk bodies and both paths are retried once.
 
     Args:
         repo_path: Working directory (git repo preferred).
@@ -271,6 +328,30 @@ def apply_patch(
     fallback = apply_patch_unidiff(repo_path, patch)
     if fallback.success:
         return fallback
+
+    # LLM patches frequently have miscounted hunk headers; recompute and retry.
+    repaired = _repair_hunk_headers(patch)
+    if repaired != patch:
+        logger.warning(
+            "patch apply failed on both paths; repaired hunk headers and retrying "
+            "(git err: %s; unidiff err: %s)",
+            result.error,
+            fallback.error,
+        )
+        result2 = apply_patch_git(repo_path, repaired, base_sha, skip_checkout=skip_checkout)
+        if result2.success:
+            return result2
+        fallback2 = apply_patch_unidiff(repo_path, repaired)
+        if fallback2.success:
+            return fallback2
+        return PatchApplicationResult(
+            success=False,
+            method_used="failed",
+            error=(
+                f"git apply: {result.error}; unidiff: {fallback.error}; "
+                f"repaired: git: {result2.error}; unidiff: {fallback2.error}"
+            ),
+        )
     return PatchApplicationResult(
         success=False,
         method_used="failed",

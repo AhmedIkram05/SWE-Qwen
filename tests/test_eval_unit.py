@@ -19,7 +19,12 @@ from pydantic import ValidationError
 
 from evaluation.config import EvalConfig
 from evaluation.metrics import aggregate_metrics, compute_f2p
-from evaluation.patch_applier import apply_patch, apply_patch_git, apply_patch_unidiff
+from evaluation.patch_applier import (
+    _repair_hunk_headers,
+    apply_patch,
+    apply_patch_git,
+    apply_patch_unidiff,
+)
 from evaluation.schema import (
     EvalInput,
     EvalResult,
@@ -546,6 +551,57 @@ class TestApplyPatch:
         assert result.error is not None
         assert "git apply" in result.error
         assert "unidiff" in result.error
+
+
+# ── patch_applier: LLM hunk-header repair ──────────────────────────────────
+
+
+class TestRepairHunkHeaders:
+    """LLM patches often miscount hunk line numbers; repair must fix them."""
+
+    def test_recounts_single_hunk(self) -> None:
+        # Header claims -10,99 +10,99 but body has 2 context + 1 added line.
+        patch = (
+            "diff --git a/foo.py b/foo.py\n"
+            "--- a/foo.py\n"
+            "+++ b/foo.py\n"
+            "@@ -10,99 +10,99 @@ def bar():\n"
+            "     a = 1\n"
+            "+    b = 2\n"
+            "     c = 3\n"
+        )
+        fixed = _repair_hunk_headers(patch)
+        assert "@@ -10,2 +10,3 @@ def bar():" in fixed
+
+    def test_keeps_second_hunk_and_file_markers(self) -> None:
+        patch = (
+            "diff --git a/foo.py b/foo.py\n"
+            "--- a/foo.py\n"
+            "+++ b/foo.py\n"
+            "@@ -1,7 +1,7 @@\n"
+            " a\n"
+            "+b\n"
+            " c\n"
+            "diff --git a/bar.py b/bar.py\n"
+            "--- a/bar.py\n"
+            "+++ b/bar.py\n"
+            "@@ -5,50 +5,50 @@\n"
+            " x\n"
+            "+y\n"
+            " z\n"
+        )
+        fixed = _repair_hunk_headers(patch)
+        assert "@@ -1,2 +1,3 @@" in fixed
+        assert "@@ -5,2 +5,3 @@" in fixed
+        assert fixed.count("diff --git") == 2
+
+    def test_apply_patch_recovers_from_bad_header(self, git_repo: Path) -> None:
+        base_sha = _rev_parse(git_repo)
+        # GIT_DIFF with a miscounted hunk header: -6,6 -> -6,99 and +6,10 -> +6,99
+        bad = GIT_DIFF.replace("@@ -6,6 +6,10 @@", "@@ -6,99 +6,99 @@")
+        result = apply_patch(git_repo, bad, base_sha)
+        assert result.success, result.error
+        assert (git_repo / "greeting.py").read_text() == GREETING_EXPECTED
 
 
 # ── test_runner contract (Agent B) ────────────────────────────────────────

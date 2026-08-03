@@ -286,12 +286,13 @@ def _patch_harness_backend(*, ollama_model: str, ollama_url: str) -> None:
     from evaluation.local_backend import generate_patches_local, run_tests_local
 
     def _gen_patches(model_name, variant, prompt_template, examples, **kwargs):
+        effective = _resolve_local_model(model_name, ollama_model, ollama_url)
         return generate_patches_local(
             model_name,
             variant,
             prompt_template,
             examples,
-            ollama_model=ollama_model,
+            ollama_model=effective,
             ollama_base_url=ollama_url,
         )
 
@@ -301,6 +302,25 @@ def _patch_harness_backend(*, ollama_model: str, ollama_url: str) -> None:
     harness_mod._generate_patches = _gen_patches  # type: ignore[attr-defined]
     harness_mod._run_tests = _run_tests  # type: ignore[attr-defined]
     harness_mod._run_tests_batch_modal = _raise_modal_disabled  # type: ignore[attr-defined]
+
+
+def _resolve_local_model(requested_model: str, ollama_model: str, ollama_url: str) -> str:
+    """Return the Ollama tag to use for *requested_model*.
+
+    The local backend can only run models available in Ollama. If the
+    requested model is itself a loaded Ollama tag it is used directly;
+    otherwise we fall back to *ollama_model* — but only after a loud
+    warning, so a ``qwen3-14b:baseline_14b`` run can never silently
+    evaluate a 7B model and be mistaken for the fine-tuned one.
+    """
+    if ollama_model and ollama_model != requested_model:
+        logger.warning(
+            "local backend: requested model %r is not an Ollama tag; using %r instead. "
+            "The fine-tuned model is only served via Modal (--backend modal).",
+            requested_model,
+            ollama_model,
+        )
+    return ollama_model
 
 
 def _raise_modal_disabled(*args, **kwargs):
