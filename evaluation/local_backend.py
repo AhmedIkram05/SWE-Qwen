@@ -319,17 +319,6 @@ def _ensure_local_repo(repo: str, repo_dir: Path, base_sha: str) -> None:
                 timeout=300,
                 check=True,
             )
-            # ponytail: sympy's cached base (c4e836c) lacks ``equal_valued``
-            # which torch importers need.  Pin a compatible version on top
-            # so the full test suite doesn't break.
-            if (repo_dir / "sympy" / "__init__.py").is_file():
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "--quiet", "sympy==1.13.3"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    check=False,
-                )
             (repo_dir / ".installed").touch()
         except Exception:
             logger.warning(
@@ -338,6 +327,17 @@ def _ensure_local_repo(repo: str, repo_dir: Path, base_sha: str) -> None:
                 repo,
                 repo_dir,
             )
+    # ponytail: sympy editable install at old cached base (c4e836c) lacks
+    # ``equal_valued`` which torch importers need.  Pin a compatible version
+    # every time (the .installed marker may skip the block above).
+    if (repo_dir / "sympy" / "__init__.py").is_file():
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "sympy==1.13.3"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
 
 
 def _error_response(example: Any, error: str) -> dict[str, Any]:
