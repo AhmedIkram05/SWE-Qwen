@@ -134,21 +134,23 @@ def extract_patch(text: str) -> str:
     # Try ```diff fenced blocks — take LAST (model often reasons first, diff last)
     diffs: list[str] = re.findall(r"```diff\s*\n(.*?)```", text, re.DOTALL)
     if diffs:
-        patch = diffs[-1].strip()
+        patch = diffs[-1].rstrip() + "\n"
         if patch.startswith("diff --git") or patch.startswith("---") or patch.startswith("+++"):
             return patch
     # Try any fenced block — take LAST
     blocks: list[str] = re.findall(r"```\w*\s*\n(.*?)```", text, re.DOTALL)
     if blocks:
-        patch = blocks[-1].strip()
+        patch = blocks[-1].rstrip() + "\n"
         if patch.startswith("diff --git") or patch.startswith("---") or patch.startswith("+++"):
             return patch
     # No fences: scan for diff --git anywhere, take from there
     idx = text.rfind("diff --git")
     if idx >= 0:
-        return text[idx:].strip()
+        patch = text[idx:].rstrip()
+        return patch + "\n" if patch else ""
     # Last resort: return as-is
-    return text.strip()
+    patch = text.rstrip()
+    return patch + "\n" if patch else ""
 
 
 def _files_from_diff(patch: str) -> list[str]:

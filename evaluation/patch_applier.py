@@ -91,6 +91,10 @@ def apply_patch_git(
     """
     if not patch.strip():
         return PatchApplicationResult(success=False, method_used="failed", error="patch is empty")
+    # ponytail: git apply via stdin needs a trailing newline; extract_patch
+    # strips it, causing rc=128 "corrupt patch" on every valid patch.
+    if not patch.endswith("\n"):
+        patch = patch + "\n"
     if not skip_checkout:
         try:
             _run_git(repo_path, ["checkout", "--quiet", base_sha])
@@ -138,6 +142,9 @@ def apply_patch_unidiff(repo_path: Path, patch: str) -> PatchApplicationResult:
         return PatchApplicationResult(
             success=False, method_used="unidiff_fallback", error="patch is empty"
         )
+    # ponytail: normalize trailing newline (same reason as git apply)
+    if not patch.endswith("\n"):
+        patch = patch + "\n"
 
     # Add timeout protection for unidiff parsing
     def parse_patch():
