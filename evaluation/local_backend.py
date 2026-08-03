@@ -200,6 +200,18 @@ def run_tests_local(
             logger.warning(
                 "local patch apply failed for %s: %s", example.instance_id, patch_result.error
             )
+            # SWE-bench patch_failure semantics: don't run pytest on a broken
+            # tree; mark every requested test as errored instead.
+            tests_after = [
+                TestResult(
+                    name=n,
+                    status="errored",
+                    duration=0.0,
+                    output="patch did not apply",
+                    retry_count=0,
+                )
+                for n in test_names
+            ]
     else:
         patch_result = PatchApplicationResult(success=False, method_used="failed", error="no patch")
 

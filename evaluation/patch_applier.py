@@ -301,6 +301,38 @@ def _repair_hunk_headers(patch: str) -> str:
     return "".join(out)
 
 
+def _validate_applied(repo_path: Path, result: PatchApplicationResult) -> PatchApplicationResult:
+    """Verify a successful apply didn't corrupt Python sources.
+
+    LLM patches that ``git apply``/unidiff accept can still be garbage that
+    produces syntactically invalid files (seen: response.py ``SyntaxError``,
+    pycode.py ``IndentationError``). Compile every modified ``.py`` file; on
+    any failure, revert the touched files and return a failed result.
+    """
+    if not result.success or not result.files_modified:
+        return result
+    bad: list[str] = []
+    for rel in result.files_modified:
+        if not rel.endswith(".py"):
+            continue
+        path = repo_path / rel
+        try:
+            compile(path.read_text(encoding="utf-8"), str(rel), "exec")
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            bad.append(rel)
+    if not bad:
+        return result
+    try:
+        _run_git(repo_path, ["checkout", "--", *result.files_modified])
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        logger.warning("failed to revert invalid patch files in %s", repo_path)
+    return PatchApplicationResult(
+        success=False,
+        method_used="failed",
+        error=f"applied but invalid syntax in: {', '.join(bad[:3])}",
+    )
+
+
 def apply_patch(
     repo_path: Path, patch: str, base_sha: str, *, skip_checkout: bool = False
 ) -> PatchApplicationResult:
@@ -323,9 +355,9 @@ def apply_patch(
     """
     result = apply_patch_git(repo_path, patch, base_sha, skip_checkout=skip_checkout)
     if result.success:
-        return result
+        return _validate_applied(repo_path, result)
     logger.warning("git apply failed (%s), trying unidiff fallback", result.error)
-    fallback = apply_patch_unidiff(repo_path, patch)
+    fallback = _validate_applied(repo_path, apply_patch_unidiff(repo_path, patch))
     if fallback.success:
         return fallback
 
@@ -338,10 +370,12 @@ def apply_patch(
             result.error,
             fallback.error,
         )
-        result2 = apply_patch_git(repo_path, repaired, base_sha, skip_checkout=skip_checkout)
+        result2 = _validate_applied(
+            repo_path, apply_patch_git(repo_path, repaired, base_sha, skip_checkout=skip_checkout)
+        )
         if result2.success:
             return result2
-        fallback2 = apply_patch_unidiff(repo_path, repaired)
+        fallback2 = _validate_applied(repo_path, apply_patch_unidiff(repo_path, repaired))
         if fallback2.success:
             return fallback2
         return PatchApplicationResult(
