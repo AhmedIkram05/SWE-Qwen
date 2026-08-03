@@ -71,6 +71,44 @@ def _files_from_patch(patch: str) -> list[str]:
     return files
 
 
+def _find_target(repo_path: Path, patch_path: str) -> Path | None:
+    """Resolve a patch file path to an actual file in *repo_path*.
+
+    Tries, in order:
+    1. Exact path (``{repo_path}/{patch_path}``)
+    2. Common source prefixes (``src/``, ``packages/``, ``lib/``)
+    3. ``rglob`` by basename (last resort, timeout-guarded)
+
+    Returns the first match or *None*.
+    """
+    target = repo_path / patch_path
+    if target.is_file():
+        return target
+    for prefix in ("src", "packages", "lib"):
+        target = repo_path / prefix / patch_path
+        if target.is_file():
+            return target
+    # Last resort: search by basename (fast on SSD, rare edge case)
+    try:
+        import threading as _thr
+
+        result_holder: list[Path | None] = [None]
+
+        def _search() -> None:
+            basename = Path(patch_path).name
+            for f in repo_path.rglob(basename):
+                if f.is_file():
+                    result_holder[0] = f
+                    return
+
+        t = _thr.Thread(target=_search, daemon=True)
+        t.start()
+        t.join(timeout=5)
+        return result_holder[0]
+    except (PermissionError, OSError):
+        return None
+
+
 def apply_patch_git(
     repo_path: Path, patch: str, base_sha: str, *, skip_checkout: bool = False
 ) -> PatchApplicationResult:
