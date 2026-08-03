@@ -391,7 +391,7 @@ def _write_framework_conftest(repo_path: Path) -> None:
     )
 
 
-def _derive_test_files(repo_path: Path, test_names: list[str]) -> list[str]:
+def _derive_test_files(repo_path: Path, test_names: list[str]) -> list[str]:  # noqa: PLR0912
     """Map SWE-bench test names to repo-relative test file paths.
 
     Supports two name shapes found in the golden dataset:
@@ -412,6 +412,7 @@ def _derive_test_files(repo_path: Path, test_names: list[str]) -> list[str]:
     """
     files: list[str] = []
     seen: set[str] = set()
+    plain_names: list[str] = []
     for name in test_names:
         rel: str | None = None
         if "(" in name:
@@ -430,10 +431,49 @@ def _derive_test_files(repo_path: Path, test_names: list[str]) -> list[str]:
             head = name.split("::", 1)[0]
             if head.endswith(".py") and (repo_path / head).is_file():
                 rel = head
+        else:
+            # Plain name like test_PythonCodePrinter — resolve via grep
+            # so we don't fall back to the full-dir ".".  (sympy collects
+            # ~280s on a full walk; grep resolves it in <1s.)
+            plain_names.append(name)
+            continue
         if rel and rel not in seen:
             seen.add(rel)
             files.append(rel)
+
+    if plain_names:
+        resolved = _derive_files_from_grep(repo_path, plain_names)
+        for p in resolved:
+            if p not in seen:
+                seen.add(p)
+                files.append(p)
+
     return files
+
+
+def _derive_files_from_grep(repo_path: Path, names: list[str]) -> list[str]:
+    """Find files containing ``def <name>`` for each plain test name.
+
+    Falls back gracefully (empty list) when ``git`` is unavailable or the
+    repo is not a git worktree — the caller will use a full-dir walk instead.
+    """
+    pattern = "|".join(rf"^[[:space:]]*(def |async def ).*\b{re.escape(n)}\(" for n in names)
+    try:
+        r = subprocess.run(
+            ["git", "grep", "-l", "-E", pattern, "--", "*.py"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+    if r.returncode not in (0, 1):
+        return []
+    if r.returncode == 1:
+        return []
+    return [line.strip() for line in r.stdout.splitlines() if line.strip()]
 
 
 def _run_pytest_once(  # noqa: PLR0912, PLR0915
@@ -543,10 +583,10 @@ def _run_pytest_once(  # noqa: PLR0912, PLR0915
 
     # Check if we're taking too long overall
     elapsed = time.time() - start_time
-    modal_timeout_warn = 250
+    modal_timeout_warn = 700
+
     if elapsed > modal_timeout_warn:  # Close to pytest function timeout
         logger.warning("pytest execution took %.1fs, approaching limit", elapsed)
-
     report = _load_json_report(report_path)
     # ponytail: report_path is a NamedTemporaryFile suffixed .json; must exist
     # until read — unlink here, after loading, not in a bare finally.
