@@ -108,6 +108,31 @@ def apply_patch_git(
     try:
         _run_git(repo_path, ["apply", "--check", "--quiet", "-"], patch)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        # Some repos (sqlfluff, astropy) use a ``src/`` layout.  The model
+        # may generate patch paths without the prefix; retry with
+        # ``--directory=src/`` when the target file doesn't exist at the
+        # bare path but does exist under ``src/``.
+        src_dir = repo_path / "src"
+        if src_dir.is_dir():
+            files = _files_from_patch(patch)
+            if files and any(
+                not (repo_path / f).exists() and (src_dir / f).exists() for f in files
+            ):
+                try:
+                    _run_git(
+                        repo_path,
+                        ["apply", "--check", "--directory=src/", "--quiet", "-"],
+                        patch,
+                    )
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    pass  # directory retry also failed; report original error
+                else:
+                    _run_git(repo_path, ["apply", "--directory=src/", "-"], patch)
+                    return PatchApplicationResult(
+                        success=True,
+                        method_used="git_apply",
+                        files_modified=_files_from_patch(patch),
+                    )
         logger.warning("git apply --check failed in %s: %s", repo_path, exc)
         return PatchApplicationResult(
             success=False, method_used="failed", error=f"git apply --check: {_error_message(exc)}"
@@ -189,8 +214,20 @@ def apply_patch_unidiff(repo_path: Path, patch: str) -> PatchApplicationResult:
     files_modified: list[str] = []
     try:
         for pfile in patchset:
-            _apply_file_change(repo_path / pfile.path, pfile)
-            files_modified.append(pfile.path)
+            rel = pfile.path
+            target = repo_path / rel
+            try:
+                _apply_file_change(target, pfile)
+            except FileNotFoundError:
+                # Some repos (sqlfluff, astropy) use a ``src/`` layout.
+                # Retry with the ``src/`` prefix when available.
+                if (repo_path / "src").is_dir():
+                    rel = "src/" + pfile.path
+                    target = repo_path / rel
+                    _apply_file_change(target, pfile)
+                else:
+                    raise
+            files_modified.append(rel)
     except Exception as exc:
         logger.warning("manual unidiff apply failed in %s: %s", repo_path, exc)
         return PatchApplicationResult(
