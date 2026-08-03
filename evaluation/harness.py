@@ -525,7 +525,7 @@ class WandbLogger:
                 entity=self.config.wandb_entity,
                 project=self.config.wandb_project,
                 name=run_id,  # run_id already carries the "eval-" prefix (make_run_id)
-                reinit=True,
+                reinit="finish_previous",
             )
         except Exception:  # noqa: BLE001 — W&B must never break the harness
             logger.warning("W&B init failed — disabling W&B logging", exc_info=True)

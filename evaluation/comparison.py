@@ -347,7 +347,7 @@ def promote_champion_to_registry(champion_key: str, config: EvalConfig) -> str |
             project=config.wandb_project,
             job_type="eval-promote",
             name=f"promote-{champion_key}",
-            reinit=True,
+            reinit="finish_previous",
         )
         try:
             _clear_champion_alias(api, config)
