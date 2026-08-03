@@ -145,15 +145,50 @@ def run_tests_local(
     except (subprocess.TimeoutExpired, RuntimeError) as exc:
         return _error_response(example, f"repo prep: {exc}")
 
-    # tests_before
+    from evaluation.metrics import compute_f2p
+    from evaluation.test_runner import _reset_to_base
+
+    test_patch = example.test_patch or ""
+
+    # Ground truth: base + test_patch → F2P tests EXIST and fail; + gold_patch → pass
+    tests_head: list[TestResult] = []
+    ground_truth: dict[str, Any] = {}
+    if test_patch:
+        tp_result = apply_patch(repo_dir, test_patch, example.base_sha, skip_checkout=True)
+        if not tp_result.success:
+            logger.warning(
+                "local test_patch apply failed for %s: %s", example.instance_id, tp_result.error
+            )
+
+    # tests_before (F2P names now present, failing — matches golden semantics)
     tests_before = collect_test_results(
         repo_dir, test_names, timeout=config.test_timeout_seconds, max_retries=config.max_retries
     )
 
-    # Apply generated patch → tests_after
+    if test_patch and (example.gold_patch or ""):
+        gold_result = apply_patch(
+            repo_dir, example.gold_patch, example.base_sha, skip_checkout=True
+        )
+        if gold_result.success:
+            tests_head = collect_test_results(
+                repo_dir, test_names, timeout=config.test_timeout_seconds, max_retries=0
+            )
+            f2p, p2p, _fc, _pc = compute_f2p(
+                tests_before, tests_head, example.fail_to_pass, example.pass_to_pass
+            )
+            ground_truth = {"f2p": f2p, "p2p": p2p, "warning": False}
+        else:
+            logger.warning(
+                "local gold_patch apply failed for %s: %s", example.instance_id, gold_result.error
+            )
+
+    # Reset, re-apply test_patch, then generated patch → tests_after
+    _reset_to_base(repo_dir, example.base_sha)
     tests_after: list[TestResult] = []
     if generated_patch:
-        patch_result = apply_patch(repo_dir, generated_patch, example.base_sha)
+        if test_patch:
+            apply_patch(repo_dir, test_patch, example.base_sha, skip_checkout=True)
+        patch_result = apply_patch(repo_dir, generated_patch, example.base_sha, skip_checkout=True)
         if patch_result.success:
             tests_after = collect_test_results(
                 repo_dir,
@@ -172,10 +207,10 @@ def run_tests_local(
         "repo": example.repo,
         "base_sha": example.base_sha,
         "tests_before": [t.model_dump() for t in tests_before],
-        "tests_head": [],
+        "tests_head": [t.model_dump() for t in tests_head],
         "tests_after": [t.model_dump() for t in tests_after],
         "patch_application": patch_result.model_dump(),
-        "ground_truth": {},
+        "ground_truth": ground_truth,
     }
 
 
