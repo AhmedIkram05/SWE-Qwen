@@ -152,7 +152,22 @@ _MISSING_ATTEMPT = _errored_attempt("test not collected by pytest")
 # whole selector fails. The only safe strategy is to keep every character
 # inside the ident set and emit bare tokens.
 # ponytail: single char under `\w` etc (real names carry no back/quote)
-_K_IDENT_RE = re.compile(r"[\w\-\+\.:/\[\]]")
+_K_IDENT_RE = re.compile(r"[\w\-\+\.:/\[\]\?]")
+
+
+def _bare_test_name(name: str) -> str:
+    """Normalize a SWE-bench test name to its bare pytest identifier.
+
+    Handles both ``path/to/file.py::test_bar`` (node ID) and the classic
+    SWE-bench ``test_bar(SomeTestClass)`` format: strip the file path and the
+    parenthesized class suffix. ``test_delete_cookie_samesite(DeleteCookieTests)``
+    → ``test_delete_cookie_samesite``.
+    """
+    if "::" in name:
+        name = name.split("::", 1)[1]
+    if "(" in name:
+        name = name.split("(", 1)[0]
+    return name
 
 
 def _quote_k_name(name: str) -> str:
@@ -160,13 +175,12 @@ def _quote_k_name(name: str) -> str:
 
     pytest ``-k`` is a boolean expression on test IDs and has no quoting.
     Full node IDs (``path/to/file.py::test_name``) are stripped to the final
-    segment, then every character outside the ident set (from corrupted
-    golden fragments) is dropped. An empty result contributes nothing to the
-    OR-expression and is skipped by the caller.
+    segment, SWE-bench ``name(TestClass)`` suffixes are dropped, then every
+    character outside the ident set (from corrupted golden fragments) is
+    removed. An empty result contributes nothing to the OR-expression and is
+    skipped by the caller.
     """
-    # Strip file path from full node ID: ``tests/foo.py::test_bar`` → ``test_bar``
-    if "::" in name:
-        name = name.split("::", 1)[1]
+    name = _bare_test_name(name)
     return "".join(c for c in name if _K_IDENT_RE.match(c))
 
 
@@ -250,11 +264,14 @@ def _attempts_from_report(
     by_name: dict[str, _Attempt] = {}
     used: set[int] = set()
     for name in test_names:
+        bare = _bare_test_name(name)
+        if not bare:
+            continue
         for idx, test in enumerate(tests):
             if idx in used or not isinstance(test, dict):
                 continue
             nodeid = str(test.get("nodeid", ""))
-            if name == nodeid or nodeid.endswith(name) or nodeid in name:
+            if bare == nodeid or nodeid.endswith(bare) or nodeid in name:
                 by_name[name] = _attempt_from_report_test(test)
                 used.add(idx)
                 break
@@ -383,7 +400,10 @@ def _run_pytest_once(  # noqa: PLR0912, PLR0915
         # ponytail: per-process cache dir — 16 containers sharing one
         # pytest-cache dir contended on the volume lock; pid is unique per container
         cmd += ["-o", f"cache_dir=/test_cache/pytest-cache-{os.getpid()}"]
-    subprocess_timeout = min(max(120, timeout * max(len(test_names) * 3, 12) + 60), 240)
+    # Large repos (sympy, django) can take >5 min to import and collect.
+    # Cap at 900 so big suites actually finish; the Modal function timeout
+    # (3600 for batch, 900 swebench) bounds it from the outside.
+    subprocess_timeout = min(max(120, timeout * max(len(test_names) * 3, 12) + 60), 900)
 
     # Add a safety margin to the timeout
     safety_margin = 30
@@ -507,9 +527,10 @@ def collect_test_results(
             )
             break
 
-        # Check if we're taking too long overall
+        # Check if we're taking too long overall (collect can legitimately
+        # take 15 min on huge repos like sympy; Modal batch timeout is 3600)
         elapsed = time.time() - start_time
-        collect_timeout_warn = 200
+        collect_timeout_warn = 900
         if elapsed > collect_timeout_warn:  # Close to Modal function timeout
             logger.warning("collect_test_results taking too long (%.1fs), truncating", elapsed)
             break
@@ -823,7 +844,7 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     """
     from evaluation.metrics import compute_f2p
     from evaluation.patch_applier import apply_patch
-    from evaluation.schema import PatchApplicationResult
+    from evaluation.schema import PatchApplicationResult, TestResult
 
     fail_to_pass = fail_to_pass or []
     pass_to_pass = pass_to_pass or []
@@ -959,6 +980,18 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
                 repo_dir,
                 patch_result.error,
             )
+            # SWE-bench patch_failure semantics: don't run pytest on a broken
+            # tree; mark every requested test as errored instead.
+            tests_after = [
+                TestResult(
+                    name=n,
+                    status="errored",
+                    duration=0.0,
+                    output="patch did not apply",
+                    retry_count=0,
+                )
+                for n in test_names
+            ]
     else:
         patch_result = PatchApplicationResult(
             success=False,
@@ -1244,7 +1277,7 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
 
     from evaluation.metrics import compute_f2p
     from evaluation.patch_applier import apply_patch
-    from evaluation.schema import PatchApplicationResult
+    from evaluation.schema import PatchApplicationResult, TestResult
 
     repo_dir = Path("/repo_cache") / repo
 
@@ -1425,7 +1458,16 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
                     repo,
                     patch_result.error,
                 )
-                tests_after = []
+                tests_after = [
+                    TestResult(
+                        name=n,
+                        status="errored",
+                        duration=0.0,
+                        output="patch did not apply",
+                        retry_count=0,
+                    )
+                    for n in job_test_names
+                ]
         else:
             patch_result = PatchApplicationResult(
                 success=False,
