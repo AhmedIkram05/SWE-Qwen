@@ -589,7 +589,7 @@ class TestCollectTestResults:
 
         def fake_time():
             calls["n"] += 1
-            return 500.0 if calls["n"] > 1 else 0.0
+            return 1000.0 if calls["n"] > 1 else 0.0
 
         monkeypatch.setattr(time, "time", fake_time)
         with caplog.at_level("WARNING", logger="evaluation.test_runner"):
@@ -1057,7 +1057,17 @@ class TestExecuteInstance:
         )
         assert result["tests_head"] == []
         assert result["ground_truth"] == {}
-        assert result["tests_after"] == []
+        # patch_failure semantics: tests_after reports errored "patch did not
+        # apply" entries instead of running pytest on a broken tree
+        assert result["tests_after"] == [
+            {
+                "name": "test_a",
+                "status": "errored",
+                "duration": 0.0,
+                "output": "patch did not apply",
+                "retry_count": 0,
+            }
+        ]
 
     def test_ground_truth_f2p_below_threshold(self, tmp_path, monkeypatch):
         repo_dir, _ = self._setup(monkeypatch, tmp_path, f2p=0.5)
@@ -1105,7 +1115,17 @@ class TestExecuteInstance:
         result = tr._execute_instance(
             repo_dir, "sha", "tp", "gp", ["test_a"], [], timeout=30, max_retries=2
         )
-        assert result["tests_after"] == []
+        # patch_failure semantics: tests_after reports errored "patch did not
+        # apply" entries instead of running pytest on a broken tree
+        assert result["tests_after"] == [
+            {
+                "name": "test_a",
+                "status": "errored",
+                "duration": 0.0,
+                "output": "patch did not apply",
+                "retry_count": 0,
+            }
+        ]
         assert result["patch_application"]["error"] == "generated boom"
 
     def test_reset_first_false(self, tmp_path, monkeypatch):
@@ -1218,7 +1238,17 @@ class TestRunTestsInContainer:
         result = tr.run_tests_in_container.local(
             "o/r", "sha", test_patch="tp", generated_patch="gp", fail_to_pass=["t"]
         )
-        assert result["tests_after"] == []
+        # patch_failure semantics: tests_after reports errored "patch did not
+        # apply" entries instead of running pytest on a broken tree
+        assert result["tests_after"] == [
+            {
+                "name": "t",
+                "status": "errored",
+                "duration": 0.0,
+                "output": "patch did not apply",
+                "retry_count": 0,
+            }
+        ]
         assert result["patch_application"]["error"] == "apply boom"
 
 

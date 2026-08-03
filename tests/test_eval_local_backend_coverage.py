@@ -272,7 +272,24 @@ class TestRunTestsLocal:
         ]
         with caplog.at_level("WARNING", logger="evaluation.local_backend"):
             out = run_tests_local(_example(), "DIFF", _cfg())
-        assert out["tests_after"] == []
+        # patch_failure semantics: errored entries instead of running pytest
+        # on a broken tree (one per requested test name)
+        assert out["tests_after"] == [
+            {
+                "name": "tests/test_models.py::test_x",
+                "status": "errored",
+                "duration": 0.0,
+                "output": "patch did not apply",
+                "retry_count": 0,
+            },
+            {
+                "name": "tests/test_models.py::test_y",
+                "status": "errored",
+                "duration": 0.0,
+                "output": "patch did not apply",
+                "retry_count": 0,
+            },
+        ]
         assert out["patch_application"] == {
             "success": False,
             "method_used": "failed",
