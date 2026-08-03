@@ -134,22 +134,26 @@ def extract_patch(text: str) -> str:
     # Try ```diff fenced blocks — take LAST (model often reasons first, diff last)
     diffs: list[str] = re.findall(r"```diff\s*\n(.*?)```", text, re.DOTALL)
     if diffs:
-        patch = diffs[-1].rstrip() + "\n"
-        if patch.startswith("diff --git") or patch.startswith("---") or patch.startswith("+++"):
-            return patch
+        patch = diffs[-1].strip()
+        if patch:
+            patch = patch + "\n"
+            if patch.startswith("diff --git") or patch.startswith("---") or patch.startswith("+++"):
+                return patch
     # Try any fenced block — take LAST
     blocks: list[str] = re.findall(r"```\w*\s*\n(.*?)```", text, re.DOTALL)
     if blocks:
-        patch = blocks[-1].rstrip() + "\n"
-        if patch.startswith("diff --git") or patch.startswith("---") or patch.startswith("+++"):
-            return patch
+        patch = blocks[-1].strip()
+        if patch:
+            patch = patch + "\n"
+            if patch.startswith("diff --git") or patch.startswith("---") or patch.startswith("+++"):
+                return patch
     # No fences: scan for diff --git anywhere, take from there
     idx = text.rfind("diff --git")
     if idx >= 0:
-        patch = text[idx:].rstrip()
+        patch = text[idx:].strip()
         return patch + "\n" if patch else ""
-    # Last resort: return as-is
-    patch = text.rstrip()
+    # Last resort: return as-is (with trailing newline)
+    patch = text.strip()
     return patch + "\n" if patch else ""
 
 
