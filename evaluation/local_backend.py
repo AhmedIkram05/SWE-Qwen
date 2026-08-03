@@ -109,7 +109,7 @@ def generate_patches_local(  # noqa: PLR0913
 # ── Local test runner backend ─────────────────────────────────────────────
 
 
-def run_tests_local(
+def run_tests_local(  # noqa: PLR0915
     example: Any,
     generated_patch: str,
     config: Any,
@@ -139,11 +139,14 @@ def run_tests_local(
     repo_dir = repos_dir / example.repo
 
     test_names = [*(example.fail_to_pass or []), *(example.pass_to_pass or [])]
+    _t0 = time.time()
+    logger.info("── instance %s (%d tests) ──", example.instance_id, len(test_names))
 
     try:
         _ensure_local_repo(example.repo, repo_dir, example.base_sha)
     except (subprocess.TimeoutExpired, RuntimeError) as exc:
         return _error_response(example, f"repo prep: {exc}")
+    logger.debug("  repo prep: %.1fs", time.time() - _t0)
 
     from evaluation.metrics import compute_f2p
     from evaluation.test_runner import _reset_to_base
@@ -159,11 +162,13 @@ def run_tests_local(
             logger.warning(
                 "local test_patch apply failed for %s: %s", example.instance_id, tp_result.error
             )
+        logger.debug("  test_patch apply: %.1fs", time.time() - _t0)
 
     # tests_before (F2P names now present, failing — matches golden semantics)
     tests_before = collect_test_results(
         repo_dir, test_names, timeout=config.test_timeout_seconds, max_retries=config.max_retries
     )
+    logger.debug("  tests_before: %.1fs", time.time() - _t0)
 
     if test_patch and (example.gold_patch or ""):
         gold_result = apply_patch(
@@ -181,14 +186,23 @@ def run_tests_local(
             logger.warning(
                 "local gold_patch apply failed for %s: %s", example.instance_id, gold_result.error
             )
+        logger.debug("  tests_head/gold: %.1fs", time.time() - _t0)
 
     # Reset, re-apply test_patch, then generated patch → tests_after
+    _t_reset = time.time()
     _reset_to_base(repo_dir, example.base_sha)
+    logger.debug("  _reset_to_base: %.1fs", time.time() - _t_reset)
     tests_after: list[TestResult] = []
     if generated_patch:
         if test_patch:
+            _tp_t = time.time()
             apply_patch(repo_dir, test_patch, example.base_sha, skip_checkout=True)
+            logger.debug("  re-apply test_patch: %.1fs", time.time() - _tp_t)
+        _gp_t = time.time()
         patch_result = apply_patch(repo_dir, generated_patch, example.base_sha, skip_checkout=True)
+        logger.debug(
+            "  generated_patch apply: %.1fs (success=%s)", time.time() - _gp_t, patch_result.success
+        )
         if patch_result.success:
             tests_after = collect_test_results(
                 repo_dir,
@@ -196,6 +210,7 @@ def run_tests_local(
                 timeout=config.test_timeout_seconds,
                 max_retries=config.max_retries,
             )
+            logger.debug("  tests_after: %.1fs", time.time() - _t0)
         else:
             logger.warning(
                 "local patch apply failed for %s: %s", example.instance_id, patch_result.error
@@ -215,6 +230,8 @@ def run_tests_local(
     else:
         patch_result = PatchApplicationResult(success=False, method_used="failed", error="no patch")
 
+    _elapsed = time.time() - _t0
+    logger.info("  total: %.1fs for %s", _elapsed, example.instance_id)
     return {
         "repo": example.repo,
         "base_sha": example.base_sha,
@@ -223,6 +240,7 @@ def run_tests_local(
         "tests_after": [t.model_dump() for t in tests_after],
         "patch_application": patch_result.model_dump(),
         "ground_truth": ground_truth,
+        "latency_seconds": _elapsed,
     }
 
 
