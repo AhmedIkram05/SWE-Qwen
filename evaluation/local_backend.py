@@ -216,6 +216,23 @@ def _ensure_local_repo(repo: str, repo_dir: Path, base_sha: str) -> None:
             timeout=120,
             check=True,
         )
+    # Discard leftover patch applications / untracked files from previous
+    # runs (a stale partial apply corrupts collection; .installed marker
+    # is preserved so pip install -e doesn't re-run every time).
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "checkout", "--", "."],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "clean", "-fd", "-e", ".installed"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
     subprocess.run(
         ["git", "-C", str(repo_dir), "checkout", "--quiet", base_sha],
         capture_output=True,

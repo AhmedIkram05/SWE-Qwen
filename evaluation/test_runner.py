@@ -291,6 +291,30 @@ def _parse_stdout_report(stdout: str) -> dict[str, _Attempt] | None:
     return attempts or None
 
 
+def _write_framework_conftest(repo_path: Path) -> None:
+    """Write a root ``conftest.py`` for repos whose test suites need a
+    framework bootstrap before pytest collection.
+
+    django's suite imports ``django.conf.settings`` at import time; without
+    ``DJANGO_SETTINGS_MODULE`` + ``django.setup()`` every test file errors
+    with ImproperlyConfigured and nothing collects.  SWE-bench sidesteps this
+    by invoking ``tests/runtests.py --settings=test_sqlite``; we keep pytest
+    (the shared harness) and inject the equivalent bootstrap.  No-op for
+    non-django repos or when the repo already ships a root conftest.
+    """
+    if not (repo_path / "tests" / "test_sqlite.py").is_file():
+        return
+    conftest = repo_path / "conftest.py"
+    if conftest.exists():
+        return
+    conftest.write_text(
+        "import os\n"
+        "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')\n"
+        "import django\n"
+        "django.setup()\n"
+    )
+
+
 def _run_pytest_once(  # noqa: PLR0912, PLR0915
     repo_path: Path,
     test_names: list[str],
@@ -333,6 +357,8 @@ def _run_pytest_once(  # noqa: PLR0912, PLR0915
             if _c.exists():
                 python_cmd = [str(_c)]
                 break
+
+    _write_framework_conftest(repo_path)
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         report_path = Path(tmp.name)
