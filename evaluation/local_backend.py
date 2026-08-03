@@ -310,7 +310,19 @@ def _ensure_local_repo(repo: str, repo_dir: Path, base_sha: str) -> None:
     # are incompatible with Python 3.14 (e.g. matplotlib builds from
     # source), and the user will see the collection error as a pytest
     # failure downstream.
-    if not (repo_dir / ".installed").exists():
+    #
+    # CRITICAL: skip repos that are themselves **pytest** (the source checkout
+    # at ``pytest-dev/pytest``).  An editable install of the pytest source
+    # registers ``pytest11`` entry points that override the proper pytest
+    # installation in the shared venv, breaking every subsequent test run
+    # with ``TypeError: required field "lineno" missing from alias``.
+    if (repo_dir / "src/_pytest").is_dir() or (repo_dir / "_pytest").is_dir():
+        logger.info(
+            "skipping editable install for %s (is the pytest source itself)",
+            repo,
+        )
+        (repo_dir / ".installed").touch()
+    elif not (repo_dir / ".installed").exists():
         try:
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "-e", str(repo_dir)],
