@@ -534,6 +534,10 @@ def _run_pytest_once(  # noqa: PLR0912, PLR0915
     # no path is derivable (plain sympy names, mangled golden docstrings).
     pytest_paths = _derive_test_files(repo_path, test_names) if test_names else []
     if not pytest_paths:
+        logger.warning(
+            "no test files derivable from %d names — falling back to full-dir collect (slow)",
+            len(test_names),
+        )
         pytest_paths = ["."]
     cmd = [
         *python_cmd,
