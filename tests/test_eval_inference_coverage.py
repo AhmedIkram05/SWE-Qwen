@@ -450,6 +450,7 @@ class TestGeneratePatchesBatch:
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
         monkeypatch.setattr(inf, "_get_llm", fake_get_llm)
+        monkeypatch.setattr(inf, "_no_think_wrap", lambda hf_id, prompt: prompt)
 
         examples = [_example(), _example(instance_id="inst-2")]
         out = generate_patches_batch.local(
@@ -485,6 +486,7 @@ class TestGeneratePatchesBatch:
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
         monkeypatch.setattr(inf, "_get_llm", fake_get_llm)
+        monkeypatch.setattr(inf, "_no_think_wrap", lambda hf_id, prompt: prompt)
 
         out = generate_patches_batch.local("qwen3-14b", "baseline_14b", "chat", [_example()])
         assert len(out) == 1
@@ -512,9 +514,53 @@ class TestGeneratePatchesBatch:
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
         monkeypatch.setattr(inf, "_get_llm", fake_get_llm)
+        monkeypatch.setattr(inf, "_no_think_wrap", lambda hf_id, prompt: prompt)
 
         out = generate_patches_batch.local("qwen3-14b", "baseline_14b", "chat", [_example()])
         assert out == ["diff --git a/fix.py b/fix.py\n@@ -1 +1 @@\n"]
+
+
+# ── thinking-mode gate ─────────────────────────────────────────────────────
+
+
+class TestNoThinkWrap:
+    def test_wraps_prompt_with_thinking_off(self, monkeypatch):
+        import evaluation.inference as inf
+
+        calls: dict = {}
+
+        class FakeTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                calls["messages"] = messages
+                calls["kwargs"] = kwargs
+                return "<wrapped>" + messages[0]["content"]
+
+        monkeypatch.setattr(inf, "_TOKENIZER_CACHE", {"Qwen/Qwen3-14B": FakeTokenizer()})
+        out = inf._no_think_wrap("Qwen/Qwen3-14B", "### Input\nbody")
+        assert out == "<wrapped>### Input\nbody"
+        assert calls["messages"] == [{"role": "user", "content": "### Input\nbody"}]
+        assert calls["kwargs"]["enable_thinking"] is False
+        assert calls["kwargs"]["add_generation_prompt"] is True
+        assert calls["kwargs"]["tokenize"] is False
+
+    def test_tokenizer_cached_per_model(self, monkeypatch):
+        import evaluation.inference as inf
+
+        loads: list[str] = []
+
+        class FakeTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                return "x"
+
+        def fake_from_pretrained(hf_id):
+            loads.append(hf_id)
+            return FakeTokenizer()
+
+        monkeypatch.setattr(inf, "_TOKENIZER_CACHE", {})
+        monkeypatch.setattr("transformers.AutoTokenizer.from_pretrained", fake_from_pretrained)
+        inf._no_think_wrap("m1", "p")
+        inf._no_think_wrap("m1", "p")
+        assert loads == ["m1"]  # one tokenizer load per model
 
 
 # ── C1: shared LLM across variants ─────────────────────────────────────────
