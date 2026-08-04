@@ -1006,6 +1006,17 @@ def munge_instance_id(instance_id: str) -> str:
     return instance_id.replace("__", "_1776_")
 
 
+def _swebench_repo_key(instance_id: str) -> str:
+    """SWE-bench ``org__repo-<pr>`` -> ``org/repo``.
+
+    Splits on the LAST dash so repos containing dashes (``sphinx-doc__sphinx``)
+    survive. Used to key the once-per-repo verification marker: ``/testbed``
+    is the same filesystem name in every swebench image, so the directory
+    name cannot identify the repo.
+    """
+    return instance_id.rsplit("-", 1)[0].replace("__", "/")
+
+
 def swebench_image(instance_id: str) -> modal.Image:
     """Official prebuilt per-instance SWE-bench eval image.
 
@@ -1061,7 +1072,12 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     test_names = [*fail_to_pass, *pass_to_pass]
     _t0 = time.time()
     logger.info("── instance %s (%d tests) ──", instance_id or repo_dir.name, len(test_names))
-    repo_name = repo_dir.name if str(repo_dir) == "/testbed" else str(repo_dir)
+    # ponytail: /testbed is the same name in every swebench image — key the
+    # once-per-repo marker on the instance's real repo, not the filesystem name
+    if str(repo_dir) == "/testbed":
+        repo_name = _swebench_repo_key(instance_id) if instance_id else "testbed"
+    else:
+        repo_name = str(repo_dir)
 
     if reset_first:
         _reset_to_base(repo_dir, base_sha)
