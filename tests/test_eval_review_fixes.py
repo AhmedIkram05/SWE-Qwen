@@ -221,6 +221,11 @@ class TestExtractModelMetricsDedupe:
 # ── swebench image naming + reset failure ────────────────────────────────────
 
 
+class _FakeImage:
+    def pip_install(self, *args, **kwargs):
+        return self
+
+
 class TestSwebenchImageNaming:
     def test_munge_instance_id(self):
         from evaluation.test_runner import munge_instance_id
@@ -234,7 +239,7 @@ class TestSwebenchImageNaming:
 
         def fake_from_registry(ref: str, **kwargs):
             captured["ref"] = ref
-            return object()
+            return _FakeImage()
 
         monkeypatch.setattr(
             test_runner.modal.Image, "from_registry", staticmethod(fake_from_registry)
