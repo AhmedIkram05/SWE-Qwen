@@ -859,8 +859,19 @@ def _install_repo(repo_dir: Path, timeout: int = 900, cache_dir: str | Path | No
         return
 
     pip = venv_dir / "bin" / "pip"
+    # ponytail: SWE-bench base images have all dependencies pre-installed
+    # (venv inherits them via --system-site-packages).  --no-deps avoids
+    # re-resolving/installing them — 5-10 min → 2-10 seconds per repo.
     proc = subprocess.run(
-        [str(pip), "install", "-e", str(repo_dir), "--quiet", "--disable-pip-version-check"],
+        [
+            str(pip),
+            "install",
+            "-e",
+            str(repo_dir),
+            "--no-deps",
+            "--quiet",
+            "--disable-pip-version-check",
+        ],
         capture_output=True,
         text=True,
         timeout=timeout,
