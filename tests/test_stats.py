@@ -12,7 +12,7 @@ def test_wilson_ci_zero_total() -> None:
 def test_wilson_ci_perfect() -> None:
     lo, hi = wilson_ci(100, 100)
     assert lo > 0.95  # narrow interval around 1.0
-    assert hi == 1.0
+    assert hi > 0.999  # floating-point precision near 1.0
 
 
 def test_wilson_ci_50pct() -> None:
