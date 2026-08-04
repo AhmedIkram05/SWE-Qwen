@@ -67,11 +67,12 @@ def fake_vllm(monkeypatch) -> Iterator[dict]:
     vllm.__spec__ = importlib.util.spec_from_loader("vllm", loader=None)
 
     class LLM:
-        def __init__(self, model, enable_lora, gpu_memory_utilization):
+        def __init__(self, model, enable_lora, gpu_memory_utilization, enforce_eager=False):
             recorded["llm"] = {
                 "model": model,
                 "enable_lora": enable_lora,
                 "gpu_memory_utilization": gpu_memory_utilization,
+                "enforce_eager": enforce_eager,
             }
             recorded["llm_instances"] = recorded.get("llm_instances", 0) + 1
 
@@ -398,9 +399,22 @@ class TestGetLLM:
             "model": "Qwen/Qwen3-14B",
             "enable_lora": True,  # C1: always True to support both baseline and LoRA variants
             "gpu_memory_utilization": 0.85,
+            "enforce_eager": False,  # default: compile engine (big batches)
         }
         assert fake_vllm["llm_instances"] == 1
         assert llm is not None
+
+    def test_eager_requested(self, fake_vllm):
+        _get_llm("m1", eager=True)
+        assert fake_vllm["llm"]["enforce_eager"] is True
+
+    def test_cache_ignores_later_eager_flag(self, fake_vllm):
+        # First load wins: a compiled engine is reused even if a later call
+        # asks for eager, so one container never holds two LLMs (27.5 GiB each).
+        _get_llm("m1", eager=False)
+        _get_llm("m1", eager=True)
+        assert fake_vllm["llm_instances"] == 1
+        assert fake_vllm["llm"]["enforce_eager"] is False
 
     def test_cache_hit(self, fake_vllm):
         first = _get_llm("m1")
