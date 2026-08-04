@@ -453,18 +453,40 @@ generate_patches_batch.local = _generate_patches_batch_body  # type: ignore[attr
 # module-level body, so harness._ensure_app_running hydrates them. Registering
 # lazily on a running app (as this file did before) leaves the handle
 # unhydrated and the first .remote() raises ExecutionError.
-_inference_fns.update(
-    {
-        gpu: app.function(
-            image=vllm_image,
-            gpu=gpu,
-            volumes={"/models": model_volume},
-            timeout=600,
-            secrets=[
-                modal.Secret.from_name("wandb-secret"),
-                modal.Secret.from_name("hf-secret"),
-            ],
-        )(_generate_patches_batch_body)
-        for gpu in _GPU_MAP.values()
-    }
-)
+# Distinct wrapper names per tier: registering the SAME function object under
+# one tag makes Modal override the server-side spec by registration order —
+# silent wrong-GPU risk; the wrapper also keeps each tier in global scope.
+
+
+def _infer_a10g(*args: Any, **kwargs: Any) -> Any:
+    """A10G-24GB tier (≤7B quantized models)."""
+    return _generate_patches_batch_body(*args, **kwargs)
+
+
+def _infer_a100(*args: Any, **kwargs: Any) -> Any:
+    """A100-80GB tier (14B bf16)."""
+    return _generate_patches_batch_body(*args, **kwargs)
+
+
+_inference_fns = {
+    "A10G:1": app.function(
+        image=vllm_image,
+        gpu="A10G:1",
+        volumes={"/models": model_volume},
+        timeout=600,
+        secrets=[
+            modal.Secret.from_name("wandb-secret"),
+            modal.Secret.from_name("hf-secret"),
+        ],
+    )(_infer_a10g),
+    "A100-80GB": app.function(
+        image=vllm_image,
+        gpu="A100-80GB",
+        volumes={"/models": model_volume},
+        timeout=600,
+        secrets=[
+            modal.Secret.from_name("wandb-secret"),
+            modal.Secret.from_name("hf-secret"),
+        ],
+    )(_infer_a100),
+}
