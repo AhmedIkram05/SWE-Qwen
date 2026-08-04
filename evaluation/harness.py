@@ -13,6 +13,7 @@ methods and never at import time.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import csv
 import io
@@ -52,8 +53,8 @@ def make_run_id() -> str:
 # ── Modal app lifecycle ──────────────────────────────────────────────────────
 
 # Long-lived ``app.run()`` contexts, keyed by Modal App instance. Entered once
-# per app on first use and never closed (the Modal/synchronicity event loop
-# runs on a daemon thread, so process exit is never blocked).
+# per app on first use and closed at process exit (see ``_close_modal_apps``);
+# closing earlier would un-hydrate functions still needed by later calls.
 _APP_RUN_STACKS: dict[Any, contextlib.ExitStack] = {}
 # Serializes the check-and-enter in ``_ensure_app_running``: without it, two
 # combo/swebench worker threads can both see the app absent, both call
@@ -65,9 +66,38 @@ _APP_LOCK = threading.Lock()
 # Modal's app-create rate limit on attempts that cannot succeed.
 _APP_RUN_FAILED: set[Any] = set()
 # One-shot flag: Modal output streaming enabled for the whole process (a bare
-# list because ``global`` trips PLW0603; entering Modal's ``enable_output``
-# context manager and never exiting matches the ``app.run()`` lifetime).
+# list because ``global`` trips PLW0603). The context manager object is kept
+# so the atexit handler can close it symmetrically.
 _OUTPUT_ENABLED: list[bool] = [False]
+_OUTPUT_CM: list[Any] = [None]
+
+
+def _close_modal_apps() -> None:
+    """Close open ``app.run()`` contexts at interpreter exit.
+
+    Without this, Python 3.14 shuts down the asyncio threadpool before Modal's
+    deferred AppClientDisconnect runs, and teardown of the never-closed app
+    context crashes with ``cannot schedule new futures after shutdown`` +
+    ``ConnectionError`` + ``generator didn't stop after athrow()`` — a noisy
+    traceback cascade after every successful CLI run.  atexit handlers run
+    (LIFO) before ``threading._shutdown`` kills the daemon loop thread, so the
+    disconnect happens while the event loop is still alive.
+    """
+    while _APP_RUN_STACKS:
+        _app, stack = _APP_RUN_STACKS.popitem()
+        try:
+            stack.close()
+        except Exception:  # noqa: BLE001 — best-effort at exit
+            logger.warning("modal app teardown failed for %r", _app, exc_info=True)
+    if _OUTPUT_CM[0] is not None:
+        try:
+            _OUTPUT_CM[0].__exit__(None, None, None)
+        except Exception:  # noqa: BLE001 — best-effort at exit
+            logger.warning("modal output streaming teardown failed", exc_info=True)
+        _OUTPUT_CM[0] = None
+
+
+atexit.register(_close_modal_apps)
 
 
 def _ensure_app_running(app: Any) -> None:
@@ -98,7 +128,8 @@ def _ensure_app_running(app: Any) -> None:
             # process, so a failing image build prints its real build logs.
             import modal
 
-            modal.enable_output().__enter__()
+            _OUTPUT_CM[0] = modal.enable_output()
+            _OUTPUT_CM[0].__enter__()
             _OUTPUT_ENABLED[0] = True
         if app not in _APP_RUN_STACKS:
             stack = contextlib.ExitStack()
