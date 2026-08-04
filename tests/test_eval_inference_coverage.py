@@ -67,12 +67,15 @@ def fake_vllm(monkeypatch) -> Iterator[dict]:
     vllm.__spec__ = importlib.util.spec_from_loader("vllm", loader=None)
 
     class LLM:
-        def __init__(self, model, enable_lora, gpu_memory_utilization, enforce_eager=False):
+        def __init__(
+            self, model, enable_lora, gpu_memory_utilization, enforce_eager=False, max_lora_rank=64
+        ):
             recorded["llm"] = {
                 "model": model,
                 "enable_lora": enable_lora,
                 "gpu_memory_utilization": gpu_memory_utilization,
                 "enforce_eager": enforce_eager,
+                "max_lora_rank": max_lora_rank,
             }
             recorded["llm_instances"] = recorded.get("llm_instances", 0) + 1
 
@@ -400,6 +403,7 @@ class TestGetLLM:
             "enable_lora": True,  # C1: always True to support both baseline and LoRA variants
             "gpu_memory_utilization": 0.85,
             "enforce_eager": False,  # default: compile engine (big batches)
+            "max_lora_rank": 64,  # higher_rank_14b is rank 32; vLLM default 16 kills the engine
         }
         assert fake_vllm["llm_instances"] == 1
         assert llm is not None
