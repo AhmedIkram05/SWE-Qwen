@@ -445,7 +445,7 @@ class TestGeneratePatchesBatch:
         def fake_resolve(variant, config):
             seen["resolve"] = (variant, config is not None)
 
-        def fake_get_llm(model_name, adapter_path=None):
+        def fake_get_llm(model_name, adapter_path=None, eager=False):
             return llm
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
@@ -480,7 +480,7 @@ class TestGeneratePatchesBatch:
         def fake_resolve(variant, config):
             return "/tmp/lora-adapter"
 
-        def fake_get_llm(model_name, adapter_path=None):
+        def fake_get_llm(model_name, adapter_path=None, eager=False):
             return llm
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
@@ -507,7 +507,7 @@ class TestGeneratePatchesBatch:
         def fake_resolve(variant, config):
             return None
 
-        def fake_get_llm(model_name, adapter_path=None):
+        def fake_get_llm(model_name, adapter_path=None, eager=False):
             return RawLLM()
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
