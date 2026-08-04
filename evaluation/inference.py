@@ -42,6 +42,35 @@ _DEFAULT_HF_ID = "Qwen/Qwen3-14B"
 
 _DIFF_FILE_RE = re.compile(r"^diff --git a/\S+ b/(\S+)", re.MULTILINE)
 
+# ── Thinking-mode gate ─────────────────────────────────────────────────────
+# Qwen3-14B thinks by default: it emits a long reasoning preamble before any
+# patch, which eats the whole 2048-token cap (observed in a run checkpoint:
+# 9851 chars of "Okay, let's see. The problem is that when using
+# GaussianMixture..." and extract_patch got nothing).  The only reliable gate
+# is the model's OWN chat template: with ``enable_thinking=False`` it
+# pre-fills an empty ``<think>\n\n</think>`` block after
+# ``<|im_start|>assistant``, which Qwen3 is trained to treat as "answer
+# directly".  Raw strings passed to ``llm.generate`` bypass the chat
+# template, so every rendered prompt is re-wrapped through
+# ``tokenizer.apply_chat_template`` first.  (vLLM's ``LLM.generate`` has no
+# chat_template_kwargs by design; ``LLM.chat`` does, but this keeps the
+# existing LoRA path untouched.)
+_TOKENIZER_CACHE: dict[str, Any] = {}
+
+
+def _no_think_wrap(hf_id: str, prompt: str) -> str:
+    """Wrap a rendered prompt in the model's chat template, thinking OFF."""
+    if hf_id not in _TOKENIZER_CACHE:
+        from transformers import AutoTokenizer
+
+        _TOKENIZER_CACHE[hf_id] = AutoTokenizer.from_pretrained(hf_id)
+    return _TOKENIZER_CACHE[hf_id].apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
 
 # ── Modal app ─────────────────────────────────────────────────────────────────
 
@@ -433,7 +462,11 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     # (~$0.14 saved).  First load wins; a cached engine is never rebuilt.
     eager = len(examples) < 32  # noqa: PLR2004
     llm = _get_llm(model_name, eager=eager)
-    prompts = [render_patch_prompt(example, template_name=prompt_template) for example in examples]
+    hf_id = resolve_hf_id(model_name)
+    prompts = [
+        _no_think_wrap(hf_id, render_patch_prompt(example, template_name=prompt_template))
+        for example in examples
+    ]
     sampling_params = SamplingParams(
         max_tokens=max_new_tokens, temperature=temperature, top_p=top_p
     )
