@@ -92,6 +92,11 @@ vllm_image = (
     # Cache models into the Modal volume so container restarts reuse the
     # 28 GB model instead of re-downloading from Hugging Face.
     .env({"HF_HOME": "/models"})
+    # Persist vLLM's torch.compile + CUDA graph caches on the volume too.
+    # Without this every container recompiles from scratch: 54-107s of
+    # torch.compile + ~35s graph capture per container (observed 4x in one
+    # dev-tier run). Cache dirs on the ephemeral /root are lost per restart.
+    .env({"VLLM_CACHE_ROOT": "/models/vllm-cache"})
     .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
     .add_local_dir(str(_EVAL_DIR), remote_path="/root/evaluation", copy=True)
     .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)
@@ -150,6 +155,10 @@ def _get_llm(
             model=resolve_hf_id(model_name),
             enable_lora=True,  # allow both LoRA and non-LoRA generations
             gpu_memory_utilization=0.85,
+            # higher_rank_14b adapter is rank 32; vLLM defaults max_lora_rank
+            # to 16 and kills the EngineCore with "LoRA rank 32 is greater
+            # than max_lora_rank 16" when the adapter is first loaded.
+            max_lora_rank=64,
             enforce_eager=eager,
         )
         # ponytail: one LLM per base model; LoRA adapters loaded on-demand
