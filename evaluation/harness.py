@@ -22,6 +22,7 @@ import math
 import random
 import statistics
 import tempfile
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,6 +55,10 @@ def make_run_id() -> str:
 # per app on first use and never closed (the Modal/synchronicity event loop
 # runs on a daemon thread, so process exit is never blocked).
 _APP_RUN_STACKS: dict[Any, contextlib.ExitStack] = {}
+# Serializes the check-and-enter in ``_ensure_app_running``: without it, two
+# combo/swebench worker threads can both see the app absent, both call
+# ``app.run()``, and the second raises InvalidError (already running).
+_APP_LOCK = threading.Lock()
 # Apps whose ``app.run()`` raised once: Modal execution stays disabled for them
 # for the rest of the process. Without this, every later example re-enters
 # ``app.run()``, re-triggering AppCreate + image build and eventually burning
@@ -80,30 +85,35 @@ def _ensure_app_running(app: Any) -> None:
     ``_APP_RUN_FAILED`` before re-raising: the first example surfaces the real
     error and every later example returns here without entering, so callers
     can fail fast instead of re-attempting the doomed build.
-    """
-    if app in _APP_RUN_FAILED:
-        return
-    if not _OUTPUT_ENABLED[0]:
-        # Stream build/function logs to the console for the rest of the
-        # process, so a failing image build prints its real build logs.
-        import modal
 
-        modal.enable_output().__enter__()
-        _OUTPUT_ENABLED[0] = True
-    if app not in _APP_RUN_STACKS:
-        stack = contextlib.ExitStack()
-        try:
-            stack.enter_context(app.run())
-        except Exception as exc:  # noqa: BLE001 — surface once, then disable Modal
-            logger.error(
-                "Modal app.run() failed for %r — disabling Modal execution for this process: %s",
-                app,
-                exc,
-                exc_info=True,
-            )
-            _APP_RUN_FAILED.add(app)
-            raise
-        _APP_RUN_STACKS[app] = stack
+    Thread-safe: the whole check-and-enter runs under ``_APP_LOCK`` so
+    concurrent callers (combo threads, swebench pool workers) cannot both
+    enter ``app.run()`` for the same app.
+    """
+    with _APP_LOCK:
+        if app in _APP_RUN_FAILED:
+            return
+        if not _OUTPUT_ENABLED[0]:
+            # Stream build/function logs to the console for the rest of the
+            # process, so a failing image build prints its real build logs.
+            import modal
+
+            modal.enable_output().__enter__()
+            _OUTPUT_ENABLED[0] = True
+        if app not in _APP_RUN_STACKS:
+            stack = contextlib.ExitStack()
+            try:
+                stack.enter_context(app.run())
+            except Exception as exc:  # noqa: BLE001, E501 — surface once, then disable Modal
+                logger.error(
+                    "Modal app.run() failed for %r — disabling Modal execution for this process: %s",  # noqa: E501
+                    app,
+                    exc,
+                    exc_info=True,
+                )
+                _APP_RUN_FAILED.add(app)
+                raise
+            _APP_RUN_STACKS[app] = stack
 
 
 # ── Executor indirection (monkeypatchable in tests) ─────────────────────────
@@ -280,7 +290,23 @@ def _run_tests_batch_fallback(
             pass_to_pass=job.get("pass_to_pass") or [],
             repo_domain="",
         )
-        return _harness._run_tests(example, job.get("generated_patch") or "", config)  # type: ignore[attr-defined]
+        # One bad job (Modal timeout, remote error) must not kill the whole
+        # batch: return an error-shaped result (same shape as test_runner's
+        # repo-prep failure) and let callers handle it per instance.
+        try:
+            return _harness._run_tests(example, job.get("generated_patch") or "", config)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — per-job isolation
+            logger.error("test run failed for %s: %s", example.instance_id, exc, exc_info=True)
+            return {
+                "repo": repo,
+                "base_sha": base_sha,
+                "error": str(exc),
+                "tests_before": [],
+                "tests_head": [],
+                "tests_after": [],
+                "patch_application": {},
+                "ground_truth": {},
+            }
 
     max_workers = config.max_parallel
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -294,10 +320,12 @@ def _run_tests_swebench(
 ) -> dict[str, dict[str, Any]]:
     """Run instances on their OFFICIAL per-repo SWE-bench images.
 
-    One Modal container per instance; the function (and its swebench image)
-    is registered lazily per repo via ``swebench_fn`` — the image contains
-    the repo with full git history and a pre-installed conda env, so no
-    clone/install happens at eval time.
+    One Modal container per instance; one function (and its swebench image)
+    is registered per repo via ``swebench_fn`` — the image contains the repo
+    with full git history and a pre-installed conda env, so no clone/install
+    happens at eval time.  All functions are registered BEFORE
+    ``_ensure_app_running`` (Modal only hydrates functions registered at
+    ``app.run()`` entry).
 
     Returns ``{instance_id: result_dict}``.  Raises on ANY failure so callers
     fall back to the clone/install batch path (coarse group-level fallback;
@@ -308,6 +336,16 @@ def _run_tests_swebench(
 
     from evaluation.test_runner import app as _test_runner_app
     from evaluation.test_runner import swebench_fn
+
+    # Modal 1.5.x hydrates only functions registered BEFORE app.run() entry;
+    # registering on a running app leaves the handle unhydrated and the first
+    # .remote() raises ExecutionError. Pre-register every per-repo function
+    # (all share one module-level body; one image per repo) first, then enter.
+    # If the app is already running (earlier batch path in this process), the
+    # functions are already registered and the guard skips.
+    if _test_runner_app not in _APP_RUN_STACKS:
+        for example in instances:
+            swebench_fn(example.repo, example.instance_id)
 
     _ensure_app_running(_test_runner_app)
     if _test_runner_app in _APP_RUN_FAILED:
