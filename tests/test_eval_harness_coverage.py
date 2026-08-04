@@ -164,6 +164,10 @@ class _Remote:
         self.calls.append(list(args))
         return self.result
 
+    # generate_patches_batch is a plain-function dispatcher; callable too.
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self.remote(*args, **kwargs)
+
 
 def test_generate_patches_chunks_at_100(
     monkeypatch: pytest.MonkeyPatch,
