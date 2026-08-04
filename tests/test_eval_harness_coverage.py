@@ -176,11 +176,11 @@ def test_generate_patches_chunks_at_100(
     import evaluation.inference
 
     class _ChunkyRemote:
-        """Stands in for the Modal function; harness calls ``.remote(...)``."""
+        """Stands in for the plain-function dispatcher; harness calls it directly."""
 
         captured: list[list[Any]] = []
 
-        def remote(self, *args: Any, **kwargs: Any) -> list[str]:
+        def __call__(self, *args: Any, **kwargs: Any) -> list[str]:
             type(self).captured.append(list(args))
             return [f"patch-{i}" for i in range(len(args[-1]))]
 
