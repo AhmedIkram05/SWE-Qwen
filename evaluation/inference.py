@@ -328,42 +328,22 @@ _inference_fns: dict[str, Any] = {}
 
 
 def _get_inference_fn(gpu: str) -> Any:
-    """Lazily register and return the inference function for *gpu*.
+    """Return the pre-registered inference function for *gpu*.
+
+    Functions are registered at module import time (after
+    ``_generate_patches_batch_body``, see the dict at the bottom of this
+    module), BEFORE the harness enters ``app.run()``. Modal 1.5.x hydrates
+    only functions registered at run-entry; registering lazily on a running
+    app leaves the handle unhydrated and the first ``.remote()`` raises
+    ExecutionError. Registering the module-level body also avoids the
+    closure-serialization InvalidError.
 
     Args:
         gpu: Modal GPU spec (e.g. ``"A100-80GB"``, ``"A10G:1"``).
     """
     fn = _inference_fns.get(gpu)
     if fn is None:
-
-        def _fn(  # noqa: PLR0913, PLR0917
-            model_name: str,
-            variant: str,
-            prompt_template: str,
-            examples: list[EvalInput],
-            max_new_tokens: int = 2048,
-            temperature: float = 0.1,
-            top_p: float = 0.95,
-        ) -> list[str]:
-            """Generate patches (body — registered per GPU tier)."""
-            return _generate_patches_batch_body(
-                model_name,
-                variant,
-                prompt_template,
-                examples,
-                max_new_tokens,
-                temperature,
-                top_p,
-            )
-
-        fn = app.function(
-            image=vllm_image,
-            gpu=gpu,
-            volumes={"/models": model_volume},
-            timeout=600,
-            secrets=[modal.Secret.from_name("wandb-secret"), modal.Secret.from_name("hf-secret")],
-        )(_fn)
-        _inference_fns[gpu] = fn
+        raise ValueError(f"no inference function registered for GPU {gpu!r}")
     return fn
 
 
@@ -464,3 +444,27 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
 
 # Testing backward-compat: .local() calls the body directly (no Modal container)
 generate_patches_batch.local = _generate_patches_batch_body  # type: ignore[attr-defined]
+
+
+# ── Modal function registration (module level, BEFORE app.run() entry) ────
+# Modal 1.5.x hydrates only functions registered at run-entry
+# (_create_all_objects snapshots local_state.functions when app.run() is
+# entered). Register one function per GPU tier at import time, sharing the
+# module-level body, so harness._ensure_app_running hydrates them. Registering
+# lazily on a running app (as this file did before) leaves the handle
+# unhydrated and the first .remote() raises ExecutionError.
+_inference_fns.update(
+    {
+        gpu: app.function(
+            image=vllm_image,
+            gpu=gpu,
+            volumes={"/models": model_volume},
+            timeout=600,
+            secrets=[
+                modal.Secret.from_name("wandb-secret"),
+                modal.Secret.from_name("hf-secret"),
+            ],
+        )(_generate_patches_batch_body)
+        for gpu in _GPU_MAP.values()
+    }
+)
