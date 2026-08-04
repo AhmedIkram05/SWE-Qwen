@@ -360,7 +360,11 @@ def swebench_to_issue_record(
             "hints": hints,
             "created_at": example["created_at"],
             "has_test_patch": has_test_patch,
-            "is_verified": has_test_patch,
+            # "Verified" = official SWE-bench Verified split, NOT "has ground
+            # truth" (every F2P split has ground truth). Conflating them let
+            # test/dev instances through the eval's --split swebench_verified
+            # filter and sample instances with no official eval image.
+            "is_verified": source_split == "verified",
             "instance_id": example["instance_id"],
         },
     )
