@@ -1031,15 +1031,23 @@ def swebench_image(instance_id: str) -> modal.Image:
     deps are pip-installed on top.  The repo's test deps stay in the
     ``testbed`` conda env untouched.
     """
-    return modal.Image.from_registry(
-        f"swebench/sweb.eval.x86_64.{munge_instance_id(instance_id)}:latest"
-    ).pip_install(
-        # Eval-package runtime deps for the base python (module-level
-        # imports: evaluation.config -> pydantic_settings; body imports:
-        # evaluation.schema -> pydantic, patch_applier -> unidiff).
-        "pydantic>=2.10.0",
-        "pydantic-settings>=2.7.0",
-        "unidiff>=0.7",
+    return (
+        modal.Image.from_registry(
+            f"swebench/sweb.eval.x86_64.{munge_instance_id(instance_id)}:latest"
+        )
+        .env(
+            # pip >=23 honors this: kills the "Running pip as the 'root' user"
+            # warning from every per-repo image build.
+            {"PIP_ROOT_USER_ACTION": "ignore"}
+        )
+        .pip_install(
+            # Eval-package runtime deps for the base python (module-level
+            # imports: evaluation.config -> pydantic_settings; body imports:
+            # evaluation.schema -> pydantic, patch_applier -> unidiff).
+            "pydantic>=2.10.0",
+            "pydantic-settings>=2.7.0",
+            "unidiff>=0.7",
+        )
     )
 
 
