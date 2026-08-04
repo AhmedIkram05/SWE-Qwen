@@ -142,8 +142,11 @@ def _generate_patches(
     patches: list[str] = []
     for i in range(0, len(examples), _INFER_CHUNK_SIZE):
         chunk = examples[i : i + _INFER_CHUNK_SIZE]
+        # generate_patches_batch is a plain-function dispatcher that performs
+        # the Modal .remote() itself (per inference_gpu tier); calling .remote()
+        # on it was drift from the pre-dispatcher refactor (AttributeError).
         patches.extend(
-            generate_patches_batch.remote(  # type: ignore[no-any-return]
+            generate_patches_batch(  # type: ignore[no-any-return]
                 model_name,
                 variant,
                 prompt_template,
