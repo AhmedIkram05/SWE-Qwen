@@ -53,7 +53,11 @@ def _error_message(exc: Exception) -> str:
     """Human-readable error from a subprocess failure."""
     if isinstance(exc, subprocess.CalledProcessError):
         detail = (exc.stderr or exc.output or "").strip()
-        return f"{exc} ({detail})" if detail else str(exc)
+        if detail:
+            # Cap stderr (git usage dumps can be ~1.5 KB) so the error never
+            # bloats checkpoint JSON / W&B artifacts.
+            return f"{exc} ({detail[:500]})"
+        return str(exc)
     return str(exc)
 
 
@@ -144,7 +148,11 @@ def apply_patch_git(
                 error=f"checkout {base_sha}: {_error_message(exc)}",
             )
     try:
-        _run_git(repo_path, ["apply", "--check", "--quiet", "-"], patch)
+        # ponytail: NO --quiet here — swebench images ship git 2.25.1
+        # (Ubuntu 20.04), where `git apply --quiet` doesn't exist (added in
+        # git 2.26) and exits 129 with a usage dump. _run_git captures
+        # output anyway, so --quiet never gained anything.
+        _run_git(repo_path, ["apply", "--check", "-"], patch)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         # The model may generate patch paths that don't match the repo's
         # layout (missing ``src/`` prefix, wrong nesting).  Try common
@@ -160,7 +168,7 @@ def apply_patch_git(
                     try:
                         _run_git(
                             repo_path,
-                            ["apply", "--check", f"--directory={prefix}/", "--quiet", "-"],
+                            ["apply", "--check", f"--directory={prefix}/", "-"],
                             patch,
                         )
                     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
@@ -218,14 +226,15 @@ def apply_patch_unidiff(repo_path: Path, patch: str) -> PatchApplicationResult:
         result_container = []  # type: list
         exception_container = []  # type: list
 
-        def target():
+        # ponytail: name must not shadow the `target` Path variable below
+        def _parse_target():
             try:
                 parsed_result = parse_patch()
                 result_container.append(parsed_result)
             except Exception as e:
                 exception_container.append(e)
 
-        thread = threading.Thread(target=target)
+        thread = threading.Thread(target=_parse_target)
         thread.daemon = True
         thread.start()
         thread.join(timeout=30)  # 30 second timeout for parsing
