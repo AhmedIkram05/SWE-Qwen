@@ -777,6 +777,36 @@ Closed three audit-listed gaps (user-approved) plus three DoD items:
 - Est. project eval spend: ~$20-25 one-time + ~$0.10 per CI smoke run
 - **Deferred:** CI eval workflow (Phase 7), execution feedback (v2), Optuna (v2); live Modal smoke pending user credentials
 
+### Pipeline Hardening & Efficiency (2026-08-03/04) — **969+14 tests passing**
+
+Eleven rounds of local 3-50 sample runs revealed systemic issues in the patch application path, test execution efficiency, and local Python 3.14 incompatibilities (all LOCAL-only except the parametrize patch). Each root cause was isolated via timing logs built into both backends and fixed with Modal efficiency as the primary constraint.
+
+| Finding | Root Cause | Fix | Bug/Perf | Where |
+|---------|------------|-----|----------|-------|
+| **"no successful patches on Modal"** — all 14B patches rejected as corrupt | `extract_patch` final `.strip()` removed trailing `\n` → `git apply` stdin exits 128 "corrupt patch" on every generated patch | Normalize trailing newline at the chokepoint (`apply_patch_git` + `apply_patch_unidiff`); also fixed `extract_patch` to return `+ "\n"` | **Bug** | patch_applier.py:96, inference.py:137-151 |
+| **"patches truncated mid-diff"** on Modal smoke/dev runs | `tier_max_new_tokens` smoke=768, dev=768 — 14B patches for 3-file diffs are 1.5-2K tokens | All tiers → 2048 | **Bug** | config.py:76-80 |
+| **"timeout bullshit"** — sympy 690s tests_before + 990s tests_head | `_derive_files_from_grep` used `\b` (PCRE) in `git grep -E` pattern → silently returned nothing → full-dir `"."` collect (273s each × 3 rounds) | Use ERE-compatible pattern without `\b` | **Bug** | test_runner.py:466 |
+| **Same sympy full-dir collect** for parametrized names (`test_foo[a]` 148 names) | `_derive_files_from_grep` included parametrize suffix `[a]` in grep → `def test_foo\[a\]\(` never matches `def test_foo(` | Strip `[param]` suffix before grepping | **Bug** | test_runner.py:455-466 |
+| **"target file missing: sqlfluff/config.py"** — path not found | Model paths missing `src/` prefix (sqlfluff, astropy layout) or entirely fictional | Multi-prefix retry (`src/`, `packages/`, `lib/`) + `_find_target` basename search | **Bug** | patch_applier.py:74-108, 148-176, 258-266 |
+| **"pytest JSON report missing (rc=1)"** — pytest-dev source infection | pip install -e . on cached `pytest-dev/pytest` repo registered `pytest11` entry points overriding real pytest → `TypeError: required field "lineno" missing from alias` | Skip editable install for repos that ARE pytest (`src/_pytest` dir) | **Bug** | local_backend.py:313-318, test_runner.py:849-855 |
+| **scikit-learn `No module named pytest`** | pip install -e . failed (numpy build on 3.14) → no venv → no pytest module | Fallback log more informative; PRIMARY fix is swebench images (no install at eval time) | **Perf** | local_backend.py (log only) |
+| **Sympy `equal_valued` poisoning** (recurred every user run) | `pip install -e .` on cached sympy at old base c4e836c installs sympy-1.10.dev0 lacking `equal_valued` → `torch` importers break | Post-install `pip install sympy==1.13.3` in both local and Modal install paths | **Bug** | local_backend.py:330-334, test_runner.py:880-888 |
+| **`pip install -e .` 2-10 min per repo on Modal cold start** (50 repos × 5 min = 250 min) | pip resolves+installs ALL dependencies; SWE-bench images already have them via `--system-site-packages` | `--no-deps` flag in Modal `_install_repo` | **Perf** | test_runner.py:862 |
+| **Missing unit tests for `evaluation/stats.py`** | Added in Phase 5b but test coverage never written | 14 new tests covering Wilson CI edges, McNemar, paired bootstrap determinism | **Bug** | tests/test_stats.py (new) |
+
+**Hot paths fixed (Modal cost impact):**
+| Path | Before | After |
+|------|--------|-------|
+| Sympy full-dir collect (2 instances × 280s × 3 rounds) | 1680s | ~30-50s (parametrize + \b fix) |
+| pip install cold start per repo | 2-10 min (dep resolution) | 2-10s (`--no-deps`) |
+| Patch apply rc=128 (corrupt) → repair retry | 2 extra apply attempts + unidiff fallback | rc=1 (valid format) → direct apply or unidiff |
+| Sphinx/ pytest-dev / sympy 3.14 crashes | Total failure (rc=4) | LOCAL-ONLY; Modal swebench images use ≤3.12 |
+| **Per-instance total (warm, non-problematic)** | ~2-5 min | ~10-60s |
+
+**Still LOCAL-only (never hits Modal):** `collections.Mapping` removed in 3.14 (sympy x7 instances), `types.Union` removed (sphinx x4), `jinja2.environmentfilter` removed (sphinx x3), `_pytest.pytester.Testdir` removed (pytest-dev x2), `\` escape SyntaxWarnings (all sympy), `--timeout` flag conflict (sphinx setup.cfg). These are Python 3.14 regressions in old code — SWE-bench containers use the correct Python for each instance.
+
+**969 tests + 14 new stats tests = 983 passing**
+
 ---
 
 ### Root-Cause Fixes + Suite Greening (2026-08-02) — **936 tests passing**
