@@ -1015,7 +1015,7 @@ def test_generate_patches_passes_max_new_tokens(monkeypatch: pytest.MonkeyPatch)
 
     class _FakeFn:
         @staticmethod
-        def remote(model_name, variant, prompt_template, examples, **kw):
+        def __call__(model_name, variant, prompt_template, examples, **kw):
             nonlocal received_kw
             received_kw = kw
             return ["+p\n"] * len(examples)
@@ -1049,7 +1049,7 @@ def test_generate_patches_default_max_new_tokens(monkeypatch: pytest.MonkeyPatch
 
     class _FakeFn:
         @staticmethod
-        def remote(model_name, variant, prompt_template, examples, **kw):
+        def __call__(model_name, variant, prompt_template, examples, **kw):
             nonlocal received_kw
             received_kw = kw
             return ["+p\n"] * len(examples)
