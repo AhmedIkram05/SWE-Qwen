@@ -72,10 +72,12 @@ class EvalConfig(BaseSettings):
     # Eval tiers (EVAL-V5-REDESIGN §2)
     tier_sizes: dict[str, int] = {"smoke": 20, "dev": 100, "final": 500, "full": 0}
     tier_seed: int = 42  # deterministic subsets → paired significance
-    # Per-tier max_new_tokens: shorter output faster/cheaper gen for smoke/dev
+    # Per-tier max_new_tokens.  2048 across all tiers — smoke/dev need
+    # enough room for multi-file patches (3+ files × 200-500 tokens each).
+    # Truncation at 768 was silently corrupting Modal 14B patches (§ FIX).
     tier_max_new_tokens: dict[str, int] = {
-        "smoke": 768,
-        "dev": 768,
+        "smoke": 2048,
+        "dev": 2048,
         "final": 2048,
         "full": 2048,
     }
