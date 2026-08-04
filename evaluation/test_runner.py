@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
@@ -1033,6 +1034,8 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     fail_to_pass = fail_to_pass or []
     pass_to_pass = pass_to_pass or []
     test_names = [*fail_to_pass, *pass_to_pass]
+    _t0 = time.time()
+    logger.info("── instance %s (%d tests) ──", instance_id or repo_dir.name, len(test_names))
     repo_name = repo_dir.name if str(repo_dir) == "/testbed" else str(repo_dir)
 
     if reset_first:
@@ -1184,6 +1187,8 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
         )
         logger.info("no generated patch for %s — skipping patch tests", repo_name)
 
+    _elapsed = time.time() - _t0
+    logger.info("  total: %.1fs for %s", _elapsed, instance_id or repo_name)
     return {
         "repo": repo_name,
         "base_sha": base_sha,
@@ -1193,6 +1198,7 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
         "patch_application": patch_result.model_dump(),
         "ground_truth": ground_truth,
         "error": error,
+        "latency_seconds": _elapsed,
     }
 
 
