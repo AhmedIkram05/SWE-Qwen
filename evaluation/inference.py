@@ -91,6 +91,7 @@ _LLM_LOCK = threading.Lock()
 def _get_llm(
     model_name: str,
     adapter_path: str | None = None,
+    eager: bool = False,
 ) -> Any:
     """Return a cached vLLM ``LLM`` instance for *model_name* (cached once).
 
@@ -102,6 +103,10 @@ def _get_llm(
         model_name: ``models.yaml`` key or full Hugging Face ID.
         adapter_path: Ignored at load time (LoRA loaded per-call via
             ``lora_request`` on ``llm.generate()``).
+        eager: Skip torch.compile + CUDA graph capture (saves ~150s of cold
+            start for probe/smoke batches).  Only honoured on the first load;
+            a cached engine is reused as-is so a container never holds two
+            LLM instances for one model (27.5 GiB each — OOM risk).
 
     Returns:
         A ``vllm.LLM`` instance (cached after first creation).
@@ -116,6 +121,7 @@ def _get_llm(
             model=resolve_hf_id(model_name),
             enable_lora=True,  # allow both LoRA and non-LoRA generations
             gpu_memory_utilization=0.85,
+            enforce_eager=eager,
         )
         # ponytail: one LLM per base model; LoRA adapters loaded on-demand
         # per generate() call via lora_request param.
@@ -422,7 +428,11 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     else:
         logger.info("no LoRA adapter for variant %s — using base model %s", variant, model_name)
 
-    llm = _get_llm(model_name)
+    # ponytail: engine compile pays off for big batches; probe/smoke tiers
+    # (<32 prompts) get enforce_eager instead — ~150s less cold start per run
+    # (~$0.14 saved).  First load wins; a cached engine is never rebuilt.
+    eager = len(examples) < 32  # noqa: PLR2004
+    llm = _get_llm(model_name, eager=eager)
     prompts = [render_patch_prompt(example, template_name=prompt_template) for example in examples]
     sampling_params = SamplingParams(
         max_tokens=max_new_tokens, temperature=temperature, top_p=top_p
