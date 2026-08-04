@@ -1240,6 +1240,7 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917, PLR0912
     repo: str,
     base_sha: str,
     test_patch: str | None = None,
+    gold_patch: str | None = None,
     generated_patch: str | None = None,
     fail_to_pass: list[str] | None = None,
     pass_to_pass: list[str] | None = None,
@@ -1268,6 +1269,7 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917, PLR0912
         repo: ``"owner/name"`` of the GitHub repository.
         base_sha: Commit to evaluate against (pre-fix state).
         test_patch: Ground-truth test changes (unified diff), or None.
+        gold_patch: Ground-truth fix patch (unified diff), or None.
         generated_patch: Model-generated fix patch (unified diff), or None.
         fail_to_pass: Test names that should fail at ``base_sha`` and pass after a fix.
         pass_to_pass: Test names that should keep passing.
@@ -1317,6 +1319,7 @@ def run_tests_in_container(  # noqa: PLR0913, PLR0917, PLR0912
         max_retries=max_retries,
         instance_id=instance_id,
         verify_mode=verify_mode,
+        gold_patch=gold_patch,
     )
 
 
