@@ -1024,9 +1024,22 @@ def swebench_image(instance_id: str) -> modal.Image:
     out at the instance's base commit (plus a marker "SWE-bench" commit on
     top) and a conda env ``testbed`` with the project already installed —
     zero clone, zero pip install at eval time.
+
+    The bare image ships ONLY that conda env; the harness code itself
+    (``evaluation.test_runner`` + its deps) is imported at container
+    hydration in the image's base python, so the eval package's own runtime
+    deps are pip-installed on top.  The repo's test deps stay in the
+    ``testbed`` conda env untouched.
     """
     return modal.Image.from_registry(
         f"swebench/sweb.eval.x86_64.{munge_instance_id(instance_id)}:latest"
+    ).pip_install(
+        # Eval-package runtime deps for the base python (module-level
+        # imports: evaluation.config -> pydantic_settings; body imports:
+        # evaluation.schema -> pydantic, patch_applier -> unidiff).
+        "pydantic>=2.10.0",
+        "pydantic-settings>=2.7.0",
+        "unidiff>=0.7",
     )
 
 
@@ -1449,6 +1462,13 @@ def swebench_fn(repo: str, instance_id: str) -> Any:
     param), and images are per-instance, so we register one function per repo
     on first use — taking any instance of that repo as the image (full git
     history + editable install make it valid for every instance of the repo).
+
+    All per-repo functions wrap the SAME module-level body
+    (``_run_swebench_instance_body``); without a ``name=`` override every
+    registration would share one server-side tag (``__qualname__``) and the
+    LAST repo would silently override the others — wrong image per repo.
+    ``name`` affects only the tag; container-side lookup still resolves the
+    body by ``implementation_name``.
     """
     fn = _swebench_fns.get(repo)
     if fn is None:
@@ -1457,6 +1477,7 @@ def swebench_fn(repo: str, instance_id: str) -> Any:
             volumes={"/test_cache": test_volume},
             timeout=900,  # 15 min per instance (conda install of 2 plugins + tests)
             gpu=None,  # CPU only for test execution
+            name=f"_run_swebench_{repo.replace('/', '_')}",
         )(_run_swebench_instance_body)
         _swebench_fns[repo] = fn
     return fn
