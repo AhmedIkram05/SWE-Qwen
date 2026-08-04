@@ -463,10 +463,12 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     eager = len(examples) < 32  # noqa: PLR2004
     llm = _get_llm(model_name, eager=eager)
     hf_id = resolve_hf_id(model_name)
-    prompts = [
-        _no_think_wrap(hf_id, render_patch_prompt(example, template_name=prompt_template))
-        for example in examples
-    ]
+    rendered = [render_patch_prompt(example, template_name=prompt_template) for example in examples]
+    # Adapters were trained on raw "### Response -> patch" continuation
+    # (tokenize.format_training_prompt); chat-wrapping that breaks the contract
+    # and produced repetition loops. Only the untrained base model gets the
+    # no-think wrap, to stop it rambling "Okay, let's see..." preamble.
+    prompts = [_no_think_wrap(hf_id, p) if adapter_path is None else p for p in rendered]
     sampling_params = SamplingParams(
         max_tokens=max_new_tokens, temperature=temperature, top_p=top_p
     )
