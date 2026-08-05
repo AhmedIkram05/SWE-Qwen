@@ -792,6 +792,11 @@ def _ensure_checked_out(repo_dir: Path, base_sha: str) -> None:
     # Remove stale lock files from crashed containers (Modal volumes persist state)
     lock = repo_dir / ".git" / "index.lock"
     lock.unlink(missing_ok=True)
+    # Modal volumes persist between runs: a previously failed patch application
+    # leaves the working tree dirty, and "local changes would be overwritten"
+    # then fails the checkout for EVERY subsequent instance of the repo.
+    _run_git(repo_dir, "reset", "--hard", "HEAD")
+    _run_git(repo_dir, "clean", "-fdq")
     proc = _run_git(repo_dir, "checkout", "--quiet", base_sha)
     if proc.returncode != 0:
         logger.warning(
@@ -1054,10 +1059,15 @@ def _swebench_image_tag_exists(tag: str) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310
             return resp.status == 200  # noqa: PLR2004
-    except (HTTPError, URLError, OSError):
-        # Fail closed: if the image can't be verified it can't be pulled,
-        # so the caller's clone/install fallback is the only working path.
-        return False
+    except HTTPError as e:
+        # A 404 is the only definitive "image does not exist". Docker Hub
+        # rate-limits anonymous API calls (429) and flakes on 5xx — failing
+        # closed on those silently routed every instance to the dep-starved
+        # fallback containers. Modal pulls the image itself, so an unverifiable
+        # API response is not a missing image.
+        return e.code != 404  # noqa: PLR2004
+    except (URLError, OSError):
+        return True
 
 
 def swebench_image_exists(instance_id: str) -> bool:
