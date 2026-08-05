@@ -485,8 +485,14 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
         else p.replace("### Response", "/no_think\n### Response", 1)
         for p in rendered
     ]
+    # ponytail: no repetition_penalty => decoding degeneracy (the model fell
+    # into a ~1000x "```" fence loop eating the whole 8192 budget). 1.15 breaks
+    # self-repetition; bump to ~1.3 if loops persist.
     sampling_params = SamplingParams(
-        max_tokens=max_new_tokens, temperature=temperature, top_p=top_p
+        max_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        repetition_penalty=1.15,
     )
     # ponytail: vLLM 0.26+ loads LoRA on-demand via lora_request on generate().
     # The cached LLM only needs enable_lora=True; the adapter is loaded first use.
