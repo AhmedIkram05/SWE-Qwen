@@ -1042,7 +1042,7 @@ def test_generate_patches_passes_max_new_tokens(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_generate_patches_default_max_new_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    """C2: default max_new_tokens is 2048 when not specified."""
+    """C2: default max_new_tokens is 8192 when not specified."""
     import evaluation.inference as inf
 
     received_kw: dict = {}
@@ -1071,7 +1071,7 @@ def test_generate_patches_default_max_new_tokens(monkeypatch: pytest.MonkeyPatch
         )
     ]
     patches = _generate_patches("qwen3-14b", "baseline_14b", "chat", examples)
-    assert received_kw.get("max_new_tokens") == 2048
+    assert received_kw.get("max_new_tokens") == 8192
     assert len(patches) == 1
 
 
