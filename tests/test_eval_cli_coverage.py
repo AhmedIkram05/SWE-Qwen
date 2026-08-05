@@ -122,13 +122,14 @@ def _runner() -> CliRunner:
 
 
 class TestRunCommand:
-    def test_default_mode_golden(self, stub_harness):
+    def test_default_run_swebench_sample_50(self, stub_harness):
+        # Bare `run` must be cheap: swebench_verified, 50 samples, never the
+        # full 2820-example golden set (regression: Aug 2026 $30 accident).
         result = _runner().invoke(cli_app, ["run"])
         assert result.exit_code == 0, result.output
         assert "run_id: stub-run" in result.output
-        assert _StubHarness.calls[0][0] == "golden"
-        assert _StubHarness.calls[0][2] == ["chat"]
-        assert _StubHarness.calls[0][3] == 0
+        assert _StubHarness.calls[0][0] == "swebench"
+        assert _StubHarness.calls[0][3] == 50
 
     def test_mode_smoke_resolves_tier(self, stub_harness):
         result = _runner().invoke(cli_app, ["run", "--mode", "smoke"])
@@ -143,12 +144,11 @@ class TestRunCommand:
         result = _runner().invoke(cli_app, ["run", "--mode", mode])
         assert result.exit_code == 0, result.output
         call = _StubHarness.calls[0]
+        assert call[3] == stub_harness.tier_sizes[mode]
         if mode == "full":
             assert call[0] == "golden"
-            assert call[3] == 0
         else:
             assert call[0] == "swebench"
-            assert call[3] == stub_harness.tier_sizes[mode]
 
     def test_unknown_mode_exits_2(self, stub_harness):
         result = _runner().invoke(cli_app, ["run", "--mode", "bogus"])
@@ -192,7 +192,7 @@ class TestRunCommand:
         def _boom(*_a: Any, **_k: Any) -> Any:
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(_StubHarness, "run_golden", _boom)
+        monkeypatch.setattr(_StubHarness, "run_swebench_verified", _boom)
         result = _runner().invoke(cli_app, ["run", "--resume", "run-abc"])
         assert result.exit_code == 130
         assert "interrupted" in result.output
@@ -220,7 +220,7 @@ class TestOtherRunCommands:
         )
         assert result.exit_code == 0, result.output
         assert _StubHarness.calls[0][0] == "golden"
-        assert _StubHarness.calls[0][3] == 0
+        assert _StubHarness.calls[0][3] == 50
 
     def test_run_golden_keyboard_interrupt(self, stub_harness, monkeypatch):
         def _boom(*_a: Any, **_k: Any) -> Any:
