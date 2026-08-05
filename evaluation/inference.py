@@ -527,7 +527,7 @@ _inference_fns = {
         image=vllm_image,
         gpu="A10G:1",
         volumes={"/models": model_volume},
-        timeout=600,
+        timeout=1800,  # 8K-token generation at eager-mode ~20-40 tok/s needs >10 min
         secrets=[
             modal.Secret.from_name("wandb-secret"),
             modal.Secret.from_name("hf-secret"),
@@ -537,7 +537,7 @@ _inference_fns = {
         image=vllm_image,
         gpu="A100-80GB",
         volumes={"/models": model_volume},
-        timeout=600,
+        timeout=1800,  # 8K-token generation at eager-mode ~20-40 tok/s needs >10 min
         secrets=[
             modal.Secret.from_name("wandb-secret"),
             modal.Secret.from_name("hf-secret"),
