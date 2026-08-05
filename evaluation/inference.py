@@ -17,6 +17,7 @@ on every invocation.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -103,6 +104,10 @@ vllm_image = (
     .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
     .add_local_dir(str(_EVAL_DIR), remote_path="/root/evaluation", copy=True)
     .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)
+    # Gold patch diffs for few-shot prompting (see _golden_patches).
+    .add_local_file(
+        str(_REPO_ROOT / "data" / "golden.jsonl"), remote_path="/root/data/golden.jsonl"
+    )
 )
 
 model_volume = modal.Volume.from_name("eval-model-cache", create_if_missing=True)
@@ -260,11 +265,100 @@ def _file_snippets(
     return out
 
 
+# ── Few-shot golden examples ──────────────────────────────────────────────
+# Gold patch diffs for few-shot prompting come from the run's GCS golden
+# (source of truth, see _ensure_golden).  A couple of same-repo examples teach
+# the model the repo's diff shape without any training — Qwen3-14B zero-shot
+# still fabricates placeholder headers (``revision 12345``) and guessed line
+# numbers.
+_GOLDEN_PATH = _REPO_ROOT / "data" / "golden.jsonl"
+# Override set from GCS when a dataset run id is known; the image-baked
+# data/golden.jsonl is stale once the pipeline re-runs.
+_GOLDEN_SOURCE: Path | None = None
+# {repo: [(instance_id, patch_diff), ...]} — built lazily, capped per repo so
+# the 57 MB file doesn't become 200 MB of strings in RAM.
+_GOLDEN_INDEX: dict[str, list[tuple[str, str]]] | None = None
+
+
+def _ensure_golden(dataset_run_id: str) -> Path:
+    """Return the golden file for a pipeline run, downloading from GCS.
+
+    Source of truth: ``datasets/{dataset_run_id}/swebench/golden.jsonl`` on
+    the public ``swe-qwen-datasets`` bucket (no creds needed — urllib only,
+    this also runs inside the Modal container which lacks
+    google-cloud-storage).  Cached at ``data/{dataset_run_id}/swebench/``
+    relative to the repo root.  Falls back to the baked local file when GCS
+    is unreachable (best-effort, matching ``_golden_patches`` semantics).
+    """
+    dst = _REPO_ROOT / "data" / dataset_run_id / "swebench" / "golden.jsonl"
+    if dst.is_file():
+        return dst
+    url = (
+        "https://storage.googleapis.com/swe-qwen-datasets/datasets/"
+        f"{dataset_run_id}/swebench/golden.jsonl"
+    )
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(url, dst)
+        logger.info("downloaded golden from GCS: %s", url)
+    except (urllib.error.URLError, OSError):
+        logger.warning("could not fetch golden from %s — using local fallback", url)
+        return _GOLDEN_PATH
+    return dst
+
+
+def _golden_patches(
+    repo: str,
+    exclude_instance_id: str | None = None,
+    max_examples: int = 2,
+    max_lines: int = 150,
+) -> list[str]:
+    """Gold patch diffs for ``repo``, for few-shot prompting.
+
+    Best-effort: parses the golden file once per process (GCS-synced via
+    ``_ensure_golden`` when a dataset run id is set, else the baked local
+    file), skips the example's own instance (no leakage — golden ids match
+    eval ids), and truncates each patch to ``max_lines``.  Missing file → [].
+    """
+    global _GOLDEN_INDEX  # noqa: PLW0603 — memoized lazy index
+    if _GOLDEN_INDEX is None:
+        index: dict[str, list[tuple[str, str]]] = {}
+        try:
+            with (_GOLDEN_SOURCE or _GOLDEN_PATH).open(encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    patch = rec.get("patch_diff")
+                    if not patch:
+                        continue
+                    key = str(rec.get("repo") or "")
+                    per_repo = index.setdefault(key, [])
+                    if len(per_repo) < 4:  # noqa: PLR2004 — ponytail: cap index memory
+                        per_repo.append((str(rec.get("instance_id") or ""), patch))
+        except OSError:
+            index = {}
+        _GOLDEN_INDEX = index
+    out: list[str] = []
+    for instance_id, patch in _GOLDEN_INDEX.get(repo, []):
+        if exclude_instance_id and instance_id == exclude_instance_id:
+            continue
+        lines = patch.splitlines()
+        if len(lines) > max_lines:
+            patch = "\n".join(lines[:max_lines]) + "\n# ... (diff truncated)"  # noqa: PLW2901
+        out.append(patch)
+        if len(out) >= max_examples:
+            break
+    return out
+
+
 def render_patch_prompt(
     example: EvalInput,
     template_name: str = DEFAULT_TEMPLATE,
     template_dir: str | Path | None = None,
     include_file_contents: bool = False,
+    example_patches: list[str] | None = None,
 ) -> str:
     """Render the inference prompt for one eval example.
 
@@ -277,6 +371,9 @@ def render_patch_prompt(
         include_file_contents: When True, fetch the candidate files'
             contents at ``base_sha`` from GitHub raw and embed them in the
             prompt (the model fabricates diffs without seeing real code).
+        example_patches: Gold patch diffs to show as few-shot format
+            examples.  Defaults to same-repo examples from the run's GCS
+            golden (``_ensure_golden``; best-effort; [] when unavailable).
 
     Returns:
         The rendered prompt string.
@@ -306,6 +403,9 @@ def render_patch_prompt(
         candidates += test_files
         context_snippets = _file_snippets(example.repo, example.base_sha, candidates)
 
+    if example_patches is None and template_name in ("chat", "user"):
+        example_patches = _golden_patches(example.repo, exclude_instance_id=example.instance_id)
+
     if template_name == "chat":
         system_prompt = loader.render(
             "system",
@@ -322,6 +422,7 @@ def render_patch_prompt(
             context_files=context_files,
             test_files=test_files,
             context_snippets=context_snippets,
+            example_patches=example_patches or [],
         )
         return loader.render_chat(
             system_prompt=system_prompt,
@@ -346,6 +447,7 @@ def render_patch_prompt(
             context_files=context_files,
             test_files=test_files,
             context_snippets=context_snippets,
+            example_patches=example_patches or [],
         )
 
     if template_name == "assistant":
@@ -467,6 +569,7 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
     max_new_tokens: int = 8192,
     temperature: float = 0.1,
     top_p: float = 0.95,
+    dataset_run_id: str | None = None,
 ) -> list[str]:
     """Generate candidate fix patches for a batch of eval examples.
 
@@ -486,6 +589,7 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
         max_new_tokens,
         temperature,
         top_p,
+        dataset_run_id,
     )
 
 
@@ -500,6 +604,7 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     max_new_tokens: int = 8192,
     temperature: float = 0.1,
     top_p: float = 0.95,
+    dataset_run_id: str | None = None,
 ) -> list[str]:
     """Generate candidate fix patches for a batch of eval examples (body).
 
@@ -518,6 +623,9 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
         max_new_tokens: Maximum completion length.
         temperature: Sampling temperature.
         top_p: Nucleus sampling probability.
+        dataset_run_id: Pipeline run id — the few-shot golden patches are
+            fetched from that run's GCS golden (``_ensure_golden``), keeping
+            GCS the single source of truth instead of the image-baked file.
 
     Returns:
         List of patch strings, same order as ``examples``.
@@ -528,6 +636,13 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     from evaluation.config import EvalConfig
 
     config = EvalConfig()
+    if dataset_run_id:
+        # GCS golden is the source of truth; rebuild the few-shot index from it.
+        global _GOLDEN_SOURCE, _GOLDEN_INDEX  # noqa: PLW0603
+        src = _ensure_golden(dataset_run_id)
+        if src != _GOLDEN_SOURCE:
+            _GOLDEN_SOURCE = src
+            _GOLDEN_INDEX = None
     adapter_path = resolve_adapter_path(variant, config)
     if adapter_path:
         logger.info("using LoRA adapter for variant %s: %s", variant, adapter_path)
