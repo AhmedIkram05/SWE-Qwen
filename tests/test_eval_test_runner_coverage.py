@@ -774,6 +774,70 @@ class TestEnsureCheckedOut:
         with pytest.raises(RuntimeError, match="failed to checkout beef"):
             tr._ensure_checked_out(repo, "beef")
 
+    def test_dirty_tree_is_cleaned_before_checkout(self, tmp_path):
+        """A dirty shared volume must not fail the checkout (modal volume
+        state persists between runs: a prior failed patch leaves the tree
+        dirty and every later instance of the repo then errors)."""
+        repo, sha = _git_repo(tmp_path)
+        (repo / "f.txt").write_text("dirty")
+        (repo / "untracked.txt").write_text("junk")
+        tr._ensure_checked_out(repo, sha)
+        assert (repo / "f.txt").read_text() == "x"
+        assert not (repo / "untracked.txt").exists()
+
+
+# ── _swebench_image_tag_exists ─────────────────────────────────────────────
+
+
+class TestSwebenchImageTagExists:
+    def _stub(self, monkeypatch, *, exc=None, status=200):
+
+        class FakeResp:
+            def __init__(self):
+                self.status = status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(url, timeout=10):
+            if exc is not None:
+                raise exc
+            return FakeResp()
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        tr._swebench_image_tag_exists.cache_clear()
+
+    @staticmethod
+    def _http_error(code: int):
+        from email.message import Message
+        from urllib.error import HTTPError
+
+        return HTTPError("u", code, "err", Message(), None)
+
+    def test_present(self, monkeypatch):
+        self._stub(monkeypatch)
+        assert tr._swebench_image_tag_exists("foo") is True
+
+    def test_404_means_missing(self, monkeypatch):
+        self._stub(monkeypatch, exc=self._http_error(404))
+        assert tr._swebench_image_tag_exists("foo") is False
+
+    def test_rate_limited_is_not_missing(self, monkeypatch):
+        """Docker Hub anonymous API rate limits (429) previously failed
+        closed and silently routed every instance to the dep-starved
+        fallback containers."""
+        self._stub(monkeypatch, exc=self._http_error(429))
+        assert tr._swebench_image_tag_exists("foo") is True
+
+    def test_network_error_fails_open(self, monkeypatch):
+        from urllib.error import URLError
+
+        self._stub(monkeypatch, exc=URLError("down"))
+        assert tr._swebench_image_tag_exists("foo") is True
+
 
 # ── _reset_to_base ──────────────────────────────────────────────────────────
 
