@@ -382,7 +382,13 @@ def test_run_example_generation_failure(monkeypatch: pytest.MonkeyPatch) -> None
         EvalConfig(checkpoint_dir=Path("data/ckpt"), output_dir=Path("data/out"))
     )
 
-    def _boom(model: str, variant: str, template: str, examples: list[EvalInput]) -> list[str]:
+    def _boom(
+        model: str,
+        variant: str,
+        template: str,
+        examples: list[EvalInput],
+        **kwargs: Any,
+    ) -> list[str]:
         raise RuntimeError("inference backend down")
 
     monkeypatch.setattr("evaluation.harness._generate_patches", _boom)
@@ -551,6 +557,27 @@ def test_load_examples_placeholder_substituted(
 
     assert calls == ["data/x/abc/golden.jsonl"]
     assert [ex.instance_id for ex in examples] == ["abc-1"]
+
+
+def test_load_examples_placeholder_uses_dataset_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # dataset_run_id (the pipeline run) wins over the eval resume id.
+    config = EvalConfig(
+        golden_data_path="data/x/{run_id}/golden.jsonl", dataset_run_id="pipeline-1"
+    )
+    calls: list[str] = []
+
+    def _fake_read(path: str) -> str:
+        calls.append(path)
+        return json.dumps(_input_record("p-1")) + "\n"
+
+    monkeypatch.setattr("evaluation.harness._read_text", _fake_read)
+
+    examples = EvaluationHarness(config).load_examples("golden", run_id="eval-resume")
+
+    assert calls == ["data/x/pipeline-1/golden.jsonl"]
+    assert [ex.instance_id for ex in examples] == ["p-1"]
 
 
 # ── WandbLogger: offline safety ───────────────────────────────────────────

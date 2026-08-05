@@ -309,7 +309,10 @@ class TestEvalRun:
 class TestEvalConfig:
     def test_defaults(self) -> None:
         cfg = EvalConfig()
-        assert cfg.golden_data_path == "gs://swe-qwen-datasets/datasets/{run_id}/golden.jsonl"
+        assert (
+            cfg.golden_data_path == "gs://swe-qwen-datasets/datasets/{run_id}/swebench/golden.jsonl"
+        )
+        assert cfg.dataset_run_id == ""
         assert cfg.swebench_verified_filter == "metadata.is_verified==true"
         assert cfg.baseline_model == "Qwen/Qwen3-14B"
         assert cfg.wandb_entity == "2571642-university-of-dundee"

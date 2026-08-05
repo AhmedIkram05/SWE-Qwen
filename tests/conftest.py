@@ -142,6 +142,10 @@ class _FakeImage:
         _ = local_path, remote_path, copy
         return self
 
+    def add_local_file(self, local_path: str, *, remote_path: str, copy: bool = True) -> _FakeImage:
+        _ = local_path, remote_path, copy
+        return self
+
     def add_local_python_source(self, path: str) -> _FakeImage:
         _ = path
         return self
