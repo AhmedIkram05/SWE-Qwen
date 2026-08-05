@@ -435,6 +435,29 @@ class TestAggregateMetrics:
         # 2 tests before + 2 after = 4 runs; 1 flaky in each list → 2/4
         assert m.flaky_test_rate == pytest.approx(0.5)
 
+    def test_errored_results_excluded_from_rates(self) -> None:
+        # ponytail: errored results (error is not None) carried p2p=1.0 from
+        # the "nothing regressed by definition" rule; an all-errored run must
+        # not show p2p_rate 100%. total_examples stays honest (includes them).
+        ok = _make_result(repo="a/b", f2p=1.0, p2p=1.0)
+        errored = _make_result(repo="a/b", f2p=0.0, p2p=1.0, patch_ok=False).model_copy(
+            update={"error": "'Connection' object has no attribute '_transport'"}
+        )
+        m = aggregate_metrics([ok, errored])
+        assert m.total_examples == 2
+        assert m.f2p_rate == pytest.approx(1.0)  # not (1.0+0.0)/2
+        assert m.p2p_rate == pytest.approx(1.0)
+        assert m.p2p_count == 1
+        assert m.per_repo_breakdown["a/b"]["count"] == 1
+
+    def test_all_errored_rates_zero(self) -> None:
+        errored = _make_result().model_copy(update={"error": "boom"})
+        m = aggregate_metrics([errored])
+        assert m.total_examples == 1
+        assert m.f2p_rate == 0.0
+        assert m.p2p_rate == 0.0
+        assert m.p2p_count == 0
+
     def test_empty_raises(self) -> None:
         with pytest.raises(ValueError):
             aggregate_metrics([])
