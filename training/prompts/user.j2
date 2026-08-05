@@ -27,4 +27,14 @@
 {% endfor %}
 {% endif %}
 
+{% if example_patches %}
+### Example Patches
+Reference patches from this repository's history — match their format exactly:
+{% for patch in example_patches %}
+```diff
+{{ patch }}
+```
+{% endfor %}
+{% endif %}
+
 Generate a patch (unified diff format) that fixes this issue. Respond with ONLY the patch in a single fenced ```diff code block — no analysis, no explanation, no extra text.
