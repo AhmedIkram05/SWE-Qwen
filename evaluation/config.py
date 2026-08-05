@@ -84,9 +84,9 @@ class EvalConfig(BaseSettings):
     # the diff block.
     tier_max_new_tokens: dict[str, int] = {
         "smoke": 2048,
-        "dev": 2048,
-        "final": 2048,
-        "full": 2048,
+        "dev": 8192,
+        "final": 8192,
+        "full": 8192,
     }
     # Inference GPU: A100-80GB is required for 14B bf16; a10g-24gb works for ≤7B
     inference_gpu: str = "a100-80gb"
