@@ -13,6 +13,7 @@ installation.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -1041,6 +1042,33 @@ def swebench_image(instance_id: str) -> modal.Image:
         "pydantic-settings>=2.7.0",
         "unidiff>=0.7",
     )
+
+
+@functools.lru_cache(maxsize=256)
+def _swebench_image_tag_exists(tag: str) -> bool:
+    """True if ``swebench/sweb.eval.x86_64.<tag>:latest`` is published on Docker Hub."""
+    import urllib.request
+    from urllib.error import HTTPError, URLError
+
+    url = f"https://hub.docker.com/v2/repositories/swebench/sweb.eval.x86_64.{tag}/tags/latest"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310
+            return resp.status == 200  # noqa: PLR2004
+    except (HTTPError, URLError, OSError):
+        # Fail closed: if the image can't be verified it can't be pulled,
+        # so the caller's clone/install fallback is the only working path.
+        return False
+
+
+def swebench_image_exists(instance_id: str) -> bool:
+    """True if the official swebench eval image for this instance is published.
+
+    The harness pre-flights this before registering functions: a single
+    missing image (e.g. sqlfluff_1776_sqlfluff-3662) would otherwise fail
+    the entire Modal app at image-build time, disabling Modal for the
+    process and losing every test run.
+    """
+    return _swebench_image_tag_exists(munge_instance_id(instance_id))
 
 
 def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
