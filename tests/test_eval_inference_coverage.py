@@ -474,7 +474,12 @@ class TestGeneratePatchesBatch:
         assert len(prompts) == 2
         assert "django__django-10554" in prompts[0]
         assert "inst-2" in prompts[1]
-        assert params.kwargs == {"max_tokens": 64, "temperature": 0.2, "top_p": 0.9}
+        assert params.kwargs == {
+            "max_tokens": 64,
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "repetition_penalty": 1.15,
+        }
         assert lora_req is None
 
     def test_with_lora_adapter(self, fake_vllm, monkeypatch):
