@@ -74,17 +74,16 @@ class EvalConfig(BaseSettings):
     # (user decision — bare `run` and `--mode full` must stay cheap).
     tier_sizes: dict[str, int] = {"smoke": 20, "dev": 100, "final": 500, "full": 50}
     tier_seed: int = 42  # deterministic subsets → paired significance
-    # Per-tier max_new_tokens.  Qwen3 is a thinking model: in raw
-    # continuation mode it rambles its reasoning out loud before the diff
-    # (observed: 9290+ chars of prose, no diff, truncated at 2048).  8192
-    # gives it room to finish thinking AND emit the patch; extract_patch
-    # keeps only the diff block.  Truncation at 768 was silently corrupting
-    # Modal 14B patches (§ FIX); 2048 was still too small (§ PATCH-V1).
+    # Per-tier max_new_tokens.  Smoke = probe-size runs (≤20): a real diff
+    # appears within ~2K tokens or never, so an 8192 budget only makes probes
+    # 4× slower to fail at 4× the cost.  Dev/final/full keep 8192 — room for
+    # Qwen3's out-loud reasoning before the diff; extract_patch keeps only
+    # the diff block.
     tier_max_new_tokens: dict[str, int] = {
-        "smoke": 8192,
-        "dev": 8192,
-        "final": 8192,
-        "full": 8192,
+        "smoke": 2048,
+        "dev": 2048,
+        "final": 2048,
+        "full": 2048,
     }
     # Inference GPU: A100-80GB is required for 14B bf16; a10g-24gb works for ≤7B
     inference_gpu: str = "a100-80gb"
