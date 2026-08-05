@@ -275,6 +275,7 @@ def test_run_tests_swebench_happy(monkeypatch: pytest.MonkeyPatch) -> None:
     remote = _Remote(result={"tests_before": [], "tests_after": [], "patch_application": {}})
     monkeypatch.setattr(evaluation.test_runner, "app", "fake-swebench-app")
     monkeypatch.setattr(evaluation.test_runner, "swebench_fn", lambda repo, iid: remote)
+    monkeypatch.setattr(evaluation.test_runner, "swebench_image_exists", lambda iid: True)
 
     instances = [_input("inst-1"), _input("inst-2")]
     patches = {"inst-1": "+p1\n", "inst-2": "+p2\n"}
@@ -283,12 +284,43 @@ def test_run_tests_swebench_happy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(remote.calls) == 2
 
 
+def test_run_tests_swebench_skips_missing_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Instances whose swebench image isn't published are dropped pre-flight.
+
+    They must NOT be registered with the app (a missing registry image
+    would fail app.run() at hydration, disabling Modal for the process)
+    and must be absent from the result so run_batch routes them to the
+    clone/install fallback.
+    """
+    import evaluation.test_runner
+
+    monkeypatch.setattr(harness_mod, "_run_tests_swebench", _ORIG_SWEBENCH)
+    monkeypatch.setattr(harness_mod, "_ensure_app_running", lambda app: None)
+    monkeypatch.setattr(harness_mod, "_APP_RUN_FAILED", set())
+
+    remote = _Remote(result={"tests_before": [], "tests_after": [], "patch_application": {}})
+    monkeypatch.setattr(evaluation.test_runner, "app", "fake-swebench-app")
+    monkeypatch.setattr(evaluation.test_runner, "swebench_fn", lambda repo, iid: remote)
+    monkeypatch.setattr(
+        evaluation.test_runner, "swebench_image_exists", lambda iid: iid != "inst-2"
+    )
+
+    out = harness_mod._run_tests_swebench(
+        [_input("inst-1"), _input("inst-2")],
+        {"inst-1": "+p1\n", "inst-2": "+p2\n"},
+        _cfg(Path("/tmp/unused")),
+    )
+    assert set(out) == {"inst-1"}
+    assert len(remote.calls) == 1
+
+
 def test_run_tests_swebench_raises_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     import evaluation.test_runner
 
     monkeypatch.setattr(harness_mod, "_run_tests_swebench", _ORIG_SWEBENCH)
     monkeypatch.setattr(evaluation.test_runner, "app", "fake-swebench-app")
     monkeypatch.setattr(evaluation.test_runner, "swebench_fn", lambda repo, iid: _Remote())
+    monkeypatch.setattr(evaluation.test_runner, "swebench_image_exists", lambda iid: True)
     monkeypatch.setattr(harness_mod, "_APP_RUN_FAILED", {"fake-swebench-app"})
 
     with pytest.raises(RuntimeError, match="Modal disabled"):
