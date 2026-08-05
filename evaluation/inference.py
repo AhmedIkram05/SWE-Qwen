@@ -396,7 +396,7 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
     variant: str,
     prompt_template: str,
     examples: list[EvalInput],
-    max_new_tokens: int = 2048,
+    max_new_tokens: int = 8192,
     temperature: float = 0.1,
     top_p: float = 0.95,
 ) -> list[str]:
@@ -429,7 +429,7 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     variant: str,
     prompt_template: str,
     examples: list[EvalInput],
-    max_new_tokens: int = 2048,
+    max_new_tokens: int = 8192,
     temperature: float = 0.1,
     top_p: float = 0.95,
 ) -> list[str]:
