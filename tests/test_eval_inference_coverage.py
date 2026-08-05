@@ -261,6 +261,55 @@ class TestRenderPatchPrompt:
         with pytest.raises(ValueError, match="unknown prompt template"):
             render_patch_prompt(_example(), template_name="nope")
 
+    def test_default_no_file_fetch(self, monkeypatch):
+        import evaluation.inference as inf
+
+        calls: list = []
+        monkeypatch.setattr(inf, "_fetch_raw_file", lambda *a, **k: calls.append(a) or "x")
+        render_patch_prompt(_example())
+        assert calls == []
+
+    def test_chat_includes_file_contents(self, monkeypatch):
+        import evaluation.inference as inf
+
+        inf._fetch_raw_file.cache_clear()
+        monkeypatch.setattr(
+            inf,
+            "_fetch_raw_file",
+            lambda repo, sha, path: (
+                "def foo():\n    return 1\n" if path == "tests/test_models.py" else None
+            ),
+        )
+        ex = _example(metadata={"context_files": ["app/models.py"]})
+        prompt = render_patch_prompt(ex, include_file_contents=True)
+        assert "### File Contents" in prompt
+        assert "#### `tests/test_models.py`" in prompt
+        assert "def foo():" in prompt
+        # fetch failure for app/models.py → path list only, no snippet
+        assert "#### `app/models.py`" not in prompt
+
+    def test_fetch_failure_is_silent(self, monkeypatch):
+        import evaluation.inference as inf
+
+        inf._fetch_raw_file.cache_clear()
+        monkeypatch.setattr(inf, "_fetch_raw_file", lambda *a, **k: None)
+        prompt = render_patch_prompt(_example(), include_file_contents=True)
+        assert "### File Contents" not in prompt
+
+    def test_issue_body_paths_seed_snippets(self, monkeypatch):
+        import evaluation.inference as inf
+
+        inf._fetch_raw_file.cache_clear()
+        fetched: list[str] = []
+        monkeypatch.setattr(
+            inf, "_fetch_raw_file", lambda repo, sha, path: fetched.append(path) or "x"
+        )
+        ex = _example(issue_body="Fix the crash in src/app.py and src/util.py.")
+        render_patch_prompt(ex, include_file_contents=True)
+        assert "src/app.py" in fetched
+        assert "src/util.py" in fetched
+        assert "tests/test_models.py" in fetched
+
 
 # ── resolve_hf_id ──────────────────────────────────────────────────────────
 

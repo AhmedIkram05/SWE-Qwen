@@ -57,7 +57,9 @@ def generate_patches_local(  # noqa: PLR0913
 
     patches: list[str] = []
     for i, example in enumerate(examples):
-        prompt = render_patch_prompt(example, template_name=prompt_template)
+        prompt = render_patch_prompt(
+            example, template_name=prompt_template, include_file_contents=True
+        )
         logger.info(
             "local inference: %s/%s example %d/%d (instance=%s, prompt_len=%d)",
             model_name,

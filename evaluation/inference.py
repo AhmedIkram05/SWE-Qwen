@@ -20,6 +20,9 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import urllib.error
+import urllib.request
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -208,10 +211,60 @@ def _files_from_diff(patch: str) -> list[str]:
     return [match.group(1) for match in _DIFF_FILE_RE.finditer(patch)]
 
 
+# SWE-bench problem statements often name the files they touch (``django/
+# db/models/fields/__init__.py``, ``path/to/file.py``).  Used to seed file
+# snippets when no context_files are known.
+_PATH_RE = re.compile(r"[A-Za-z0-9_./-]+\.py")
+
+
+@lru_cache(maxsize=4096)
+def _fetch_raw_file(repo: str, base_sha: str, path: str) -> str | None:
+    """Fetch one file at ``base_sha`` from GitHub raw.
+
+    SWE-bench base commits are real GitHub objects, so the raw endpoint
+    resolves them.  Returns None on any failure — snippets are best-effort.
+    """
+    url = f"https://raw.githubusercontent.com/{repo}/{base_sha}/{path}"
+    try:
+        with urllib.request.urlopen(url, timeout=20) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        return None
+
+
+def _file_snippets(
+    repo: str,
+    base_sha: str,
+    paths: list[str],
+    max_files: int = 10,
+    max_lines: int = 500,
+) -> list[dict[str, str]]:
+    """Best-effort contents for the candidate files, deduped and capped.
+
+    ponytail: 500 lines/file, 10 files — enough to see the code around a
+    hunk without blowing the input budget on vendored giants.
+    """
+    seen: set[str] = set()
+    out: list[dict[str, str]] = []
+    for path in paths:
+        if not path or path in seen or len(out) >= max_files:
+            continue
+        seen.add(path)
+        content = _fetch_raw_file(repo, base_sha, path)
+        if content is None:
+            continue
+        lines = content.splitlines()
+        if len(lines) > max_lines:
+            content = "\n".join(lines[:max_lines]) + "\n# ... (file truncated)"
+        out.append({"path": path, "content": content})
+    return out
+
+
 def render_patch_prompt(
     example: EvalInput,
     template_name: str = DEFAULT_TEMPLATE,
     template_dir: str | Path | None = None,
+    include_file_contents: bool = False,
 ) -> str:
     """Render the inference prompt for one eval example.
 
@@ -221,6 +274,9 @@ def render_patch_prompt(
             ``assistant`` — see ``training/prompts/*.j2``.
         template_dir: Prompt template directory (defaults to
             ``training/prompts/`` next to the repo checkout).
+        include_file_contents: When True, fetch the candidate files'
+            contents at ``base_sha`` from GitHub raw and embed them in the
+            prompt (the model fabricates diffs without seeing real code).
 
     Returns:
         The rendered prompt string.
@@ -240,6 +296,16 @@ def render_patch_prompt(
     context_files: list[str] = [str(f) for f in metadata.get("context_files", [])]
     test_files = _files_from_diff(example.test_patch)
 
+    context_snippets: list[dict[str, str]] = []
+    if include_file_contents and template_name in ("chat", "user"):
+        # ponytail: context_files is never populated today, so seed candidates
+        # from the test patch + file paths mentioned in the issue body.
+        candidates = list(context_files)
+        if not candidates:
+            candidates = _PATH_RE.findall(example.issue_body or "")
+        candidates += test_files
+        context_snippets = _file_snippets(example.repo, example.base_sha, candidates)
+
     if template_name == "chat":
         system_prompt = loader.render(
             "system",
@@ -255,6 +321,7 @@ def render_patch_prompt(
             repo_domain=example.repo_domain,
             context_files=context_files,
             test_files=test_files,
+            context_snippets=context_snippets,
         )
         return loader.render_chat(
             system_prompt=system_prompt,
@@ -278,6 +345,7 @@ def render_patch_prompt(
             repo_domain=example.repo_domain,
             context_files=context_files,
             test_files=test_files,
+            context_snippets=context_snippets,
         )
 
     if template_name == "assistant":
@@ -472,7 +540,10 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     eager = len(examples) < 32  # noqa: PLR2004
     llm = _get_llm(model_name, eager=eager)
     hf_id = resolve_hf_id(model_name)
-    rendered = [render_patch_prompt(example, template_name=prompt_template) for example in examples]
+    rendered = [
+        render_patch_prompt(example, template_name=prompt_template, include_file_contents=True)
+        for example in examples
+    ]
     # Adapters were trained on raw "### Response -> patch" continuation
     # (tokenize.format_training_prompt); chat-wrapping that breaks the contract
     # and produced repetition loops. Only the untrained base model gets the

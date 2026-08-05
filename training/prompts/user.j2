@@ -16,4 +16,15 @@
 - `{{ file }}`
 {% endfor %}
 
+{% if context_snippets %}
+### File Contents
+{% for snippet in context_snippets %}
+#### `{{ snippet.path }}`
+
+```python
+{{ snippet.content }}
+```
+{% endfor %}
+{% endif %}
+
 Generate a patch (unified diff format) that fixes this issue. Respond with ONLY the patch in a single fenced ```diff code block — no analysis, no explanation, no extra text.
