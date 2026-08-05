@@ -366,7 +366,24 @@ def _run_tests_swebench(
     import concurrent.futures
 
     from evaluation.test_runner import app as _test_runner_app
-    from evaluation.test_runner import swebench_fn
+    from evaluation.test_runner import swebench_fn, swebench_image_exists
+
+    # Pre-flight: a repo whose swebench image is NOT published on Docker Hub
+    # (e.g. sqlfluff_1776_sqlfluff-3662) fails the whole Modal app at
+    # image-build time, disabling Modal for the process and losing every test
+    # run. Drop those instances here — run_batch's ``missing`` handling
+    # routes them to the clone/install batch fallback, so coverage survives.
+    missing = [ex for ex in instances if not swebench_image_exists(ex.instance_id)]
+    if missing:
+        logger.warning(
+            "no published swebench eval image for %d instance(s) — routing to "
+            "clone/install fallback: %s",
+            len(missing),
+            ", ".join(ex.instance_id for ex in missing),
+        )
+    instances = [ex for ex in instances if ex not in missing]
+    if not instances:
+        return {}
 
     # Modal 1.5.x hydrates only functions registered BEFORE app.run() entry;
     # registering on a running app leaves the handle unhydrated and the first
