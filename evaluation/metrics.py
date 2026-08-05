@@ -93,7 +93,11 @@ def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
     total_tests = 0
     flaky_tests = 0
     per_repo: dict[str, list[tuple[float, float]]] = {}
-    for result in results:
+    # ponytail: errored results (error is not None) carried p2p=1.0 from the
+    # "nothing regressed by definition" rule in compute_f2p, so an all-errored
+    # run showed p2p_rate 100%. Rates are computed over error-free results only.
+    valid = [r for r in results if r.error is None]
+    for result in valid:
         for test in (*result.tests_before, *result.tests_after):
             total_tests += 1
             if test.status == "flaky":
@@ -102,8 +106,8 @@ def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
 
     first = results[0]
     example_count = len(results)
-    f2p_examples = sum(1 for r in results if r.f2p > 0.0)
-    p2p_examples = sum(1 for r in results if r.p2p > 0.0)
+    f2p_examples = sum(1 for r in valid if r.f2p > 0.0)
+    p2p_examples = sum(1 for r in valid if r.p2p > 0.0)
 
     breakdown = {
         repo: {
@@ -120,9 +124,9 @@ def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
         prompt_template=first.prompt_template,
         total_examples=example_count,
         successful_patches=sum(1 for r in results if r.patch_application.success),
-        f2p_rate=sum(r.f2p for r in results) / example_count,
+        f2p_rate=sum(r.f2p for r in valid) / len(valid) if valid else 0.0,
         f2p_count=f2p_examples,
-        p2p_rate=sum(r.p2p for r in results) / example_count,
+        p2p_rate=sum(r.p2p for r in valid) / len(valid) if valid else 0.0,
         p2p_count=p2p_examples,
         avg_latency=sum(r.latency_seconds for r in results) / example_count,
         flaky_test_rate=flaky_tests / total_tests if total_tests else 0.0,
