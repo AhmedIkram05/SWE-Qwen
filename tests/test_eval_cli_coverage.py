@@ -327,6 +327,20 @@ class TestDispatch:
         assert _StubHarness.calls[0][0] == "golden"
         assert _StubHarness.calls[0][4] == "resume-1"
 
+    def test_golden_sample_zero_capped(self, monkeypatch, tmp_path):
+        # sample=0 on golden must never mean "all 2820" — capped at tier_sizes["full"].
+        monkeypatch.setattr("evaluation.harness.EvaluationHarness", _StubHarness)
+        _StubHarness.calls = []
+        cfg = _cfg(tmp_path)
+        _dispatch("golden", [("m", "v")], ["chat"], 0, None, cfg)
+        assert _StubHarness.calls[0][3] == cfg.tier_sizes["full"]
+
+    def test_golden_explicit_sample_kept(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("evaluation.harness.EvaluationHarness", _StubHarness)
+        _StubHarness.calls = []
+        _dispatch("golden", [("m", "v")], ["chat"], 100, None, _cfg(tmp_path))
+        assert _StubHarness.calls[0][3] == 100
+
     def test_unknown_split(self, monkeypatch, tmp_path):
         monkeypatch.setattr("evaluation.harness.EvaluationHarness", _StubHarness)
         with pytest.raises(typer.BadParameter, match="unknown split"):
