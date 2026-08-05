@@ -150,12 +150,13 @@ def _ensure_app_running(app: Any) -> None:
 # ── Executor indirection (monkeypatchable in tests) ─────────────────────────
 
 
-def _generate_patches(
+def _generate_patches(  # noqa: PLR0913, PLR0917
     model_name: str,
     variant: str,
     prompt_template: str,
     examples: list[EvalInput],
     max_new_tokens: int = 8192,
+    dataset_run_id: str | None = None,
 ) -> list[str]:
     """Generate patches for *examples* via ``evaluation.inference``.
 
@@ -165,6 +166,8 @@ def _generate_patches(
 
     Args:
         max_new_tokens: Maximum completion length (per-tier C2 config).
+        dataset_run_id: Pipeline run id; forwarded so the container fetches
+            the few-shot golden from that run's GCS artifacts.
     """
     from evaluation.inference import app as _inference_app
     from evaluation.inference import generate_patches_batch
@@ -193,6 +196,7 @@ def _generate_patches(
                 prompt_template,
                 chunk,
                 max_new_tokens=max_new_tokens,
+                dataset_run_id=dataset_run_id,
             )
         )
     return patches
@@ -860,15 +864,17 @@ class EvaluationHarness:
     def load_examples(self, split: str = "golden", run_id: str | None = None) -> list[EvalInput]:
         """Load ``EvalInput`` records from ``golden_data_path``.
 
-        The ``{run_id}`` placeholder in the path is substituted from *run_id*
-        or ``config.resume_from`` (a dataset path without the placeholder is
-        used verbatim). ``split="swebench_verified"`` keeps only records whose
+        The ``{run_id}`` placeholder in the path is the DATASET pipeline run
+        id, not the eval resume id: it is substituted from
+        ``config.dataset_run_id`` (EVAL_DATASET_RUN_ID), then *run_id*, then
+        ``config.resume_from`` (a dataset path without the placeholder is used
+        verbatim). ``split="swebench_verified"`` keeps only records whose
         ``metadata.is_verified`` is True.
 
         Args:
             split: ``"golden"`` (default) or ``"swebench_verified"``.
-            run_id: Dataset run id for ``{run_id}`` substitution; falls back
-                to ``config.resume_from``.
+            run_id: Fallback dataset run id for ``{run_id}`` substitution
+                (overridden by ``config.dataset_run_id``).
 
         Returns:
             Reconstructed EvalInput list, one per JSONL line.
@@ -877,13 +883,13 @@ class EvaluationHarness:
             ValueError: if a placeholder is present but no run id is available,
                 or for an unknown split.
         """
-        run_id = run_id or self.config.resume_from
+        run_id = self.config.dataset_run_id or run_id or self.config.resume_from
         path = self.config.golden_data_path
         if "{run_id}" in path:
             if not run_id:
                 raise ValueError(
                     "golden_data_path contains a {run_id} placeholder but no run id "
-                    "was provided; pass run_id=... or set EVAL_RESUME_FROM"
+                    "was provided; pass run_id=... or set EVAL_DATASET_RUN_ID"
                 )
             path = path.format(run_id=run_id)
         examples: list[EvalInput] = []
@@ -939,7 +945,13 @@ class EvaluationHarness:
                 pass
             else:
                 # Legacy path: generate on the fly
-                patches = _generate_patches(model_name, variant, prompt_template, [example])
+                patches = _generate_patches(
+                    model_name,
+                    variant,
+                    prompt_template,
+                    [example],
+                    dataset_run_id=self.config.dataset_run_id or None,
+                )
                 generated_patch = patches[0] if patches else ""
             output = _run_tests(example, generated_patch, self.config)
             tests_before = [TestResult.model_validate(t) for t in output.get("tests_before") or []]
@@ -1130,6 +1142,7 @@ class EvaluationHarness:
                 prompt_template,
                 new_instances,
                 max_new_tokens=max_new_tokens,
+                dataset_run_id=self.config.dataset_run_id or None,
             )
             gen_seconds = max(time.monotonic() - _gen_start, 0.0)
             per_instance_latency = gen_seconds / max(len(all_instances), 1)

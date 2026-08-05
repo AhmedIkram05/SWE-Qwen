@@ -16,8 +16,14 @@ class EvalConfig(BaseSettings):
     """
 
     # Data
-    # GCS source; {run_id} placeholder
-    golden_data_path: str = "gs://swe-qwen-datasets/datasets/{run_id}/golden.jsonl"
+    # GCS source of truth; {run_id} = DATASET pipeline run id (see
+    # dataset_run_id), substituted in harness.load_examples — never the eval
+    # resume id.
+    golden_data_path: str = "gs://swe-qwen-datasets/datasets/{run_id}/swebench/golden.jsonl"
+    # Pipeline run id whose GCS artifacts evaluation consumes (e.g.
+    # "expanded-repos"). Set once via EVAL_DATASET_RUN_ID instead of exporting
+    # a full golden path.
+    dataset_run_id: str = ""
     swebench_verified_filter: str = "metadata.is_verified==true"  # filter from golden
 
     # Models
