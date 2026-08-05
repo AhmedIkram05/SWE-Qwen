@@ -779,7 +779,17 @@ def test_cli_run_command(config: EvalConfig, monkeypatch: pytest.MonkeyPatch) ->
 
     result = CliRunner().invoke(
         cli_app,
-        ["run", "--models", "qwen3-14b:baseline_14b", "--sample", "2", "--resume", "test-run"],
+        [
+            "run",
+            "--split",
+            "golden",
+            "--models",
+            "qwen3-14b:baseline_14b",
+            "--sample",
+            "2",
+            "--resume",
+            "test-run",
+        ],
     )
 
     assert result.exit_code == 0, result.output
