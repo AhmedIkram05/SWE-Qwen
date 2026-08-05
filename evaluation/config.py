@@ -69,8 +69,10 @@ class EvalConfig(BaseSettings):
     comparison_run_ids: str = ""  # comma-separated run IDs for champion selection
     proxy_champion_fallback: str = "baseline_14b"  # fallback when P4 inputs unavailable
 
-    # Eval tiers (EVAL-V5-REDESIGN §2)
-    tier_sizes: dict[str, int] = {"smoke": 20, "dev": 100, "final": 500, "full": 0}
+    # Eval tiers (EVAL-V5-REDESIGN §2).
+    # full is capped at 50: the whole 2820-example golden set is never run
+    # (user decision — bare `run` and `--mode full` must stay cheap).
+    tier_sizes: dict[str, int] = {"smoke": 20, "dev": 100, "final": 500, "full": 50}
     tier_seed: int = 42  # deterministic subsets → paired significance
     # Per-tier max_new_tokens.  2048 across all tiers — smoke/dev need
     # enough room for multi-file patches (3+ files × 200-500 tokens each).
