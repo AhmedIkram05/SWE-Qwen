@@ -2,11 +2,14 @@
 
 Usage::
 
-    # Full golden-set evaluation of the three P4 variants
+    # Default: SWE-bench Verified sample (50) across the three P4 variants.
+    # Golden is capped at tier_sizes["full"]=50 — a bare `run` can never
+    # trigger the full 2820-example golden set.
     python -m evaluation.cli run
 
-    # SWE-bench verified split, light sample
-    python -m evaluation.cli run --split swebench_verified --sample 50
+    # Explicit probe: one variant, a handful of instances
+    python -m evaluation.cli run --split swebench_verified --sample 3 \
+        --models qwen3-14b:baseline_14b
 
     # Compare existing runs (local JSONL, or W&B artifacts)
     python -m evaluation.cli compare --run_ids run_a,run_b
@@ -39,7 +42,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODELS = "qwen3-14b:baseline_14b,qwen3-14b:higher_rank_14b,qwen3-14b:higher_lr_14b"
 
 # --mode presets: deterministic seed-42 subsets (see config.tier_seed).
-# smoke/dev/final evaluate the SWE-bench Verified split; full = whole golden set.
+# smoke/dev/final evaluate the SWE-bench Verified split; full = capped golden
+# set (tier_sizes["full"] = 50 — never the whole 2820-example set).
 _TIER_SPLITS = {
     "smoke": "swebench_verified",
     "dev": "swebench_verified",
@@ -60,9 +64,9 @@ app = typer.Typer(
 @app.command()
 def run(
     models: str = typer.Option(_DEFAULT_MODELS, help="comma-separated model:variant pairs"),
-    split: str = typer.Option("golden", help="golden|swebench_verified"),
+    split: str = typer.Option("swebench_verified", help="golden|swebench_verified"),
     prompts: str = typer.Option("chat", help="comma-separated prompt templates"),
-    sample: int = typer.Option(0, help="0 = all"),
+    sample: int = typer.Option(50, help="0 = all (golden capped at 50)"),
     resume: str | None = typer.Option(None, help="run_id to resume"),
     ci_mode: bool = typer.Option(False, help="sample=50, seed=42"),
     mode: str | None = typer.Option(
@@ -118,7 +122,7 @@ def run(
 def run_golden(
     models: str = typer.Option(_DEFAULT_MODELS, help="comma-separated model:variant pairs"),
     prompts: str = typer.Option("chat", help="comma-separated prompt templates"),
-    sample: int = typer.Option(0, help="0 = all"),
+    sample: int = typer.Option(50, help="0 = all (capped at 50)"),
     resume: str | None = typer.Option(None, help="run_id to resume"),
 ) -> None:
     """Run golden-set evaluation for model:variant pairs."""
@@ -137,7 +141,7 @@ def run_golden(
 @app.command()
 def run_swebench(
     models: str = typer.Option(_DEFAULT_MODELS, help="comma-separated model:variant pairs"),
-    sample: int = typer.Option(0, help="0 = all"),
+    sample: int = typer.Option(50, help="0 = all"),
     resume: str | None = typer.Option(None, help="run_id to resume"),
 ) -> None:
     """Run evaluation on the SWE-bench verified subset."""
@@ -178,12 +182,13 @@ def run_prompt_ab(
 @app.command()
 def run_baseline(
     model: str = typer.Option("Qwen/Qwen3-14B", help="baseline model id"),
-    sample: int = typer.Option(0, help="0 = all"),
+    sample: int = typer.Option(50, help="0 = all (capped at 50)"),
 ) -> None:
     """Run baseline (untuned) model evaluation."""
     from evaluation.harness import EvaluationHarness
 
     config = EvalConfig()
+    sample = _cap_golden_all(sample, config)
     try:
         eval_run = EvaluationHarness(config).run_baseline(model=model, sample=sample)
     except KeyboardInterrupt:
@@ -226,6 +231,23 @@ def compare(
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+
+def _cap_golden_all(sample: int, config: EvalConfig, *, split: str | None = None) -> int:
+    """Never run the whole golden set: cap sample=0 at tier_sizes['full'].
+
+    A bare ``run``/``run-golden``/``--sample 0`` used to dispatch 2820
+    examples × 3 variants (~$30+). The full golden set is out of scope by
+    design; an explicit positive sample always wins.
+    """
+    if sample == 0 and (split is None or split == "golden"):
+        logger.warning(
+            "sample=0 on the golden split would run the whole set; capping at %d "
+            "(pass an explicit --sample N to override)",
+            config.tier_sizes["full"],
+        )
+        return config.tier_sizes["full"]
+    return sample
 
 
 def _parse_model_pairs(value: str) -> list[tuple[str, str]]:
@@ -279,6 +301,7 @@ def _dispatch(
     if backend == "local":
         _patch_harness_backend(ollama_model=ollama_model, ollama_url=ollama_url)
 
+    sample = _cap_golden_all(sample, config, split=split)
     harness = EvaluationHarness(config)
     if split == "swebench_verified":
         return harness.run_swebench_verified(pairs, sample=sample, run_id=resume)
