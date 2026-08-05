@@ -39,7 +39,10 @@ class EvalConfig(BaseSettings):
     repo_timeout_seconds: int = 300
     max_retries: int = 2
     flaky_threshold: float = 0.5  # if pass rate < 0.5 across retries → flaky
-    max_parallel: int = 64  # parallel test jobs (swebench + fallback paths)
+    # ponytail: 64-way concurrent .remote() broke the modal 1.5.3 aiohttp
+    # client ("'Connection' object has no attribute '_transport'" on every
+    # result). 16 keeps wall time similar — test containers idle on pip install.
+    max_parallel: int = 16  # parallel test jobs (swebench + fallback paths)
     use_swebench_images: bool = (
         True  # official per-repo swebench images; clone/install fallback  # noqa: E501
     )
