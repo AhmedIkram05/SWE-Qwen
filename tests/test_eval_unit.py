@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from evaluation.config import EvalConfig
 from evaluation.metrics import aggregate_metrics, compute_f2p
 from evaluation.patch_applier import (
+    _gnu_patch_supported,
     _repair_hunk_headers,
     apply_patch,
     apply_patch_git,
@@ -531,6 +532,31 @@ class TestApplyPatch:
         result = apply_patch(git_repo, GIT_DIFF, _rev_parse(git_repo))
         assert result.success
         assert result.method_used == "git_apply"
+
+    @pytest.mark.skipif(not _gnu_patch_supported(), reason="GNU patch (not BSD/Apple's) required")
+    def test_gnu_fuzz_rescues_drifted_context(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-b", "main")
+        _git(repo, "config", "user.email", "t@t")
+        _git(repo, "config", "user.name", "t")
+        (repo / "drift.py").write_text("\n".join([f"line{i}" for i in range(1, 9)]) + "\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "base")
+        # Hunk context says line3 but the file actually has line2 -> context drift.
+        # git apply rejects it; GNU patch --fuzz=5 can still place the hunk.
+        patch = (
+            "diff --git a/drift.py b/drift.py\n"
+            "--- a/drift.py\n"
+            "+++ b/drift.py\n"
+            "@@ -3,3 +3,4 @@\n"
+            " line3\n"
+            "+line-new\n"
+        )
+        result = apply_patch(repo, patch, _rev_parse(repo))
+        assert result.success
+        assert result.method_used == "gnu_patch_fuzz"
+        assert "line-new" in (repo / "drift.py").read_text()
 
     def test_falls_back_to_unidiff_outside_git_repo(self, tmp_path: Path) -> None:
         workdir = tmp_path / "plain"
