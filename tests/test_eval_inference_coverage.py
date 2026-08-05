@@ -310,6 +310,49 @@ class TestRenderPatchPrompt:
         assert "src/util.py" in fetched
         assert "tests/test_models.py" in fetched
 
+    def test_example_patches_rendered(self):
+        from evaluation.inference import render_patch_prompt
+
+        prompt = render_patch_prompt(
+            _example(), example_patches=["diff --git a/x.py b/x.py\n@@ -1,2 +1,2 @@"]
+        )
+        assert "### Example Patches" in prompt
+        assert "diff --git a/x.py b/x.py" in prompt
+
+    def test_golden_default_wired(self, monkeypatch):
+        import evaluation.inference as inf
+
+        monkeypatch.setattr(inf, "_golden_patches", lambda *a, **k: ["fake-gold-diff"])
+        prompt = render_patch_prompt(_example())
+        assert "fake-gold-diff" in prompt
+
+    def test_golden_loader_filters_repo_and_instance(self, tmp_path, monkeypatch):
+        import json
+
+        import evaluation.inference as inf
+
+        golden = tmp_path / "golden.jsonl"
+        records = [
+            {"repo": "a/b", "instance_id": "a__b-1", "patch_diff": "diff1"},
+            {"repo": "a/b", "instance_id": "a__b-2", "patch_diff": "diff2"},
+            {"repo": "c/d", "instance_id": "c__d-1", "patch_diff": "diff3"},
+        ]
+        golden.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        monkeypatch.setattr(inf, "_GOLDEN_PATH", golden)
+        monkeypatch.setattr(inf, "_GOLDEN_INDEX", None)
+        assert inf._golden_patches("a/b", exclude_instance_id="a__b-1") == ["diff2"]
+        assert inf._golden_patches("c/d") == ["diff3"]
+        assert inf._golden_patches("nope/nope") == []
+        monkeypatch.setattr(inf, "_GOLDEN_INDEX", None)  # reload real file next time
+
+    def test_golden_missing_file_empty(self, tmp_path, monkeypatch):
+        import evaluation.inference as inf
+
+        monkeypatch.setattr(inf, "_GOLDEN_PATH", tmp_path / "does-not-exist.jsonl")
+        monkeypatch.setattr(inf, "_GOLDEN_INDEX", None)
+        assert inf._golden_patches("a/b") == []
+        monkeypatch.setattr(inf, "_GOLDEN_INDEX", None)
+
 
 # ── resolve_hf_id ──────────────────────────────────────────────────────────
 
@@ -504,6 +547,9 @@ class TestGeneratePatchesBatch:
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
         monkeypatch.setattr(inf, "_get_llm", fake_get_llm)
         monkeypatch.setattr(inf, "_no_think_wrap", lambda hf_id, prompt: prompt)
+        # few-shot golden fences would be picked up by extract_patch — this
+        # test covers the batch loop, not the golden loader.
+        monkeypatch.setattr(inf, "_golden_patches", lambda *a, **k: [])
 
         examples = [_example(), _example(instance_id="inst-2")]
         out = generate_patches_batch.local(
