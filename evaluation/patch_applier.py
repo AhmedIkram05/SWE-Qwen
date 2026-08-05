@@ -195,6 +195,102 @@ def apply_patch_git(
     )
 
 
+def _gnu_patch_supported() -> bool:
+    """True when GNU patch (not BSD/Apple's — macOS) is on PATH.
+
+    The swebench containers ship GNU patch; BSD patch lacks
+    ``--batch``/``--dry-run`` so it must never reach this path.
+    """
+    import shutil
+
+    path = shutil.which("patch")
+    if not path:
+        return False
+    try:
+        out = subprocess.run(
+            ["patch", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return "GNU patch" in (out.stdout or "")
+
+
+def apply_patch_gnu(repo_path: Path, patch: str) -> PatchApplicationResult:
+    """Apply *patch* with GNU ``patch --batch --fuzz=5 -p1``.
+
+    This is the official SWE-bench runner's rescue after ``git apply``
+    rejects a patch: GNU patch retries hunks with fuzzy context matching,
+    so patches whose context lines drifted (common LLM output — "patch
+    does not apply") still land. A ``--dry-run`` with a strict exit-code
+    check guarantees the real apply only runs when every hunk places, so
+    a failed attempt never leaves a partially applied tree.
+
+    Args:
+        repo_path: Working directory (does not need to be a git repo).
+        patch: Unified diff.
+
+    Returns:
+        ``method_used="gnu_patch_fuzz"`` on success, ``"failed"`` otherwise.
+    """
+    if not _gnu_patch_supported():
+        return PatchApplicationResult(
+            success=False, method_used="gnu_patch_fuzz", error="gnu patch not installed"
+        )
+    if not patch.strip():
+        return PatchApplicationResult(
+            success=False, method_used="gnu_patch_fuzz", error="patch is empty"
+        )
+    if not patch.endswith("\n"):  # ponytail: extract_patch strips it; patch rejects EOF-less input
+        patch += "\n"
+    args = ["patch", "--batch", "--fuzz=5", "-p1", "-d", str(repo_path)]
+    try:
+        dry = subprocess.run(
+            args + ["--dry-run"],
+            input=patch,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if dry.returncode != 0:
+            return PatchApplicationResult(
+                success=False,
+                method_used="gnu_patch_fuzz",
+                error=(
+                    f"gnu patch dry-run ({dry.returncode}): "
+                    f"{(dry.stderr or dry.stdout or '')[:500]}"
+                ),
+            )
+        applied = subprocess.run(
+            args,
+            input=patch,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if applied.returncode != 0:
+            return PatchApplicationResult(
+                success=False,
+                method_used="gnu_patch_fuzz",
+                error=(
+                    f"gnu patch ({applied.returncode}): "
+                    f"{(applied.stderr or applied.stdout or '')[:500]}"
+                ),
+            )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return PatchApplicationResult(
+            success=False, method_used="gnu_patch_fuzz", error=f"gnu patch: {_error_message(exc)}"
+        )
+    return PatchApplicationResult(
+        success=True, method_used="gnu_patch_fuzz", files_modified=_files_from_patch(patch)
+    )
+
+
 def apply_patch_unidiff(repo_path: Path, patch: str) -> PatchApplicationResult:
     """Apply *patch* by parsing it with unidiff and rewriting files manually.
 
@@ -422,14 +518,14 @@ def _validate_applied(repo_path: Path, result: PatchApplicationResult) -> PatchA
     )
 
 
-def apply_patch(
+def apply_patch(  # noqa: PLR0911
     repo_path: Path, patch: str, base_sha: str, *, skip_checkout: bool = False
 ) -> PatchApplicationResult:
-    """Main entry: ``git apply`` first, unidiff manual apply as fallback.
+    """Main entry: ``git apply``, then GNU ``patch --fuzz=5``, then unidiff.
 
-    If both fail and the patch looks malformed (hunk headers with
+    If all fail and the patch looks malformed (hunk headers with
     miscounted line numbers — a common LLM output error), the headers are
-    recomputed from the hunk bodies and both paths are retried once.
+    recomputed from the hunk bodies and all three paths are retried once.
 
     Args:
         repo_path: Working directory (git repo preferred).
@@ -439,13 +535,17 @@ def apply_patch(
             reset to ``base_sha``).
 
     Returns:
-        The successful result (git or unidiff), or
-        ``method_used="failed"`` when both attempts fail.
+        The successful result (git, gnu patch or unidiff), or
+        ``method_used="failed"`` when all attempts fail.
     """
     result = apply_patch_git(repo_path, patch, base_sha, skip_checkout=skip_checkout)
     if result.success:
         return _validate_applied(repo_path, result)
-    logger.warning("git apply failed (%s), trying unidiff fallback", result.error)
+    logger.warning("git apply failed (%s), trying GNU patch --fuzz=5", result.error)
+    fuzzed = _validate_applied(repo_path, apply_patch_gnu(repo_path, patch))
+    if fuzzed.success:
+        return fuzzed
+    logger.warning("gnu patch failed (%s), trying unidiff fallback", fuzzed.error)
     fallback = _validate_applied(repo_path, apply_patch_unidiff(repo_path, patch))
     if fallback.success:
         return fallback
@@ -454,9 +554,10 @@ def apply_patch(
     repaired = _repair_hunk_headers(patch)
     if repaired != patch:
         logger.warning(
-            "patch apply failed on both paths; repaired hunk headers and retrying "
-            "(git err: %s; unidiff err: %s)",
+            "patch apply failed on all paths; repaired hunk headers and retrying "
+            "(git err: %s; gnu err: %s; unidiff err: %s)",
             result.error,
+            fuzzed.error,
             fallback.error,
         )
         result2 = _validate_applied(
@@ -464,6 +565,9 @@ def apply_patch(
         )
         if result2.success:
             return result2
+        fuzzed2 = _validate_applied(repo_path, apply_patch_gnu(repo_path, repaired))
+        if fuzzed2.success:
+            return fuzzed2
         fallback2 = _validate_applied(repo_path, apply_patch_unidiff(repo_path, repaired))
         if fallback2.success:
             return fallback2
@@ -471,12 +575,15 @@ def apply_patch(
             success=False,
             method_used="failed",
             error=(
-                f"git apply: {result.error}; unidiff: {fallback.error}; "
-                f"repaired: git: {result2.error}; unidiff: {fallback2.error}"
+                f"git apply: {result.error}; gnu patch: {fuzzed.error}; unidiff: {fallback.error}; "
+                f"repaired: git: {result2.error}; gnu: {fuzzed2.error}; unidiff: {fallback2.error}"
             ),
         )
     return PatchApplicationResult(
         success=False,
         method_used="failed",
-        error=f"git apply: {result.error}; unidiff fallback: {fallback.error}",
+        error=(
+            f"git apply: {result.error}; gnu patch: {fuzzed.error}; "
+            f"unidiff fallback: {fallback.error}"
+        ),
     )
