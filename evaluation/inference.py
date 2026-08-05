@@ -477,7 +477,14 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     # (tokenize.format_training_prompt); chat-wrapping that breaks the contract
     # and produced repetition loops. Only the untrained base model gets the
     # no-think wrap, to stop it rambling "Okay, let's see..." preamble.
-    prompts = [_no_think_wrap(hf_id, p) if adapter_path is None else p for p in rendered]
+    prompts = [
+        _no_think_wrap(hf_id, p)
+        if adapter_path is None
+        # Qwen3 soft switch: "/no_think" as the last user-turn line suppresses
+        # thinking even in raw continuation, where enable_thinking can't reach.
+        else p.replace("### Response", "/no_think\n### Response", 1)
+        for p in rendered
+    ]
     sampling_params = SamplingParams(
         max_tokens=max_new_tokens, temperature=temperature, top_p=top_p
     )
