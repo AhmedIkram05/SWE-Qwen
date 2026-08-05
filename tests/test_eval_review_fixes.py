@@ -249,7 +249,9 @@ class TestSwebenchImageNaming:
 
 
 class TestResetToBaseRaises:
-    def test_unknown_sha_raises(self, tmp_path):
+    def test_missing_object_falls_back_to_head(self, tmp_path):
+        """Snapshot images don't contain base_sha; reset falls back to HEAD
+        (which is the snapshot) instead of raising."""
         from evaluation.test_runner import _reset_to_base
 
         repo = tmp_path / "repo"
@@ -260,8 +262,9 @@ class TestResetToBaseRaises:
         (repo / "f.txt").write_text("x")
         subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
-        with pytest.raises(RuntimeError):
-            _reset_to_base(repo, "deadbeef" * 5)
+        (repo / "f.txt").write_text("dirty")
+        _reset_to_base(repo, "deadbeef" * 5)
+        assert (repo / "f.txt").read_text() == "x"
 
 
 # ── run_example_from_output error + latency ──────────────────────────────────

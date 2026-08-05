@@ -857,8 +857,25 @@ class TestResetToBase:
         assert (repo / "f.txt").read_text() == "x"
         assert not (repo / "untracked.txt").exists()
 
-    def test_unknown_sha_raises(self, tmp_path):
+    def test_missing_object_falls_back_to_head(self, tmp_path):
+        """Snapshot images (/testbed without upstream history) don't contain
+        base_sha; reset must fall back to HEAD, which is the snapshot."""
         repo, _ = _git_repo(tmp_path)
+        (repo / "f.txt").write_text("dirty")
+        (repo / "untracked.txt").write_text("junk")
+        tr._reset_to_base(repo, "deadbeef" * 5)
+        assert (repo / "f.txt").read_text() == "x"
+        assert not (repo / "untracked.txt").exists()
+
+    def test_other_reset_failure_raises(self, tmp_path, monkeypatch):
+        """Failures that aren't missing-object errors must still raise —
+        a silent no-op would evaluate the wrong state."""
+        repo, _ = _git_repo(tmp_path)
+        monkeypatch.setattr(
+            tr,
+            "_run_git",
+            lambda *a, **k: subprocess.CompletedProcess([], 1, "", "fatal: index file corrupt"),
+        )
         with pytest.raises(RuntimeError, match="git reset --hard"):
             tr._reset_to_base(repo, "deadbeef" * 5)
 
@@ -956,6 +973,54 @@ class TestInstallRepo:
         finally:
             os.environ["PATH"] = orig_path
         assert not any("setup.py" in c for c in calls)
+
+    def test_fallback_installs_deps(self, tmp_path, monkeypatch):
+        """Fallback containers (not /testbed) have no repo deps in the base
+        image, so the editable install must NOT use --no-deps there."""
+        repo_dir = tmp_path / "repos" / "demo"
+        repo_dir.mkdir(parents=True)
+        cache = tmp_path / "cache"
+        calls: list[list] = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            if "-m" in cmd and "venv" in cmd:
+                Path(cmd[-1]).mkdir(parents=True)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(tr.subprocess, "run", fake_run)
+        orig_path = os.environ.get("PATH", "")
+        try:
+            tr._install_repo(repo_dir, cache_dir=cache)
+        finally:
+            os.environ["PATH"] = orig_path
+        installs = [c for c in calls if c[0].endswith("pip") and "install" in c and "-e" in c]
+        assert installs
+        assert "--no-deps" not in installs[0]
+        assert any("setuptools" in c for c in calls)
+
+    def test_testbed_uses_no_deps(self, tmp_path, monkeypatch):
+        """Swebench eval images pre-install all deps in /testbed; the editable
+        install there must stay --no-deps (5-10 min → seconds)."""
+        repo_dir = Path("/testbed")
+        cache = tmp_path / "cache"
+        calls: list[list] = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            if "-m" in cmd and "venv" in cmd:
+                Path(cmd[-1]).mkdir(parents=True)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(tr.subprocess, "run", fake_run)
+        orig_path = os.environ.get("PATH", "")
+        try:
+            tr._install_repo(repo_dir, cache_dir=cache)
+        finally:
+            os.environ["PATH"] = orig_path
+        installs = [c for c in calls if c[0].endswith("pip") and "install" in c and "-e" in c]
+        assert installs
+        assert "--no-deps" in installs[0]
 
     def test_venv_creation_failure_raises(self, tmp_path, monkeypatch):
         repo_dir = tmp_path / "repos" / "demo"

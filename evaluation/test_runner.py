@@ -813,10 +813,22 @@ def _ensure_checked_out(repo_dir: Path, base_sha: str) -> None:
 def _reset_to_base(repo_dir: Path, base_sha: str) -> None:
     """Revert working tree to ``base_sha`` (drops applied patches and stray files).
 
-    Raises RuntimeError if the reset fails (e.g. ``base_sha`` not present in
-    this checkout's history) — a silent no-op would evaluate the wrong state.
+    Some SWE-bench eval images snapshot /testbed at the base commit with no
+    upstream git history, so ``base_sha`` is not a local object there; HEAD
+    *is* the base snapshot, so fall back to it (with a warning).  Raises
+    RuntimeError if both fail — a silent no-op would evaluate the wrong state.
     """
     proc = _run_git(repo_dir, "reset", "--hard", base_sha)
+    if proc.returncode != 0 and any(
+        m in (proc.stderr or "").lower()
+        for m in ("could not parse", "bad object", "unknown revision")
+    ):
+        logger.warning(
+            "base_sha %s not in %s history (snapshot image); resetting to HEAD instead",
+            base_sha,
+            repo_dir,
+        )
+        proc = _run_git(repo_dir, "reset", "--hard", "HEAD")
     if proc.returncode != 0:
         raise RuntimeError(
             f"git reset --hard {base_sha} failed in {repo_dir}: {proc.stderr.strip()[:300]}"
@@ -867,6 +879,24 @@ def _install_repo(repo_dir: Path, timeout: int = 900, cache_dir: str | Path | No
             check=True,
         )
 
+    # ponytail: editable installs need setuptools (pkg_resources); the fallback
+    # base image does not ship it, which made sklearn installs fail.
+    subprocess.run(
+        [
+            str(venv_dir / "bin" / "pip"),
+            "install",
+            "-U",
+            "setuptools",
+            "wheel",
+            "--quiet",
+            "--disable-pip-version-check",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
     # ponytail: skip editable install for pytest source repos (the source
     # checkout registers pytest11 entry points that override the proper
     # pytest installation, causing ``TypeError: required field 'lineno'
@@ -879,16 +909,19 @@ def _install_repo(repo_dir: Path, timeout: int = 900, cache_dir: str | Path | No
         return
 
     pip = venv_dir / "bin" / "pip"
-    # ponytail: SWE-bench base images have all dependencies pre-installed
-    # (venv inherits them via --system-site-packages).  --no-deps avoids
-    # re-resolving/installing them — 5-10 min → 2-10 seconds per repo.
+    # ponytail: swebench images have all deps pre-installed (the venv inherits
+    # them via --system-site-packages), so --no-deps is a fast no-op there —
+    # 5-10 min → 2-10 seconds per repo.  The fallback base image has NO repo
+    # deps: --no-deps there silently produces an env that fails at conftest
+    # import (asgiref/pytz for django, etc.), so install deps in that path.
+    no_deps = ["--no-deps"] if str(repo_dir) == "/testbed" else []
     proc = subprocess.run(
         [
             str(pip),
             "install",
             "-e",
             str(repo_dir),
-            "--no-deps",
+            *no_deps,
             "--quiet",
             "--disable-pip-version-check",
         ],
