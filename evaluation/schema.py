@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from evaluation.config import EvalConfig
 
 Status = Literal["passed", "failed", "errored", "skipped", "flaky"]
-Method = Literal["git_apply", "unidiff_fallback", "failed", "none"]
+Method = Literal["git_apply", "gnu_patch_fuzz", "unidiff_fallback", "failed", "none"]
 
 
 class TestResult(BaseModel):
