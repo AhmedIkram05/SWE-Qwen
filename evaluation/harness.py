@@ -155,7 +155,7 @@ def _generate_patches(
     variant: str,
     prompt_template: str,
     examples: list[EvalInput],
-    max_new_tokens: int = 2048,
+    max_new_tokens: int = 8192,
 ) -> list[str]:
     """Generate patches for *examples* via ``evaluation.inference``.
 
@@ -1054,7 +1054,7 @@ class EvaluationHarness:
         variant: str,
         prompt_template: str,
         run_id: str,
-        max_new_tokens: int = 2048,
+        max_new_tokens: int = 8192,
     ) -> list[EvalResult]:
         """Run a batch with per-repo checkpoint resume.
 
@@ -1303,7 +1303,7 @@ class EvaluationHarness:
 
         # Determine max_new_tokens from tier config by matching sample size.
         # Sorted by size ascending so the smallest enclosing tier wins.
-        max_new_tokens = 2048
+        max_new_tokens = 8192
         if sample == 0 or sample >= 1500:  # noqa: PLR2004
             max_new_tokens = self.config.tier_max_new_tokens.get("full", 2048)
         else:
