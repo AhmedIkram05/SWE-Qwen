@@ -284,3 +284,4 @@ data/*/
 data/eval_checkpoints/
 data/eval_results/
 data/golden.jsonl
+artifacts/
