@@ -6,6 +6,7 @@ GPU/Modal/W&B infrastructure to run end-to-end.
 
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import json
 import sys
@@ -732,6 +733,14 @@ class Test3ConfigHelpers:
         mod = self._load()
         args = mod.parse_args(["--run-id", "abc"])
         assert args.run_id == "abc"
+        assert args.retrain_variants is None
+
+    def test_parse_args_retrain_variants(self):
+        mod = self._load()
+        args = mod.parse_args(
+            ["--run-id", "abc", "--retrain-variants", "higher_rank_14b", "higher_lr_14b"]
+        )
+        assert args.retrain_variants == ["higher_rank_14b", "higher_lr_14b"]
         assert args.dry_run is False
         assert args.variants == ["baseline_14b", "higher_rank_14b", "higher_lr_14b"]
         assert args.skip_eval is False
@@ -1014,6 +1023,88 @@ class Test3ConfigAdvanced:
 
         result = mod._wandb_run_finished("test-run")
         assert result is None
+
+    def test_wandb_run_finished_defers_when_api_down(self):
+        mod = self._load()
+        mod._WANDB_API_RETRIES = 2
+        mod._WANDB_RETRY_DELAY = 0.01
+        # Api() constructor failing (wedged service) must defer, not raise
+        sys.modules["wandb"].Api.side_effect = RuntimeError("service process is busy")
+
+        assert mod._wandb_run_finished("test-run") is None
+
+    def test_wandb_run_finished_recovers_after_api_down(self):
+        mod = self._load()
+        mod._WANDB_API_RETRIES = 3
+        mod._WANDB_RETRY_DELAY = 0.01
+        ok_api = mock.MagicMock()
+        ok_api.default_entity = "test-entity"
+        mock_run = mock.MagicMock()
+        mock_run.state = "finished"
+        mock_run.id = "run-789"
+        mock_run.config.get.return_value = "baseline_14b"
+        ok_api.runs.return_value = [mock_run]
+        sys.modules["wandb"].Api.side_effect = [
+            RuntimeError("service process is busy"),
+            ok_api,
+        ]
+
+        result = mod._wandb_run_finished("test-run")
+        assert result == {
+            "wandb_run_id": "run-789",
+            "artifact_name": "model-qwen3-14b-baseline_14b",
+        }
+
+    def test_retrain_variants_clears_state_and_skips_reconcile(self):
+        mod = self._load()
+        sys.modules["wandb"].Api.return_value.default_entity = "test-entity"
+
+        def mk_run(name: str, variant: str) -> mock.MagicMock:
+            r = mock.MagicMock()
+            r.name = name
+            r.id = f"id-{variant}"
+            r.state = "finished"
+            r.created_at = datetime.datetime(2026, 8, 6)
+            r.config.get.return_value = variant
+            return r
+
+        sys.modules["wandb"].Api.return_value.runs.return_value = [
+            mk_run("3config-higher_rank_14b-20260730-200513", "higher_rank_14b"),
+            mk_run("3config-higher_lr_14b-20260730-202714", "higher_lr_14b"),
+            mk_run("3config-baseline_14b-20260806-013838", "baseline_14b"),
+        ]
+
+        state = {
+            "run_id": "expanded-repos",
+            "completed_variants": ["baseline_14b", "higher_rank_14b", "higher_lr_14b"],
+            "variants": {
+                "baseline_14b": {
+                    "status": "completed",
+                    "run_name": "3config-baseline_14b-20260806-013838",
+                },
+                "higher_rank_14b": {
+                    "status": "completed",
+                    "run_name": "3config-higher_rank_14b-20260730-200513",
+                },
+                "higher_lr_14b": {
+                    "status": "completed",
+                    "run_name": "3config-higher_lr_14b-20260730-202714",
+                },
+            },
+        }
+
+        out = mod._reconcile_state_with_wandb(
+            state,
+            requested_variants=["baseline_14b", "higher_rank_14b", "higher_lr_14b"],
+            retrain_variants=["higher_rank_14b", "higher_lr_14b"],
+        )
+        # Retrained variants are cleared and never re-completed from stale runs
+        assert out["completed_variants"] == ["baseline_14b"]
+        assert "higher_rank_14b" not in out["variants"]
+        assert "higher_lr_14b" not in out["variants"]
+        # Untouched variant still reconciles against today's run
+        assert out["variants"]["baseline_14b"]["status"] == "completed"
+        assert out["variants"]["baseline_14b"]["result"]["wandb_run_id"] == "id-baseline_14b"
 
     def test_download_adapter_dry_run(self, tmp_path):
         mod = self._load()

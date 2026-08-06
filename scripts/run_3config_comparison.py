@@ -43,6 +43,8 @@ _STATE_PATH = _REPO_ROOT / "scripts" / ".pipeline-state.json"
 _POLL_INTERVAL = 60  # seconds between polling for Modal job completion
 _POLL_TIMEOUT = 6 * 3600  # 6 hours max poll time (Modal function timeout is 5h)
 _MIN_POLL_WAIT = 120  # seconds before declaring a launch failed (W&B init takes time)
+_WANDB_API_RETRIES = 10  # retry count for transient W&B service failures
+_WANDB_RETRY_DELAY = 30  # seconds between W&B API retries
 
 
 # ── W&B entity resolution ────────────────────────────────────────────────────
@@ -119,6 +121,7 @@ def _cleanup_state(*_args: Any) -> None:
 def _reconcile_state_with_wandb(  # noqa: PLR0915
     state: dict[str, Any],
     requested_variants: list[str] | None = None,
+    retrain_variants: list[str] | None = None,
 ) -> dict[str, Any]:
     """Reconcile local state with W&B to recover from interrupted sessions.
 
@@ -127,6 +130,9 @@ def _reconcile_state_with_wandb(  # noqa: PLR0915
 
     When *requested_variants* is provided, also scans for variants not yet in
     state (fresh start after state file deletion) — avoids re-training completed variants.
+
+    *retrain_variants* are cleared from state and excluded from reconciliation,
+    so stale W&B runs can't be mistaken for fresh completions.
     """
     import wandb
 
@@ -138,6 +144,14 @@ def _reconcile_state_with_wandb(  # noqa: PLR0915
     except Exception as e:
         logger.warning("Failed to fetch W&B runs for reconciliation: %s", e)
         return state
+
+    # Variants explicitly requested for retraining: drop any prior completion
+    # state so the train loop re-launches them (stale W&B runs get ignored).
+    if retrain_variants:
+        for variant in retrain_variants:
+            state["completed_variants"] = [v for v in state["completed_variants"] if v != variant]
+            state["variants"].pop(variant, None)
+            logger.info("  %s: forced retrain (ignoring previous W&B state)", variant)
 
     # Build index: variant -> list of runs (sorted by creation time, newest first)
     variant_runs: dict[str, list[Any]] = {}
@@ -230,6 +244,8 @@ def _reconcile_state_with_wandb(  # noqa: PLR0915
                     )
 
     for variant in variants_to_check:
+        if retrain_variants and variant in retrain_variants:
+            continue
         _match_and_update(variant)
 
     return state
@@ -279,6 +295,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--force-retrain",
         action="store_true",
         help="Ignore W&B state, retrain all variants from scratch",
+    )
+    p.add_argument(
+        "--retrain-variants",
+        nargs="+",
+        default=None,
+        help="Force retrain ONLY these variants (e.g. --retrain-variants "
+        "higher_rank_14b higher_lr_14b). Clears their completion state and "
+        "skips W&B reconciliation for them, so stale runs can't be reused.",
     )
     return p.parse_args(argv)
 
@@ -397,14 +421,43 @@ def _wandb_run_finished(run_name: str) -> dict[str, Any] | None:
     Returns the run summary (including artifact name and wandb run id)
     if complete, ``None`` if still running or not found.
     Raises ``RuntimeError`` if the run is found but crashed.
+
+    Transient W&B service failures (e.g. "service process is busy" during
+    ``Api()`` verification) are retried with backoff. If the service stays
+    down, returns ``None`` so the caller defers to the next poll cycle
+    instead of failing the variant.
     """
     import wandb
 
-    api = wandb.Api(timeout=30)
-    project = _wandb_project_entity()
+    api = None
+    for attempt in range(1, _WANDB_API_RETRIES + 1):
+        try:
+            api = wandb.Api(timeout=30)
+            break
+        except Exception as e:  # transient: wedged local service, network blip
+            logger.warning(
+                "  W&B API down (attempt %d/%d): %s — retrying in %ds",
+                attempt,
+                _WANDB_API_RETRIES,
+                type(e).__name__,
+                _WANDB_RETRY_DELAY,
+            )
+            if attempt < _WANDB_API_RETRIES:
+                time.sleep(_WANDB_RETRY_DELAY)
+    if api is None:
+        logger.warning(
+            "  W&B API unavailable after %d attempts — deferring to next poll",
+            _WANDB_API_RETRIES,
+        )
+        return None
+
+    entity = api.default_entity
+    if not entity:
+        raise RuntimeError("W&B entity not found. Run `wandb login` to set credentials.")
     try:
-        runs = api.runs(project, {"display_name": run_name})
-    except Exception:
+        runs = api.runs(f"{entity}/swe-qwen", {"display_name": run_name})
+    except Exception as e:
+        logger.warning("  W&B query failed: %s — deferring to next poll", e)
         return None
 
     for run in runs:
@@ -683,7 +736,11 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — 63 stmts for sequential orches
     # ── Reconcile with W&B (recover from interrupted sessions) ────────────
     if not args.dry_run and not args.force_retrain:
         print("  Reconciling state with W&B ...")
-        state = _reconcile_state_with_wandb(state, requested_variants=args.variants)
+        state = _reconcile_state_with_wandb(
+            state,
+            requested_variants=args.variants,
+            retrain_variants=args.retrain_variants,
+        )
         _save_state(state)
     elif args.force_retrain:
         state["completed_variants"] = []
