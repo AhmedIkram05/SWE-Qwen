@@ -215,7 +215,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["src/swe_qwen", "training", "data_engineering", "scripts", "inference"]
+source = ["src/swe_qwen", "training", "data_engineering", "scripts", "inference", "evaluation"]
 omit = ["tests/*", "*/__pycache__/*", "*/conftest.py"]
 branch = true
 

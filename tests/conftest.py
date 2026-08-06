@@ -67,8 +67,65 @@ class _FakeModalApp:
             return _deco(args[0])
         return _deco
 
+    def cls(self, *args: Any, **kwargs: Any) -> Any:
+        """Passthrough class decorator to mirror ``modal.App.cls``."""
+        _ = kwargs
+
+        def _deco(cls_: Any) -> Any:
+            return cls_
+
+        if args and isinstance(args[0], type):
+            return _deco(args[0])
+        return _deco
+
+    def local_entrypoint(self, *args: Any, **kwargs: Any) -> Any:
+        """Passthrough decorator for ``@app.local_entrypoint()``."""
+        _ = kwargs
+
+        def _deco(fn: Any) -> Any:
+            fn._modal_local_entrypoint = True
+            return fn
+
+        if args and callable(args[0]):
+            return _deco(args[0])
+        return _deco
+
     def run(self, *args: Any, **kwargs: Any) -> None:
         _ = args, kwargs
+
+
+class _FakeRetries:
+    """Stand-in for ``modal.Retries`` config object."""
+
+    def __init__(
+        self, max_retries: int, backoff_coefficient: float = 2.0, initial_delay: float = 10.0
+    ) -> None:
+        self.max_retries = max_retries
+        self.backoff_coefficient = backoff_coefficient
+        self.initial_delay = initial_delay
+
+
+class _FakeConcurrency:
+    """Stand-in for ``modal.concurrent`` decorator config object."""
+
+    def __init__(self, max_inputs: int = 16, **kwargs: Any) -> None:
+        self.max_inputs = max_inputs
+        self._kwargs = kwargs
+
+
+def _passthrough_decorator(*args: Any, **kwargs: Any) -> Any:
+    """Generic passthrough accepting both ``@x`` and ``@x(...)`` forms."""
+    _ = kwargs
+
+    if args and callable(args[0]):
+        return args[0]
+    if args and isinstance(args[0], type):
+        return args[0]
+
+    def _deco(target: Any) -> Any:
+        return target
+
+    return _deco
 
 
 class _FakeVolume:
@@ -174,6 +231,10 @@ _fake_modal.Secret = _FakeSecret
 _fake_modal.Image = _FakeImage
 _fake_modal.Mount = _FakeMount
 _fake_modal.NetworkFileSystem = _FakeNetworkFileSystem
+_fake_modal.Retries = _FakeRetries
+_fake_modal.concurrent = _passthrough_decorator
+_fake_modal.enter = _passthrough_decorator
+_fake_modal.asgi_app = _passthrough_decorator
 
 
 class _FakeEnableOutput:
