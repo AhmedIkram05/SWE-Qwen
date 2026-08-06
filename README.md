@@ -1,31 +1,31 @@
 # SWE-Qwen
 
-**Fine-tuning Qwen3-30B-A3B (MoE) for Software Engineering tasks using LoRA on Modal GPUs**
+> A production-grade, model-agnostic LLMOps platform: data pipeline, QLoRA fine-tuning, execution-based evaluation, and serverless inference for automated software issue resolution
 
-SWE-Qwen is a specialized code generation model fine-tuned from **Qwen3-30B-A3B** (MoE — 30B total, 3B active params) for software engineering tasks including code generation, bug fixing, repository understanding, and automated code review. Falls back to **Qwen3-14B** if VRAM constraints require.
+SWE-Qwen is an end-to-end LLMOps platform — data engineering → fine-tuning → execution-based SWE-bench evaluation → OpenAI-compatible serverless serving — built around a **replaceable base model** (currently Qwen3-14B). The platform is the product, not the model: storage (GCS) is fully decoupled from compute (Modal serverless GPUs), base models are a single entry in `config/models.yaml`, and every stage is versioned in W&B with automated Champion/Challenger promotion.
 
 ## Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         SWE-Qwen Platform                           │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐             │
-│  │   GitHub    │    │   Modal     │    │     W&B     │             │
-│  │  Actions    │───▶│   GPUs      │───▶│  Tracking   │             │
-│  │   (CI/CD)   │    │ (Training)  │    │  (Metrics)  │             │
-│  └─────────────┘    └─────────────┘    └─────────────┘             │
-│        │                   │                   │                   │
-│        ▼                   ▼                   ▼                   │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │                    GCP Infrastructure                       │   │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │   │
-│  │  │   GCS    │  │  IAM     │  │  Secret  │  │  Artifact│    │   │
-│  │  │ Buckets  │  │  (WIF)   │  │ Manager  │  │ Registry │    │   │
-│  │  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-│                                                                     │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐              │
+│  │   GitHub    │    │   Modal     │    │     W&B     │              │
+│  │  Actions    │───▶│   GPUs      │───▶│  Tracking   │              │
+│  │   (CI/CD)   │    │ (Training)  │    │  (Metrics)  │              │
+│  └─────────────┘    └─────────────┘    └─────────────┘              │
+│        │                   │                   │                    │
+│        ▼                   ▼                   ▼                    │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │                    GCP Infrastructure                       │    │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐     │    │
+│  │  │   GCS    │  │  IAM     │  │  Secret  │  │  Artifact│     │    │
+│  │  │ Buckets  │  │  (WIF)   │  │ Manager  │  │ Registry │     │    │
+│  │  └──────────┘  └──────────┘  └──────────┘  └──────────┘     │    │
+│  |_____________________________________________________________|    │
+|                                                                     |
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -34,7 +34,7 @@ SWE-Qwen is a specialized code generation model fine-tuned from **Qwen3-30B-A3B*
 This project requires **all** of the following before you can run infrastructure or training:
 
 | Service | What You Need | How To Get It |
-|---------|--------------|---------------|
+| --------- | -------------- | --------------- |
 | **GCP** | GCP project with billing + programmatic access | `gcloud auth application-default login` (install [gcloud CLI](https://cloud.google.com/sdk/docs/install) first) |
 | **Modal** | Modal account + API token | `modal setup` after `pip install modal` |
 | **W&B** | W&B account + API key | Sign up at [wandb.ai](https://wandb.ai), then `wandb login` |
@@ -53,29 +53,6 @@ Terraform uses GCS backend (`swe-qwen-terraform-state`) — you **must** have th
 - Weights & Biases account (`wandb login`)
 - GCP project with billing enabled
 - Terraform >= 1.6.0
-
-### Local Development
-
-```bash
-# Clone and setup
-git clone https://github.com/ahmedikram/SWE-Qwen.git
-cd SWE-Qwen
-
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest tests/ -v
-
-# Run linters
-ruff check .
-ruff format --check .
-mypy src/
-```
 
 ### Infrastructure Setup
 
@@ -122,7 +99,7 @@ echo -n "YOUR_GITHUB_TOKEN" | gcloud secrets versions add github-token --data-fi
 Add these secrets in **GitHub → Settings → Secrets and variables → Actions** for CI workflows to work:
 
 | Secret | Value | Used By |
-|--------|-------|---------|
+| -------- | ------- | --------- |
 | `GCP_PROJECT_ID` | `project-7f2bbd9a-c5f0-48d2-b08` | terraform-plan, docker-build |
 | `GCP_REGION` | `us-central1` | terraform-plan, docker-build |
 | `GCP_WIF_PROVIDER` | `projects/1001461381543/locations/global/workloadIdentityPools/github-actions-pool-dev/providers/github-provider-dev` | terraform-plan, docker-build |
@@ -144,97 +121,92 @@ python scripts/init_wandb.py \
   --setup-registries
 ```
 
-### Deploy Modal App
+### Run the Full Pipeline (Data → Training → Evaluation)
+
+The complete manual pipeline from data engineering through evaluation:
 
 ```bash
-modal deploy src/swe_qwen/modal_app.py
+# 1. Data engineering: ingest → validate → clean → split → version (tokenized for training)
+python -m data_engineering.cli run --run-id expanded-repos \
+  --tokenize-model qwen3-14b --tokenize-max-length 8192
+
+# 2. Train the three QLoRA variants (baseline_14b / higher_rank_14b / higher_lr_14b) and compare them
+export EVAL_DATASET_RUN_ID=expanded-repos
+python scripts/run_3config_comparison.py --run-id expanded-repos --max-train-samples 3000
+
+# Force a full retrain (ignore cached state):
+python scripts/run_3config_comparison.py --run-id expanded-repos --force-retrain --max-train-samples 3000
+
+# 3. Evaluation: baseline vs. fine-tuned variants on the golden set (execution-based F2P / P2P)
+export EVAL_DATASET_RUN_ID=expanded-repos
+python -m evaluation.cli run --split golden --sample 50 \
+  --models qwen3-14b:baseline --resume run_baseline
+python -m evaluation.cli run --split golden --sample 50 \
+  --models qwen3-14b:baseline_14b,qwen3-14b:higher_rank_14b,qwen3-14b:higher_lr_14b \
+  --resume run_golden
+python -m evaluation.cli compare --run_ids run_baseline,run_golden
 ```
 
-### Run Training
-
-```bash
-# Local test
-modal run src/swe_qwen/modal_app.py::hello_modal
-
-# Full training on Modal GPUs
-modal run src/swe_qwen/modal_app.py::train_swe_qwen \
-  --model_name Qwen/Qwen3-30B-A3B \  # or Qwen/Qwen3-14B
-  --num_epochs 3 \
-  --batch_size 4 \
-  --learning_rate 2e-4
-```
-
-### Serve Model
-
-```bash
-# Deploy inference server
-modal deploy src/swe_qwen/modal_app.py::serve_swe_qwen \
-  --model_path /models/swe-qwen-finetuned
-```
-
-### Run Eval
-
-The evaluation harness evaluates finetuned variants against SWE-bench Verified
-(and the full golden set) in one Modal pipeline: chunked single-turn inference,
-test execution inside the official per-instance SWE-bench images, statistical
-rigor (Wilson CIs, McNemar, paired bootstrap), and W&B logging of results,
-cost, latency percentiles, and model-checkpoint lineage.
-
-```bash
-# Smoke tier: 20 seed-42 instances + CI F2P gate vs stored baseline
-eval run --mode smoke
-
-# Dev tier (100) / Final tier (500) / Full golden set (2056)
-eval run --mode dev
-eval run --mode final
-eval run --mode full
-
-# Compare existing runs (local JSONL or W&B artifacts)
-eval compare --run_ids run_a,run_b
-```
-
-- Tiers: `smoke=20`, `dev=100`, `final=500` (all SWE-bench Verified),
-  `full` = whole golden set. All subset selection is seeded (seed 42).
-- `--mode smoke` runs the CI gate: exits 1 if any variant's F2P drops more
-  than 5% (absolute) vs `data/eval_results/smoke_baseline.json`.
-- A champion (best F2P above thresholds) is promoted to the W&B Registry
-  `eval-champion` collection after `compare`.
-- Expected cost: a full smoke run is ~$0.15-0.30 on Modal (cold starts and
+- Evaluation is **execution-based**: generated patches run against real test
+  suites inside the official per-instance SWE-bench containers, measuring
+  Fail-to-Pass resolution (F2P) and Pass-to-Pass regression (P2P) with
+  statistical rigor (Wilson CIs, McNemar, paired bootstrap).
+- `--split` accepts `golden` (whole golden set; `--sample 0` for all) or
+  `swebench_verified`. Subset selection is seeded.
+- After `compare`, a champion (best F2P above thresholds) is promoted to the
+  W&B Registry `eval-champion` collection.
+- Expected cost: a full smoke run is ~$0.15–0.30 on Modal (cold starts and
   image pulls dominate the first run).
+
+### Serve the Model (Serverless, OpenAI-Compatible)
+
+```bash
+modal serve inference.modal_serve      # dev (hot reload, scale-to-zero)
+modal deploy inference.modal_serve     # production endpoint
+```
+
+Serving runs vLLM on Modal (A10G) with per-request LoRA adapters over a
+pre-quantized base model, OpenAI-compatible `/v1/chat/completions` (streaming
+SSE included), TTFB p50 < 500 ms, $0 cost when idle, and W&B telemetry
+(latency, throughput, cost per inference).
 
 ## Project Structure
 
 ```
 SWE-Qwen/
-├── .github/
-│   └── workflows/
-│       └── ci.yml              # GitHub Actions CI/CD pipeline
-├── infra/
-│   └── terraform/
-│       ├── main.tf             # Root module
-│       ├── variables.tf        # Input variables
-│       ├── providers.tf        # Provider configuration
-│       └── modules/
-│           ├── storage/        # GCS buckets module
-│           │   ├── main.tf
-│           │   ├── variables.tf
-│           │   └── outputs.tf
-│           └── iam/            # IAM & WIF module
-│               ├── main.tf
-│               ├── variables.tf
-│               └── outputs.tf
-├── modal_app.py                # Modal application (training + serving)
-├── pyproject.toml              # Python project configuration
+├── .github/workflows/          # GitHub Actions CI/CD pipeline
+├── config/
+│   ├── models.yaml             # Model registry (single source of truth for base model + variants)
+│   └── qlora_variants.yaml     # QLoRA training configurations
+├── data_engineering/           # Data pipeline: ingest → validate → clean → split → version → archive
+│   ├── cli.py                  # Typer CLI (`python -m data_engineering.cli run ...`)
+│   ├── run_pipeline.py         # Pipeline orchestration
+│   ├── swebench_ingest.py      # SWE-bench ingestion + golden extraction
+│   └── ...                     # validate / clean / split / version / archive / golden / card / tokenize
+├── training/                   # QLoRA fine-tuning (Modal)
+│   ├── modal_train.py          # Modal training entry point
+│   ├── qlora_trainer.py / qlora_config.py / callbacks.py / resume.py
+│   └── prompts/                # Prompt templates (shared with inference via prompt_builder)
+├── evaluation/                 # Execution-based evaluation harness
+│   ├── cli.py                  # `python -m evaluation.cli run|compare|run_golden|run_swebench`
+│   ├── harness.py              # F2P / P2P engine (runners, resume, W&B logging)
+│   ├── test_runner.py          # Test execution in official SWE-bench containers
+│   └── stats.py                # Wilson CIs, McNemar, paired bootstrap
+├── inference/                  # Serverless inference API (vLLM on Modal)
+│   ├── serve.py                # FastAPI app + StubEngine/VLLMEngine abstraction
+│   ├── modal_serve.py          # Modal deployment (scale-to-zero)
+│   ├── openai_compat.py        # OpenAI-compatible request/response + SSE streaming
+│   ├── prompt_builder.py       # Shared prompt logic (also re-exported by evaluation)
+│   └── telemetry.py            # TTFB / latency / cost-per-inference metrics → W&B
+├── infra/terraform/            # GCS, IAM, OIDC (workload identity), secrets — all IaC
 ├── scripts/
-│   └── init_wandb.py          # W&B project initialization
-├── src/
-│   └── swe_qwen/              # Main package
-│       ├── __init__.py
-│       └── modal_app.py       # Modal application (moved from root)
-├── tests/
-│   ├── test_infra.py          # Terraform output tests
-│   └── test_scaffold.py       # Project scaffold tests
-└── README.md
+│   ├── run_3config_comparison.py  # Train + compare the three QLoRA variants
+│   ├── preflight_serve.py         # Serving preflight (GPU smoke before deploy)
+│   └── init_wandb.py              # W&B project initialization
+├── data/                       # Datasets + golden eval set
+├── tests/                      # Unit + integration tests
+├── pyproject.toml              # Python project configuration
+└── docs/planning/              # ADR & Vision, Master Plan, phase plans
 ```
 
 ## Configuration
@@ -242,7 +214,7 @@ SWE-Qwen/
 ### Environment Variables
 
 | Variable | Description | Required |
-|----------|-------------|----------|
+| ---------- | ------------- | ---------- |
 | `MODAL_TOKEN` | Modal API token | Yes |
 | `WANDB_API_KEY` | Weights & Biases API key | Yes |
 | `GITHUB_TOKEN` | GitHub personal access token | Yes |
@@ -252,7 +224,7 @@ SWE-Qwen/
 ### Terraform Variables
 
 | Variable | Description | Default |
-|----------|-------------|---------|
+| ---------- | ------------- | --------- |
 | `gcp_project_id` | GCP Project ID | - |
 | `gcp_region` | GCP region | `us-central1` |
 | `environment` | Environment name | `dev` |
@@ -264,33 +236,29 @@ SWE-Qwen/
 
 ## Training Configuration
 
-Default hyperparameters in `src/swe_qwen/modal_app.py::train_swe_qwen`:
+QLoRA hyperparameters live in `config/qlora_variants.yaml` (single source of truth,
+consumed by `training/qlora_config.py`). Three 14B-optimized variants are trained and
+compared via F2P on the golden set (see `run_3config_comparison.py`):
 
-```python
-model_name = "Qwen/Qwen3-30B-A3B"  # fallback: Qwen/Qwen3-14B
-num_epochs = 3
-batch_size = 4
-learning_rate = 2e-4
-lora_rank = 64
-lora_alpha = 128
-lora_dropout = 0.05
-use_4bit = True
-use_flash_attn = True
-gradient_accumulation_steps = 4
-max_seq_length = 4096
-warmup_ratio = 0.03
-weight_decay = 0.01
-```
+| Variant | Tuning |
+| ---------- | -------------------------------------------- |
+| `baseline_14b` | r=16, α=32, lr=2e-5 (template; others inherit) |
+| `higher_rank_14b` | r=32, α=64, lr=2e-5 |
+| `higher_lr_14b` | r=16, α=32, lr=5e-5 |
+
+Training runs on Modal (A10G 24 GB) with Unsloth, 1 epoch, `max_seq_length=4096`.
+The winner is promoted to the W&B Registry as Champion after evaluation.
 
 ## Why No Dockerfile?
 
 This project does **not** use a Dockerfile. Instead, Modal handles containerization:
 
-- **Modal Image** (`modal.Image.debian_slim()` in `modal_app.py`) defines the container in pure Python — apt packages, pip installs, CUDA toolkit, etc.
+- **Modal Image** (`modal.Image.debian_slim()` in `inference/modal_serve.py`) defines the container in pure Python — apt packages, pip installs, CUDA toolkit, etc.
 - Modal manages GPU-optimized base images (CUDA 12.6, flash-attn, etc.) with build caching and automatic rebuilds on code changes.
 - Training and inference run on Modal's serverless GPU infrastructure — no Docker daemon, no registry push, no container orchestration needed.
 
 A **Dockerfile is not needed** because:
+
 1. Modal's `base_image` + `gpu_image` replace the image build step entirely
 2. Modal volumes (`modal.Volume`) persist datasets and checkpoints, replacing bind mounts
 3. The CI `docker-build` job exists **only** as an optional path for those who want Artifact Registry deployment (e.g., for alternative serving setups)
@@ -303,8 +271,8 @@ The GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
 2. **Tests** - pytest with coverage
 3. **Terraform Validate** - fmt, validate
 4. **Terraform Plan** - PR preview (on PRs)
-4. **Modal Deploy** - Deploy app on main branch
-5. **Docker Build** - Build & push to Artifact Registry
+5. **Modal Deploy** - Deploy app on main branch
+6. **Docker Build** - Build & push to Artifact Registry
 
 ## Monitoring & Observability
 

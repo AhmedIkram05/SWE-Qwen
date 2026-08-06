@@ -12,6 +12,9 @@ models:
     total_params: 14_000_000_000
     quantization: "nf4"
     compute_dtype: "bfloat16"
+    # Phase 6 serving: pre-quantized base + quantization backend (Wave 1)
+    serving_hf_id: "Qwen/Qwen3-14B-AWQ"   # pre-quantized base for Phase 6 serving (AWQ fallback: Qwen/Qwen3-14B-AWQ)
+    serving_quantization: "awq"           # "fp8" | "awq"
     gpu_mapping:
       primary: "a100-80gb"
       fallback: "a10g-24gb"

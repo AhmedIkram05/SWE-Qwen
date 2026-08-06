@@ -1,5 +1,7 @@
 """Tests for ``evaluation.stats`` — Wilson CI, McNemar, paired bootstrap."""
 
+import pytest
+
 from evaluation.stats import mcnamar_p, paired_bootstrap_ci, wilson_ci
 
 
@@ -81,7 +83,7 @@ def test_bootstrap_shift() -> None:
     a = [0.9] * 50
     b = [0.5] * 50
     lo, hi, obs = paired_bootstrap_ci(a, b)
-    assert obs == 0.4
+    assert obs == pytest.approx(0.4)
     assert lo > 0.0  # should detect the shift
     assert hi > 0.0
 

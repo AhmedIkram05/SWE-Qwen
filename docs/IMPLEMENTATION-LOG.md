@@ -3,6 +3,7 @@
 **Purpose:** Single source of truth for **major/medium deviations** from the Master Plan during phase implementation. Updated in real-time. Do not log routine task completions — only changes that alter scope, architecture, timeline, or introduce risk.
 
 **Threshold for Logging:**
+
 - **Major:** Scope change, architecture change, timeline slip >1 day, new dependency, blocker requiring workaround
 - **Medium:** Config/parameter changes, tool/library swap, partial task completion with follow-up needed
 - **Do NOT log:** Task completed as planned, bug fixes, minor typo fixes, formatting, routine test passes
@@ -60,7 +61,7 @@ Each Phase follows this structure:
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 1.1 | Repo init | Completed | Repo already existed | Low |
 | 1.2 | pyproject.toml | Completed | Full config with all deps + tooling | Low |
 | 1.3 | .gitignore | Completed | Added ML/Modal/Terraform patterns | Low |
@@ -80,7 +81,7 @@ Each Phase follows this structure:
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
-|----------|---------|------------------------|-----------|
+| ---------- | --------- | ------------------------ | ----------- |
 | Use Modal for training instead of self-hosted GPU | Cost efficiency, scale-to-zero | GCP Vertex AI, AWS SageMaker | Modal provides H100s, simple Python API, integrated volumes |
 | Terraform modules for storage + IAM | Clean separation, reusability | Single root module | Modules enable env-specific configs, easier testing |
 | Workload Identity Federation for GitHub Actions | Security best practice | Long-lived SA keys | No secret rotation, OIDC tokens short-lived |
@@ -89,17 +90,16 @@ Each Phase follows this structure:
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
-|---------|------------|----------|------------|-----------|
+| --------- | ------------ | ---------- | ------------ | ----------- |
 | Terraform WIF provider missing `oidc` block | 2026-07-25 | 2026-07-25 | Added `oidc { issuer_uri = "https://token.actions.githubusercontent.com" }` | 10 min |
 | Storage module referencing IAM module's service account | 2026-07-25 | 2026-07-25 | Moved bucket IAM bindings to IAM module, pass bucket names as outputs | 20 min |
 | Test infrastructure outputs require terraform apply | 2026-07-25 | 2026-07-25 | Marked integration tests with `@pytest.mark.integration`, unit tests validate structure only | 15 min |
 | Dockerfile not needed | Modal handles all containerization | Multi-stage Dockerfile for Artifact Registry | Modal Image + volumes + build caching replace Docker entirely. CI docker-build job is optional |
 
-
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
-|------|--------|----------------|
+| ------ | -------- | ---------------- |
 | Terraform | GCS backend bucket `swe-qwen-terraform-state` must exist before init | Pre-create bucket or use local backend for first run |
 | Modal | Volumes `swe-qwen-datasets` and `swe-qwen-models` created on first deploy | Persist across function invocations |
 | W&B | Sweep config uses Bayesian optimization with Hyperband early stopping | Reduces compute for HPO |
@@ -113,7 +113,7 @@ Each Phase follows this structure:
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
-|--------|------------------------|---------------|
+| -------- | ------------------------ | --------------- |
 | Dockerfile | Removed | Modal handles containerization |
 | Makefile/justfile | Removed | Direct tool invocation is simpler |
 | Docker build job in CI | Kept | For Artifact Registry deployment option |
@@ -133,7 +133,7 @@ Each Phase follows this structure:
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 2.1 | Define selection criteria | Completed | docs/planning/phase2-criteria.md | Low |
 | 2.2 | Identify 10 candidate repos | 50 candidates found, 10 selected | GitHub Search API: topic-only queries need text term. Per-subtopic queries with `topic:+text` work. 5 subtopics used (web-api, cli, data-ml, testing, utils), MAX_PER_QUERY=15 | Medium |
 | 2.3 | Verify test suites run | Deep verify on 15 shortlist, 12 passed | Clone+install+pytest on all 50 too heavy. Picked 15 promising candidates based on API checks, then deep-verified with `verify_repos.py` | Medium |
@@ -147,7 +147,7 @@ Each Phase follows this structure:
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
-|----------|---------|------------------------|-----------|
+| ---------- | --------- | ------------------------ | ----------- |
 | Per-subtopic GitHub search queries | GitHub API requires text search term alongside `topic:` qualifier | Single broad query, OR between topics | Topic-only queries return 0 results. Per-subtopic with text term works |
 | Deep-verify only shortlist of 15 | 50 candidates would take hours to clone/install/test | Full 50 verification | 15 selected by license+stars+py file count skim; deep verify on those |
 | Dropped graphify + sherlock post-verify | Both passed hard checks but too small (99 and 8 .py files) | Keep them despite size | Minimum size filter ensures sufficient data for Phase 3 ingestion |
@@ -157,7 +157,7 @@ Each Phase follows this structure:
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
-|---------|------------|----------|------------|-----------|
+| --------- | ------------ | ---------- | ------------ | ----------- |
 | GitHub Search API returns 0 results with `topic:` qualifier alone | 2026-07-26 | 2026-07-26 | Must include a text search term alongside qualifier. Per-subtopic queries with MAX_PER_QUERY=15 | 30 min |
 | PyGithub `repo.license` is a property, not callable | 2026-07-26 | 2026-07-26 | Changed `repo.license()` → `repo.license` in verify_repos.py | 5 min |
 | `_allows_python_310()` too strict (only handled `>=3.10` format) | 2026-07-26 | 2026-07-26 | Rewrote to handle `^3.9`, `>=3.8`, `>=3.10.0`, `~=3.10`, poetry/pip constraints | 15 min |
@@ -166,7 +166,7 @@ Each Phase follows this structure:
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
-|------|--------|----------------|
+| ------ | -------- | ---------------- |
 | GitHub Search API | Queries need `q=python+topic:web-api` format, not `q=topic:web-api` alone | Prevents wasted queries in Phase 3 ingestion |
 | PyGithub Auth | Use `github.Auth.Token(token)`, pass to `github.Github(auth=...)`. Raw token string deprecated | Prevents auth failures |
 | Rate limiting | Search API = 30/non-search = 5000/hr. `rl.rate.remaining` for core, search endpoint separate | Plan Phase 3 with backoff |
@@ -201,7 +201,7 @@ Each Phase follows this structure:
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 3.1 | config/schema | Completed | DataPipelineConfig (Pydantic Settings) + 15 Pydantic models (IssueRecord, ParsedHunk, Splits, PipelineResult, etc.) | Low |
 | 3.2 | ingest.py | Completed | GitHub API ingestion with exponential backoff, ThreadPoolExecutor, batch processing, manifest loading | Low |
 | 3.3 | validate.py | Completed | Pydantic-based schema validation collecting ALL errors per record, returning validated records + error list | Low |
@@ -230,7 +230,7 @@ Each Phase follows this structure:
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
-|----------|---------|------------------------|-----------|
+| ---------- | --------- | ------------------------ | ----------- |
 | Flat module structure in data_engineering/ | 12 modules total | Nested subpackages (ingest/, clean/, etc.) | Flat layout is simpler; each module has single responsibility and clear name |
 | Pydantic for schema + validation | Need runtime validation + serialization | dataclasses, msgspec, custom validators | Pydantic provides both field validators and model_dump() for JSONL; already a dependency |
 | regex-based patch validation instead of full unidiff parsing | unidiff rejects valid-looking diffs with incorrect hunk line counts | Full parse, no validation | Production GitHub API diffs can be truncated; regex check catches clearly invalid patches without false negatives |
@@ -251,7 +251,7 @@ Each Phase follows this structure:
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
-|---------|------------|----------|------------|-----------|
+| --------- | ------------ | ---------- | ------------ | ----------- |
 | unidiff rejects valid diffs with incorrect hunk line counts | 2026-07-27 | 2026-07-27 | Replaced full unidiff parsing with regex check for ---/+++/@@ headers in IssueRecord validator | 20 min |
 | Hypothesis generates empty/whitespace issue_body | 2026-07-27 | 2026-07-27 | Added filter strategy that rejects whitespace-only strings in property tests | 5 min |
 | Typer CLI test errors go to stderr, not stdout | 2026-07-27 | 2026-07-27 | Use result.stderr in CLI assertions | 5 min |
@@ -270,7 +270,7 @@ Each Phase follows this structure:
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
-|------|--------|----------------|
+| ------ | -------- | ---------------- |
 | Patch validation | IssueRecord uses regex check (---/+++/@@) instead of unidiff.PatchSet | Prevents false rejections on GitHub API diffs; lighter validation |
 | Dedup strategy | Primary: (repo, issue_id) exact match; Secondary: SHA256(patch_diff) content match | Same fix appearing in different issues is rare but possible; content dedup catches it |
 | Checkpoint resume | Per-repo JSONL at output_dir/{run_id}/{repo_id}/{stage}.jsonl | Enables resume-from-validated or resume-from-cleaned without re-ingesting |
@@ -288,7 +288,7 @@ Each Phase follows this structure:
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
-|--------|------------------------|---------------|
+| -------- | ------------------------ | --------------- |
 | Full pipeline orchestrator (run_pipeline.py) | Added (not in original Phase 3 plan) | Single entry point for end-to-end pipeline with checkpoint resume and Rich progress |
 | Typer CLI (cli.py) | Added | Interactive use without Python imports; validate-manifest and config subcommands for debugging |
 | 76 tests (9 unit + 1 integration + 1 property + 1 CLI) | Added | Coverage across all modules including property-based invariants |
@@ -323,7 +323,7 @@ Each Phase follows this structure:
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 3b.1 | SWE-bench ingestion module | Created `swebench_ingest.py` | Pivot from GitHub API to SWE-bench dataset | High |
 | 3b.2 | Config updates | Added `swe_bench_dir`, `swe_bench_version`, `source`, `bigquery_enabled` | Support dual-source pipeline | Medium |
 | 3b.3 | Pipeline orchestrator | Added `run_pipeline_swebench()` alongside legacy flow | Single entry point for both sources | Medium |
@@ -336,7 +336,7 @@ Each Phase follows this structure:
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
-|----------|---------|------------------------|-----------|
+| ---------- | --------- | ------------------------ | ----------- |
 | New `swebench_ingest.py` module (not rewrite `ingest.py`) | Keep GitHub API code for reference/fallback | Full rewrite of `ingest.py` | Clean separation; old code becomes `ingest_github.py` (archived) |
 | Use all ~12K Python train examples (no F2P) | Training ≠ evaluation; model learns issue→patch | Only use 3K (Verified+Test+Dev) | 12K training examples is portfolio-strong scale; matches 8-12k target |
 | Hardcode 18-repo domain map | Reproducible, auditable, no hidden logic | Auto-infer from repo topics | Reviewers can verify domain balance; no inference errors |
@@ -350,7 +350,7 @@ Each Phase follows this structure:
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
-|---------|------------|----------|------------|-----------|
+| --------- | ------------ | ---------- | ------------ | ----------- |
 | Empty patches in SWE-bench Train split (469 examples) | 2026-07-28 | 2026-07-28 | Skip examples with empty patches in `ingest_swebench()` | 15 min |
 | Validation expected dicts, got IssueRecords | 2026-07-28 | 2026-07-28 | Convert to dicts via `model_dump()` before `validate_batch()` | 10 min |
 | F2P filter removed all SWE-bench records | 2026-07-28 | 2026-07-28 | Added `metadata.has_test_patch` check in `_has_f2p_keywords()` | 15 min |
@@ -361,7 +361,7 @@ Each Phase follows this structure:
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
-|------|--------|----------------|
+| ------ | -------- | ---------------- |
 | SWE-bench data source | HF datasets: `SWE-bench/SWE-bench_Verified` (test), `SWE-bench/SWE-bench` (test/train/dev) | No API keys needed; deterministic downloads; version-pinned |
 | Python repos | 12 unique across splits (Verified 12 + Test 6, some overlap) | Covers web-api (3), data-ml (7), utils (2), testing (1 via pytest) |
 | Train split | ~6,208 Python-filtered (of 12,433 total) | No test patches; training-only; excluded from golden |
@@ -369,7 +369,7 @@ Each Phase follows this structure:
 | F2P ground truth | `FAIL_TO_PASS` → `test_results.failed`, `PASS_TO_PASS` → `test_results.passed` | Phase 5 test execution uses `metadata.base_sha`/`head_sha` |
 | Schema compatibility | Same `IssueRecord` schema; PR fields empty; metadata has `has_test_patch` | Phase 4 training code unchanged |
 | W&B artifacts | Same names (`dataset-train:vN`, etc.); new versions | Phase 4 reads `wandb.use_artifact("dataset-train:latest")` |
-| Checkpoint resume | Works for SWE-bench (`--resume-from validated|cleaned`) | Skips re-download; loads from local JSONL |
+| Checkpoint resume | Works for SWE-bench (`--resume-from validated | cleaned`) | Skips re-download; loads from local JSONL |
 | **BigQuery augmentation** | `swebench_ingest.augment_with_bigquery()` queries commit history + repo stats, caches to JSONL | One-time query (~$5-10), cached forever. Falls back gracefully if no GCP permissions |
 | **BigQuery cache files** | `data/swe_bench/bigquery_commits.jsonl`, `data/swe_bench/bigquery_repo_stats.json` | Persists across runs; `--bigquery` flag enables; zero cost on subsequent runs |
 | **Run IDs (completed)** | 0cf1d5c0f5c3, a6040c1401f5, 236511195b4b, 25d3f8fd0ccb | All successful with 2056 cleaned, ~1658 train, ~21 val, ~377 test, 2056 golden |
@@ -379,7 +379,7 @@ Each Phase follows this structure:
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
-|--------|------------------------|---------------|
+| -------- | ------------------------ | --------------- |
 | `swebench_ingest.py` module | Added | New data source; 15K+ records vs 400 from GitHub API |
 | `config.py` fields | Added 5 SWE-bench fields | Source selection, cache dir, version pin, BigQuery flag |
 | `run_pipeline.py` | Added `run_pipeline_swebench()` | Dual-source orchestrator |
@@ -417,7 +417,7 @@ Each Phase follows this structure:
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 3b.11 | `synthetic_augment.py` | Created | New module: CodeContests (13k) + CodeAlpaca (20k filtered to ~8k Python) mapped to IssueRecord schema | Low |
 | 3b.12 | Config updates | Added `augment_codecontests`, `augment_codealpaca`, `max_train_examples` | CLI flags for augmentation control | Low |
 | 3b.13 | Pipeline integration | `run_pipeline()` augmented after split | Synthetic records injected into train split only — zero leakage to val/test/golden | Low |
@@ -426,7 +426,7 @@ Each Phase follows this structure:
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
-|----------|---------|------------------------|-----------|
+| ---------- | --------- | ------------------------ | ----------- |
 | `IssueRecord.model_construct()` for synthetic records | Full code solutions as `patch_diff` don't pass Pydantic unified-diff validator | Wrap in fake diff headers, skip validation entirely | `model_construct()` is intentional Pydantic v2 API for bypassing validation; cleaner than faking diff format |
 | CodeContests sourced first (13k) if time-pressed | CodeAlpaca is instruction-following, not bug-fixes, noisier | Skip CodeAlpaca entirely | CodeContests alone gets to ~20k with SWE-bench; CodeAlpaca adds variety at ~8k Python-filtered |
 | Dedup by SHA256(issue_body) across synthetic + SWE-bench | Same problem text could appear in both sources | Dedup per-field pair | issue_body hash catches near-identical problem statements; cheap and effective |
@@ -435,7 +435,7 @@ Each Phase follows this structure:
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
-|---------|------------|----------|------------|-----------|
+| --------- | ------------ | ---------- | ------------ | ----------- |
 | `patch_diff` validator rejects synthetic solutions | 2026-07-28 | 2026-07-28 | Switched to `IssueRecord.model_construct()` to bypass Pydantic validation | 5 min |
 | Existing `run_pipeline` tests download CodeContests from HF | 2026-07-28 | 2026-07-28 | Disabled augmentation in existing test configs (`augment_codecontests=False`) | 10 min |
 | `ruff` B905 on `zip()` without `strict` | 2026-07-28 | 2026-07-28 | Added `strict=False` to CodeContests zip | 2 min |
@@ -443,7 +443,7 @@ Each Phase follows this structure:
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
-|------|--------|----------------|
+| ------ | -------- | ---------------- |
 | CodeContests loading | `load_dataset("deepmind/code_contests")`, split="train". Solutions stored as `{solution: [...], language: [...]}`. Python = 3 in int enum. | Must handle solutions dict shape; HF datasets includes solutions for 13k problems |
 | CodeAlpaca loading | `load_dataset("sahil2801/CodeAlpaca-20k")`, split="train". Python filter by `"python" in instruction + input (lowercase)`. | ~8k of 20k pass the Python filter; remaining 12k skipped |
 | `model_construct()` | Pydantic v2 method that skips `field_validator` decorators entirely | Synthetic records carry full solutions, not diffs — normal constructor would reject them |
@@ -453,7 +453,7 @@ Each Phase follows this structure:
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
-|--------|------------------------|---------------|
+| -------- | ------------------------ | --------------- |
 | `data_engineering/synthetic_augment.py` | Added | ~210 lines: load_codecontests, load_codealpaca, augment_training_data |
 | `data_engineering/config.py` | Added 3 fields | `augment_codecontests` (bool), `augment_codealpaca` (bool), `max_train_examples` (int) |
 | `data_engineering/cli.py` | Added 3 flags | `--augment-codecontests/--no-augment-codecontests`, `--augment-codealpaca/--no-augment-codealpaca`, `--max-train-examples` |
@@ -470,6 +470,70 @@ Each Phase follows this structure:
 - **Augmentation point**: runs after `split.stratified_split()` — synthetic repos never appear in val/test/golden
 - **Ponytail**: CodeAlpaca is noisier (instruction-following, not bug fixes). `--no-augment-codealpaca` to skip if time-pressed.
 
+## Phase 3b (Extension): GCS Fix + Synthetic Disable + Tokenization Integration — 2026-07-30
+
+### Deviation Log
+
+| Task | Planned | Actual | Reason | Impact |
+| ------ | --------- | -------- | -------- | -------- |
+| 3b.25 | Fix GCS save bug | Fixed `_save_stage_gcs` to handle dict vs Pydantic model | `model_dump()` called on dict caused `'dict' object has no attribute 'model_dump'` | High |
+| 3b.26 | Disable synthetic augmentation by default | `augment_codecontests=False`, `augment_codealpaca=False` in config + CLI | Pure SWE-bench pipeline for primary experiment; avoids distribution shift | High |
+| 3b.27 | Change golden_source_split to "test" | Config default from "all" → "test" | Held-out eval set from test split only; zero leakage from train/val | High |
+| 3b.28 | Integrate tokenization into pipeline | New `tokenize` stage runs automatically at end | End-to-end: JSONL → .arrow shards → GCS in single pipeline run | High |
+| 3b.29 | Add tokenize stage to pipeline orchestrator | `_STAGE_MAP` + `_stage_enabled()` + CLI flags | Tokenization now part of standard pipeline flow | Medium |
+| 3b.30 | Add tokenize config fields | `tokenize_model`, `tokenize_max_length` in DataPipelineConfig | Configurable model + sequence length for tokenization | Low |
+| 3b.31 | Add tokenize CLI flags | `--tokenize-model`, `--tokenize-max-length` | User override without editing config | Low |
+| 3b.32 | Add tokenized_paths to PipelineResult | Schema extended with tokenized_paths dict | Downstream consumers (training) get tokenized data location | Low |
+
+### Decisions Made
+
+| Decision | Context | Alternatives Considered | Rationale |
+| ---------- | --------- | ------------------------ | ----------- |
+| Fix GCS save with hasattr check | `records` can be list of dicts or Pydantic models | Force all records to Pydantic before save | Minimal change; handles both checkpoint load (dicts) and fresh pipeline (models) |
+| Disable synthetic by default | Primary experiment should use pure SWE-bench | Keep enabled, document caveats | Cleaner baseline; ablation can re-enable via flags; avoids competitive programming distribution shift |
+| golden_source_split = "test" | MASTER-PLAN says golden from test split; earlier implementation used "all" | Keep "all" with Train+Test+Dev | "test" ensures held-out eval; Train has no test patches (no F2P); Dev small |
+| Tokenize as final pipeline stage | Phase 4 expects .arrow shards; manual step is error-prone | Separate script, manual invocation | Automated end-to-end pipeline; GCS upload built-in; reproducible |
+| Keep synthetic code in repo | Code works, tested, may be useful for ablation | Delete synthetic_augment.py | Stronger portfolio story: "clean baseline + ablation available"; git history preserves work |
+
+### Blockers & Resolutions
+
+| Blocker | Discovered | Resolved | Resolution | Time Lost |
+| --------- | ------------ | ---------- | ------------ | ----------- |
+| GCS save: `'dict' object has no attribute 'model_dump'` | 2026-07-30 | 2026-07-30 | `_save_stage_gcs`: check `hasattr(r, "model_dump")` before calling; fallback to `json.dumps(r)` | 10 min |
+| Synthetic augmentation running despite config=False | 2026-07-30 | 2026-07-30 | CLI defaults were `True` while config defaults were `False`; aligned both to `False` | 5 min |
+| Golden set included Train split (leakage risk) | 2026-07-30 | 2026-07-30 | Changed `golden_source_split` default from "all" → "test" | 5 min |
+
+### Technical Details (For Future Phases)
+
+| Area | Detail | Why It Matters |
+| ------ | -------- | ---------------- |
+| GCS save fix | `_save_stage_gcs` now handles both `IssueRecord` (has model_dump) and `dict` (from checkpoint load) | Pipeline resume loads JSONL as dicts; fresh run passes Pydantic models; both must serialize |
+| Tokenization integration | `tokenize_pipeline()` called after archive/card; uses `tokenize_model` + `tokenize_max_length` from config | Single command produces JSONL + .arrow + GCS uploads for both |
+| Tokenized GCS path | `gs://swe-qwen-datasets/tokenized/{run_id}/{train,val,test,golden}/data-*.arrow` | Phase 4 `modal_train.py` loads via `load_tokenized_shards()` from local or GCS |
+| PipelineResult.tokenized_paths | Dict with keys: train, val, test, golden, dataset_dict pointing to local dirs | Downstream scripts can programmatically locate tokenized data |
+
+### Scope Changes
+
+| Change | Added/Removed/Modified | Justification |
+| -------- | ------------------------ | --------------- |
+| `_save_stage_gcs` hasattr fix | Modified | Bug fix: dict vs model serialization |
+| `config.py` defaults: `augment_codecontests=False`, `augment_codealpaca=False` | Modified | Pure SWE-bench baseline |
+| `config.py` default: `golden_source_split="test"` | Modified | Held-out eval, no leakage |
+| `config.py` fields: `tokenize_model`, `tokenize_max_length` | Added | Tokenization config |
+| `cli.py` flags: `--tokenize-model`, `--tokenize-max-length` | Added | User override |
+| `run_pipeline.py`: tokenize stage + `_STAGE_MAP` entry | Added | Automated tokenization |
+| `schema.py`: `PipelineResult.tokenized_paths` | Added | Return tokenized data locations |
+| `run_pipeline.py`: `--stages` includes `tokenize` by default | Modified | End-to-end default |
+
+### Metrics / Observations
+
+- **Run 92621d209d01** (resume from cleaned): 2,056 cleaned → 1,115 train / 95 val / 846 test / 846 golden — **no synthetic, golden from test only** ✅
+- **Run e7107c3bd883** (full with tokenize): 2,056 cleaned → 1,561 train / 118 val / 377 test / 377 golden + **tokenized .arrow shards uploaded to GCS** ✅
+- **GCS artifacts**: Both `datasets/{run_id}/` (JSONL) and `tokenized/{run_id}/` (.arrow) present
+- **W&B artifacts**: 8 dataset artifacts per run + proper lineage
+- **All 183 data engineering tests pass** (including new synthetic + SWE-bench tests)
+- **Tokenization stats**: train 1115/1561 examples, avg 961/942 tokens (max_length=4096), labels masked with -100 for prompt portion
+
 ---
 
 ## Phase 4: Fine-Tuning Pipeline — 2026-07-28 ✅ COMPLETED
@@ -477,7 +541,7 @@ Each Phase follows this structure:
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 4A | QLoRA config registry | Completed (models.yaml, qlora_variants.yaml, qlora_config.py) | YAML-driven model/variant configs with LoraConfig/TrainingArguments factory | Low |
 | 4B | Prompt templates | Completed (Jinja2 templates + PromptLoader) | system.jinja2, user.jinja2, assistant.jinja2, chat.jinja2; Loader with render/render_chat | Low |
 | 4C | Tokenization | Completed (tokenize.py) | format_training_prompt, load_jsonl_split, load_tokenized_shards (no actual tokenize step — SFTTrainer handles it) | Low |
@@ -497,7 +561,7 @@ Each Phase follows this structure:
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
-|----------|---------|------------------------|-----------|
+| ---------- | --------- | ------------------------ | ----------- |
 | YAML-driven config (not Pydantic) | Separate model defaults from variant overrides | Python dicts, Pydantic Settings, TOML | YAML is standard for ML configs; non-devs can edit; separate models.yaml + qlora_variants.yaml |
 | Jinja2 for prompt templates | Dynamic prompt composition | f-strings, string.Template, Mako | Jinja2 is standard, has inheritance, well-known; separates prompt design from code |
 | SFTTrainer handles tokenization | TRL SFTTrainer has built-in tokenization + packing | Manual tokenizer call + DataCollatorForSeq2Seq | SFTTrainer's tokenize + pack is simpler, same result; saves one pipeline stage |
@@ -515,7 +579,7 @@ Each Phase follows this structure:
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
-|---------|------------|----------|------------|-----------|
+| --------- | ------------ | ---------- | ------------ | ----------- |
 | transformers v5.14.1 eval_strategy rename | 2026-07-28 | 2026-07-28 | Added eval_strategy and save_strategy explicitly in qlora_variants.yaml configs | 20 min |
 | peft/transformers not in system Python (require .venv) | 2026-07-28 | 2026-07-28 | Use ./.venv/bin/python for all test/runtime commands; update Makefile/pyproject aliases | 20 min |
 | re.compile deprecation in importlib.resources | 2026-07-28 | 2026-07-28 | Used importlib.resources.files() instead of deprecated .contents() in PromptLoader | 5 min |
@@ -532,7 +596,7 @@ Each Phase follows this structure:
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
-|------|--------|----------------|
+| ------ | -------- | ---------------- |
 | Python venv | .venv/ has all GPU deps (peft 0.19.1, transformers 5.14.1, trl, datasets, wandb); system Python does not | All training commands must use `./.venv/bin/python` or activate venv |
 | Test execution | 44 unit tests pass with `./.venv/bin/python -m pytest`. 4 smoke tests require GPU (marked slow/requires_modal) | CI must use venv python; smoke tests run on Modal only |
 | Config priority | variant-level YAML overrides model-level defaults; build_qlora_config merges then instantiates LoraConfig/TrainingArguments | Adding new variant = 5-10 lines in qlora_variants.yaml; model = 3-5 lines in models.yaml |
@@ -557,7 +621,7 @@ Each Phase follows this structure:
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
-|--------|------------------------|---------------|
+| -------- | ------------------------ | --------------- |
 | scripts/f2p_proxy.py | Added | Heuristic F2P for Phase 3b golden extraction; replaced by SWE-bench ground truth |
 | scripts/run_3config_comparison.py | Added | Orchestrates comparison runs without manual launching |
 | scripts/run_3config_comparison.py | **Hardened** | **8 systemic fixes: W&B entity auto-resolution, state reconciliation, polling timeout, Modal log capture, per-variant error isolation, signal handler preserves state, crash detection, `--skip-eval` flag** |
@@ -588,14 +652,14 @@ Each Phase follows this structure:
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 5.1 | Evaluation schema | Completed | `evaluation/` package, 11 modules: config.py, schema.py, patch_applier.py, metrics.py, test_runner.py, inference.py, harness.py, prompt_ab_test.py, comparison.py, cli.py | Low |
 | 5.2 | Test runner | Completed | Modal `run_tests_in_container` (clone → base_sha → tests_before → test_patch → tests_head → ground-truth F2P → revert → generated_patch → tests_after) + retry/flaky detection | Low |
 | 5.3/5.4 | F2P/P2P computation | Completed | metrics.py `compute_f2p`/`aggregate_metrics`; flaky + skipped excluded from denominators; empty P2P → 1.0 | Low |
 | 5.5/5.6/5.9 | Golden / Verified / baseline runners | Completed | harness.py `run_golden`/`run_swebench_verified`/`run_baseline` (variant "baseline", no LoRA), all funneled through `_run_split` | Low |
 | 5.7 | W&B eval logging | Completed | WandbLogger no-op safe without W&B; artifacts eval-results-{run_id} (JSONL), eval-aggregate-{run_id}, eval-per-repo-{run_id} (CSV), eval-prompt-ab-{run_id} | Low |
 | 5.8 | Comparison framework | Completed | comparison.py: revalidate_champion (P2P≥90% + F2P≥15% gates), proxy_champion_from_f2p_proxy **imports** `scripts.f2p_proxy.select_champion` (AC #17), annotated markdown report | Low |
-| 5.10 | Fine-tuned eval (3 variants) | Code complete | `run --models "qwen3-14b:baseline_14b|higher_rank_14b|higher_lr_14b"`; live run needs Modal creds | Medium |
+| 5.10 | Fine-tuned eval (3 variants) | Code complete | `run --models "qwen3-14b:baseline_14b | higher_rank_14b | higher_lr_14b"`; live run needs Modal creds | Medium |
 | 5.11 | SWE-bench integration | Completed | load_examples: local JSONL or gs:// via lazy google-cloud-storage; `metadata.is_verified` filter; {run_id} substitution | Low |
 | 5.12 | Unit/integration tests | Completed | test_eval_unit.py (47) + test_eval_integration.py (17) = 64 tests, all offline | Low |
 | 5.13–5.17 | Manual Modal eval runs | **Not executed** | Requires Modal/W&B credentials; deferred to user-owned run | Medium |
@@ -610,7 +674,7 @@ Each Phase follows this structure:
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
-|----------|---------|------------------------|-----------|
+| ---------- | --------- | ------------------------ | ----------- |
 | Modal app functions for test exec + vLLM inference | Isolation + parallelizable + matches Phase 4 Modal infra | Local subprocess, docker | Plan Q1 decision honored; volumes for repo/test cache |
 | Pure `classify_test_outcomes(attempts) -> Literal["passed","failed","flaky","skipped"]` | Cross-agent contract, unit-testable | Framework-coupled result parsing | Spec §6: any status change across attempts → flaky; flaky excluded from F2P/P2P denominators |
 | Flaky excluded from F2P/P2P denominators | Metrics must reflect ground truth, not retry noise | Count flaky as failed | Spec §6 rule; `compute_f2p` filters status != flaky/skipped |
@@ -627,7 +691,7 @@ Each Phase follows this structure:
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
-|---------|------------|----------|------------|-----------|
+| --------- | ------------ | ---------- | ------------ | ----------- |
 | classify_test_outcomes "any pass → passed" violated spec §6 | During orchestrator review | 2026-07-31 | Rewrote: all-pass→passed, all-fail→failed, all-skip→skipped, any mix→flaky; updated unit tests | 20 min |
 | `from scripts.f2p_proxy` ModuleNotFoundError under pytest | Agent E integration tests | 2026-07-31 | `scripts/__init__.py` + `"scripts*"` in pyproject packages.find.include + `pip install -e . --no-deps` (stale editable finder) | 15 min |
 | Harness never persisted `{output_dir}/{run_id}.json` | Agent E review | 2026-07-31 | Added `_persist_run` (harness.py:380), called in `_run_split` + prompt_ab_test | 15 min |
@@ -639,12 +703,12 @@ Each Phase follows this structure:
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
-|------|--------|----------------|
+| ------ | -------- | ---------------- |
 | Flaky contract | `classify_test_outcomes` — status change across retry attempts → `flaky`; flaky/skipped excluded from F2P/P2P denominators | Phase 9 quality gates consume these metrics |
 | Run file format | `{output_dir}/{run_id}.json` = single EvalRun dump (`model_dump(mode="json")`, indent=2); comparison parses whole-file first, JSONL fallback | Both writer and parser are in-repo now; keep in sync |
 | Checkpoint key | `{checkpoint_dir}/{run_id}/{repo_slug}__{model}__{variant}__{template}.json`, atomic tmp+rename | Resume skips completed repos; template in key is load-bearing |
 | Artifact naming | eval-results-{run_id} (type eval_results), eval-aggregate-{run_id} (eval_metrics), eval-per-repo-{run_id} (eval_breakdown CSV), eval-prompt-ab-{run_id}; scalars `eval/{model}/{variant}/{prompt}/<metric>` | Phase 9 promotion pipeline + W&B dashboard conventions |
-| EvalConfig knobs | EVAL_ env prefix; min_f2p_threshold 0.15, min_p2p_threshold 0.90 (mirrored in comparison `_MIN_*_RATE`), test_timeout 30s, repo_timeout 300s, max_retries 2, flaky_threshold 0.5, ci_sample_size 50, ci_random_seed 42 | Mirrored constants must stay in sync between harness and comparison |
+| EvalConfig knobs | EVAL_env prefix; min_f2p_threshold 0.15, min_p2p_threshold 0.90 (mirrored in comparison `_MIN_*_RATE`), test_timeout 30s, repo_timeout 300s, max_retries 2, flaky_threshold 0.5, ci_sample_size 50, ci_random_seed 42 | Mirrored constants must stay in sync between harness and comparison |
 | Template kwargs | chat.j2 → system_prompt/messages/user_prompt; system.j2 → language/task_description/style_guide; user.j2 → issue_title/issue_body/repo_name/repo_domain/context_files/test_files; assistant.j2 → analysis/plan/code_changes | Phase 6 inference API reuses prompt composition |
 | LoRA resolution | resolve_adapter_path: local models/checkpoints/{variant} → W&B artifact `model-qwen3-14b-{variant}`, None for baseline | Phase 6 consumes champion adapter path |
 | Perf note | `run_example` calls `_generate_patches` per-example (single-example Modal batch); per-repo batching would cut overhead on 2,056-example runs | Optimize before large-scale eval runs |
@@ -653,7 +717,7 @@ Each Phase follows this structure:
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
-|--------|------------------------|---------------|
+| -------- | ------------------------ | --------------- |
 | `evaluation/` package (11 modules) | Added | Phase 5 deliverable per plan §14 manifest |
 | `scripts/__init__.py` | Added | scripts/ must be importable (comparison imports f2p_proxy) |
 | pyproject: `"scripts*"` in packages.find.include | Added | Same importability fix for editable installs |
@@ -677,7 +741,7 @@ Each Phase follows this structure:
 First live golden eval run of the 3-config comparison (2026-08-06, split=golden, sample=50). Runs `run_baseline` + `run_golden`; values below are the Phase-5 acceptance reference and land in the predicted Instruct+LoRA band (p2p ~50–60%, f2p ~10–15%, latency ~35s).
 
 | Variant | F2P | P2P | Avg Latency | Verdict |
-|---------|-----|-----|-------------|---------|
+| --------- | ----- | ----- | ------------- | --------- |
 | baseline_14b | 11.8% (CI 4.2–20.1%) | 56.2% | 35.1s | [rejected: f2p<15%] |
 | higher_rank_14b | 14.6% (CI 6.1–23.8%) | 61.5% | 36.0s | [rejected: f2p<15%] |
 | higher_lr_14b | 16.9% (CI 8.2–27.4%) | 91.2% | 35.3s | [champion] ✅ |
@@ -695,7 +759,7 @@ First live golden eval run of the 3-config comparison (2026-08-06, split=golden,
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 5b.1 | Delete mini-SWE-agent path | Completed | Deleted swe_agent.py, serve.py, test_swe_agent.py (13 tests), run-swe-agent CLI, config remnants; schema Method literal no longer includes swe_agent | Low |
 | 5b.2 | Bottleneck fix: test execution | Completed | **Official SWE-bench images** (per-instance tags, one Modal function per repo — Modal 1.5.3 `with_options` has no image param) + existing volume-cached clone/install fallback. Zero project pip-install per instance; ~60-90 s/instance | High |
 | 5b.3 | Tiers + CI gate | Completed | `run --mode smoke\|dev\|final\|full` (20/100/500/all, seed 42); smoke writes/checks `smoke_baseline.json`, exit 1 on F2P drop > 5% | Medium |
@@ -706,7 +770,7 @@ First live golden eval run of the 3-config comparison (2026-08-06, split=golden,
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
-|----------|---------|------------------------|-----------|
+| ---------- | --------- | ------------------------ | ----------- |
 | One pipeline, single-turn, tiered | Dual pipelines untrusted; user mandate | Keep both, fix agentic path | Vision out-of-scope: no multi-agent; execution feedback deferred to v2 |
 | Official swebench images, fn per repo | Images are per-instance; Modal 1.5.3 can't switch images per call | Per-call image override (impossible), worktree trick (no setup win) | Full git history in every image → any base_sha resets; editable install; ground-truth verification catches env drift |
 | `--mode smoke` = CI gate w/ stored baseline | Recruiter signal: regression gate in CI | Fixed threshold only | Absolute threshold can't catch regressions of a good model; baseline-relative drop does |
@@ -717,7 +781,7 @@ First live golden eval run of the 3-config comparison (2026-08-06, split=golden,
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
-|---------|------------|----------|------------|-----------|
+| --------- | ------------ | ---------- | ------------ | ----------- |
 | Modal 1.5.3 `with_options` has no `image` param | inspect installed modal | 2026-08-01 | Per-repo function registry (swebench_fn); image fixed at decoration, valid for all repo instances | 30 min |
 | Tests would hit real Modal swebench path | Integration test design | 2026-08-01 | conftest autouse fixture also stubs `_run_tests_swebench` → always raises | 5 min |
 | Paired bootstrap CI coincides across seeds on tiny n | stats unit test | 2026-08-01 | Test asserts sane interval + determinism, not seed-dependent CI (order statistics are coarse) | 5 min |
@@ -725,7 +789,7 @@ First live golden eval run of the 3-config comparison (2026-08-06, split=golden,
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
-|------|--------|----------------|
+| ------ | -------- | ---------------- |
 | Swebench image naming | `swebench/sweb.eval.x86_64.{instance munged}:latest`; `django__django-10554` → `django_1776_django-10554` (`__`→`_1776_`) | Docker tag safety; per-instance images, per-repo functions |
 | /testbed layout | Image `/testbed` at instance base commit + "SWE-bench" marker commit (HEAD ≠ base_sha; base_sha is ancestor → `git reset --hard` works offline) | No network, no clone at eval time |
 | Deps in testbed env | Per-container `conda run -n testbed python -m pip install pytest-json-report pytest-timeout` (~10-20 s, probe import first) | Could bake into custom image if container starts dominate |
@@ -739,7 +803,7 @@ First live golden eval run of the 3-config comparison (2026-08-06, split=golden,
 Two subagent audits (code-reviewer + bottleneck) ran before the live Modal run. All findings fixed; **663 tests passing**.
 
 | Finding | Fix | Where |
-|---------|-----|-------|
+| --------- | ----- | ------- |
 | C1: fallback path dropped per-job `test_patch` (reintroduced 5b.6 bug) | `_run_tests_batch_fallback._run_one` uses `job.get("test_patch") or test_patch or ""` | harness.py |
 | C2: ground-truth F2P<100% was warn-only — broken env scored as model failure | Hard-fail: result `error="ground truth F2P<100%"`, tests_after skipped, excluded from rates; `_reset_to_base` now raises on non-zero reset | test_runner.py (3 sites: `_execute_instance`, `run_tests_in_container`, `run_tests_batch`) |
 | C3: batch truncation threshold 540s stale vs 3600s fn timeout → slow first container failed ALL jobs | `batch_timeout_warn = 3300` (3600 − 300 margin) | test_runner.py |
@@ -762,7 +826,7 @@ Two subagent audits (code-reviewer + bottleneck) ran before the live Modal run. 
 Closed three audit-listed gaps (user-approved) plus three DoD items:
 
 | Item | Fix | Where |
-|------|-----|-------|
+| ------ | ----- | ------- |
 | Phase 6 dependency: W&B Registry champion alias (claimed in old DoD #8, never built) | `promote_champion_to_registry(champion_key, config)` + `_clear_champion_alias`: lazy wandb, links best variant's checkpoint artifact to `eval-champion` collection with `champion` alias, returns summary str or None (never raises). Wired into `compare` after `revalidate_champion` | comparison.py, cli.py |
 | Old §8: latency p50/p95 scalars | NEW `latency_percentiles(results)` (nearest-rank p95, excludes 0 latencies) + `log_eval_run` writes `eval/{model}/{variant}/{prompt}/latency_p50\|p95` | harness.py |
 | Artifact lineage | NEW `_link_model_lineage`: `use_artifact(model-checkpoint:latest)` per variant BEFORE `log_artifact(eval-results)` in same cached run | harness.py |
@@ -773,7 +837,7 @@ Closed three audit-listed gaps (user-approved) plus three DoD items:
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
-|--------|------------------------|---------------|
+| -------- | ------------------------ | --------------- |
 | `evaluation/swe_agent.py`, `serve.py`, `tests/test_swe_agent.py` | Removed | Agentic path deleted per user mandate |
 | `evaluation/stats.py` + `tests/test_eval_stats.py` | Added | Wilson CI, McNemar, paired bootstrap (recruiter-visible rigor) |
 | `evaluation/test_runner.py` | Modified | swebench_fn registry, `_execute_instance`, `run_swebench_instance`, `_run_swebench_instance_body`, munge_instance_id, run_tests_batch per-job test_patch |
@@ -796,7 +860,7 @@ Closed three audit-listed gaps (user-approved) plus three DoD items:
 Eleven rounds of local 3-50 sample runs revealed systemic issues in the patch application path, test execution efficiency, and local Python 3.14 incompatibilities (all LOCAL-only except the parametrize patch). Each root cause was isolated via timing logs built into both backends and fixed with Modal efficiency as the primary constraint.
 
 | Finding | Root Cause | Fix | Bug/Perf | Where |
-|---------|------------|-----|----------|-------|
+| --------- | ------------ | ----- | ---------- | ------- |
 | **"no successful patches on Modal"** — all 14B patches rejected as corrupt | `extract_patch` final `.strip()` removed trailing `\n` → `git apply` stdin exits 128 "corrupt patch" on every generated patch | Normalize trailing newline at the chokepoint (`apply_patch_git` + `apply_patch_unidiff`); also fixed `extract_patch` to return `+ "\n"` | **Bug** | patch_applier.py:96, inference.py:137-151 |
 | **"patches truncated mid-diff"** on Modal smoke/dev runs | `tier_max_new_tokens` smoke=768, dev=768 — 14B patches for 3-file diffs are 1.5-2K tokens | All tiers → 2048 | **Bug** | config.py:76-80 |
 | **"corrupt patch at line N" on every 50-sample baseline run (2026-08-05)** | The 768→2048 fix left ALL tiers at 2048; Qwen3-14B out-loud reasoning consumes ~75% of the budget, so the diff is cut mid-hunk (patches end at lines 12-68) | Restore 8192 for dev/final/full per config comment; smoke stays 2048 (fail-fast probes) | **Bug** | config.py:85-89 |
@@ -813,8 +877,9 @@ Eleven rounds of local 3-50 sample runs revealed systemic issues in the patch ap
 | **Missing unit tests for `evaluation/stats.py`** | Added in Phase 5b but test coverage never written | 14 new tests covering Wilson CI edges, McNemar, paired bootstrap determinism | **Bug** | tests/test_stats.py (new) |
 
 **Hot paths fixed (Modal cost impact):**
+
 | Path | Before | After |
-|------|--------|-------|
+| ------ | -------- | ------- |
 | Sympy full-dir collect (2 instances × 280s × 3 rounds) | 1680s | ~30-50s (parametrize + \b fix) |
 | pip install cold start per repo | 2-10 min (dep resolution) | 2-10s (`--no-deps`) |
 | Patch apply rc=128 (corrupt) → repair retry | 2 extra apply attempts + unidiff fallback | rc=1 (valid format) → direct apply or unidiff |
@@ -832,7 +897,7 @@ Eleven rounds of local 3-50 sample runs revealed systemic issues in the patch ap
 User reported "git applying of patches never works on modal or locally so i dont know if the stats compute correctly". Investigated with a known-good golden-patch oracle (sphinx-doc/sphinx); proved patch-apply + stats math correct. All historical 0% results traced to ONE harness bug:
 
 | Item | Fix | Where |
-|------|-----|-------|
+| ------ | ----- | ------- |
 | **ROOT CAUSE: `_run_pytest_once` unlinked the pytest JSON report in `finally` BEFORE `_load_json_report` read it** → every run logged 'JSON report missing' → stdout-parse fallback failed → every test recorded 'failed'/'pytest produced no report' (explains all 10 historical run files, Modal + local) | Moved unlink after `_load_json_report`; timeout path unlinks then returns; removed duplicated except block | evaluation/test_runner.py |
 | pytest-json-report / pytest-timeout missing from local test env | Installed into `.venv` + added `pytest-timeout>=2.3.1`, `pytest-json-report>=1.5.0` to `dev` optional-deps | pyproject.toml |
 | `--backend local` still routed test-exec to Modal (swebench_fn unpatched) | Callout added: `_patch_harness_backend` only patches `_generate_patches`+`_run_tests`; local Verified-run test-exec goes to Modal by design | documented |
@@ -844,51 +909,83 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 
 ---
 
-## Phase 6: Inference API (Serverless vLLM on Modal) — YYYY-MM-DD
+## Phase 6: Inference API — Serverless vLLM on Modal — 2026-08-06
+
+> Status: code complete + local tests green + **live validation boot PASSED (4/4 preflight)** + **DEPLOYED + integration PASSED (4/4 preflight vs prod URL)**.
+> 6.1 config sweep + 6.8 endpoint benchmark DEFERRED by user decision (spend not approved this pass; re-runnable via `python -m inference.benchmark sweep|benchmark`).
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
-| 6.1 | vLLM config benchmark | | | |
-| 6.2 | Serve entry point | | | |
-| 6.3 | Modal serve wrapper | | | |
-| 6.4 | OpenAI-compatible adapter | | | |
-| 6.4.1 | Streaming support | | | |
-| 6.5 | Telemetry | | | |
-| 6.6 | Validation + error handling | | | |
-| 6.7 | Integration test | | | |
-| 6.8 | Latency/throughput benchmark | | | |
-| 6.9 | Scale-to-zero config | | | |
+| ------ | --------- | -------- | -------- | -------- |
+| 6.2 serving base model | Qwen/Qwen3-14B-FP8 | **Qwen/Qwen3-14B-AWQ** (4-bit, `quantization=awq`) | FP8 weight-only starves KV cache on A10G: 16.07 GiB weights → 1.05 GiB KV → vLLM rejects max len 16384 ("estimated maximum model length is 6864"). AWQ leaves 7.16 GiB KV. Plan's documented Path-A fallback (D1) | High (config swap, validated in live boot) |
+| 6.2 max_model_len / max_tokens_cap | 16384 / 8192 | 4096 / 4096 | Training used `max_seq_length=4096` (qlora_variants.yaml); cap must be ≤ model len or vLLM rejects at request time | Medium |
+| 6.4.1 streaming | token-by-token SSE | word-chunked SSE of completed text (V1) | ponytail scope decision: sync `generate` + chunked yield; true token streaming needs engine stream API (later) | Medium (documented) |
+| 6.4 error bodies | `HTTPException(detail={"error": ...})` → `{"detail": {"error": ...}}` | `JSONResponse` with top-level `{"error": ...}` | OpenAI wire-format compliance; strict clients reject nested detail | Low |
+| 6.4 LoRA prompt path | `no_think_wrap(hf_id, prompt)` (chat-wraps) | `user_text.replace("### Response", "/no_think\n### Response", 1)` | no_think_wrap chat-wraps via chat template → breaks LoRA training contract (eval's documented repetition-loop failure) | Medium |
+| 6.7 integration test | `modal serve inference.modal_serve` | `modal serve -m inference.modal_serve` | Modal 1.5.3 CLI requires `-m` for module paths | Low |
+| 6.2 adapter resolution | eval's `resolve_adapter_path` reused as-is | `EvalConfig` import moved into `config is None` branch | Serving image does not ship `evaluation/`; unconditional import → ModuleNotFoundError 500 on every variant request (found in live boot) | Medium (bug fix) |
+| Modal 1.5.3 API surface | `@modal.build()` / `allow_concurrent_inputs` / `@modal.cls` | `Image.run_function(_build_smoke, gpu=...)` / `@modal.concurrent(max_inputs=16)` / `@app.cls` | Removed/changed in installed SDK (verified via hasattr + live InvalidError) | Medium |
+| Serving image deps | plan list | `pydantic-settings>=2.7.0` added | ServeConfig imports it at module level; vllm 0.26.0 does not pull it transitively | Low |
+| pyproject/CI wrap | in-plan | already in HEAD via out-of-session commits 07e249d (serve retarget), 17e0e4d (artifacts gitignore), 66c0234 (CI inference paths) | User committed outside session | Low |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
-|----------|---------|------------------------|-----------|
-| | | | |
+| ---------- | --------- | ------------------------ | ----------- |
+| AWQ over FP8 (D1 executed) | FP8 build failed at `_build_smoke` with KV OOM | FP8 with reduced max_model_len; bf16 (28 GB — impossible on A10G) | AWQ 4-bit: 9.96 GiB model, PunicaWrapperGPU LoRA support confirmed, 21.81/22.06 GiB free |
+| `max_model_len=4096` | Serving must match training context | 8192 (KV pressure, no training evidence) | LoRA adapters trained at 4096; shorter ctx = more KV headroom |
+| Word-chunked SSE for V1 | Full token streaming needs vLLM async streaming API + async engine | stream API now (more Modal debug cycles) | Fastest correct OpenAI-compatible SSE; upgrade path documented |
+| Default variant `higher_lr_14b` | Plan said `baseline_14b` | — | Phase 5 golden eval CHAMPION (F2P 16.9% / P2P 91.2%) |
+| Serve-mode AND deployed web endpoints are PUBLIC | Both `modal serve` dev URL and deployed prod URL accepted a dummy bearer token | — | D7 verdict: Modal 1.5.3 `@modal.asgi_app` web endpoints enforce no auth with this setup; accept for internal API, revisit (Modal web token / proxy) if exposed beyond the workspace |
+| Cold start ~292s accepted | DoD target <15s | enforce_eager=True (skip torch.compile, ~150s saved) | Plan said keep eager=False for throughput; cold start measured + documented + volume-cached compile cuts later boots to ~60-90s |
+| Serving image stays lean (no `evaluation/`) | variant requests crashed on `evaluation` import | bake `evaluation/` into image | Fix via branch-scoped import; swe_bench server-side rendering remains limited (EvalInput import) — known V1 limitation |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
-|---------|------------|----------|------------|-----------|
-| | | | | |
+| --------- | ------------ | ---------- | ------------ | ----------- |
+| FP8 KV-cache OOM at image build | `_build_smoke` A10G run, first build | Yes | AWQ fallback (D1) + max_model_len 4096 | ~30 min |
+| Request death-loop on cold boot: 500s, `RuntimeError: aclose(): asynchronous generator is already running` ×3, container recycle | debug requests during ~292s cold boot (Modal queue patience ~240s cancels in-flight inputs) | Yes | `except RuntimeError` guard in `_stream_gen` (swallow teardown, record as "cancelled", no error frames) + `contextlib.suppress` on error-frame yields | ~1h |
+| Preflight step 2 404 | first preflight run | Yes | OpenAI SDK does not append `/v1` → `base_url=url.rstrip("/") + "/v1"` | ~10 min |
+| All variant requests 500 | live boot preflight step 3 | Yes | Branch-scoped `EvalConfig` import in `resolve_adapter_path` | ~30 min |
+| Modal 303 attempt-token retry protocol | requests during cold boot returned HTTP 303 with `__modal_attempt_token` JWT | Worked around | `curl -L` follows; OpenAI SDK does not auto-retry 303 → first request after scale-to-zero needs client retry (documented) | n/a |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
-|------|--------|----------------|
-| | | |
+| ------ | -------- | ---------------- |
+| Cold boot profile | First boot ~292s (init engine: profile, KV create, warmup; Dynamo bytecode transform 124s; graph capture 17s); volume-cached compile → transform 5.85s, boot ~60-90s | DoD cold-start <15s is not achievable with torch.compile on A10G — measured reality logged to W&B; volume caching (`VLLM_CACHE_ROOT=/models/vllm-cache`) is the mitigation |
+| Modal queue patience | ~240s — inputs waiting longer get cancelled (`Received a cancellation signal while processing input`) | First request after scale-to-zero can die mid-stream unless client retries; warm-up request pattern required |
+| AWQ engine footprint | 9.96 GiB model, KV 7.16 GiB used, 21.81/22.06 GiB free; vLLM suggests `--kv-cache-memory` 7.31 (fit) / 10.37 (full) | Headroom for concurrent seqs; 6.1 sweep will probe gpu_mem 0.85/0.90 × max_num_seqs 8/16/32 × ctx_len |
+| LoRA server-side | wandb artifact `model-qwen3-14b-{variant}:latest` downloaded inside container on first variant request (rank-32 adapter loaded with `max_lora_rank=64`) | Adapter download per cold container (not volume-cached) — V1 accepted; benchmark/sweep unaffected |
+| SSE framing | sse-starlette 3.4.8 re-frames items; `iter_chunks` yields full `data: ...` frames, `_stream_gen` strips framing before handing to EventSourceResponse | Prevents double `data:` prefix; verified in live stream test |
+| Cancellation telemetry | `RequestRecord.error_type="cancelled"` distinguishes teardown from engine failures | Honest error_rate in W&B metrics |
+| Modal 1.5.3 specifics | `-m` module flag; no `@modal.build()`; `@modal.concurrent` at class level; `@app.cls`; `Image.run_function` build step | Skeleton for any future Modal phase (Phase 7) |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
-|--------|------------------------|---------------|
-| | | |
+| -------- | ------------------------ | --------------- |
+| `inference/` package | Added | openai_compat, serve, telemetry, prompt_builder, config, modal_serve, benchmark |
+| `inference/prompt_builder.py` | Added (shared prompt logic) | Extracted from evaluation/inference.py; eval rewritten as shim with `_eval()` monkeypatch bridge (8+ Phase-5 patch sites keep working); eval image now also bakes `inference/` |
+| Endpoints | chat/completions + streaming only | Grilled decision: no completions/embeddings (YAGNI for Phase 6 acceptance) |
+| `scripts/preflight_serve.py` | Added | Single-boot validation tool (health, base chat, LoRA chat, stream) |
+| `serve` pyproject script + CI inference paths | Modified (out-of-session) | HEAD commits 07e249d/17e0e4d/66c0234 |
 
 ### Metrics / Observations
 
--
--
+- **Live validation boot: preflight 4/4 PASS in 32.7s (warm)** — health, non-stream base, non-stream rank-32 LoRA, stream SSE; EXIT=0
+- **Deploy + integration: `modal deploy -m inference.modal_serve` → prod URL `https://ahmedikram05--swe-qwen-serving-qwenserver-web.modal.run`** (deploy 4.4s, image fully cached); one warm-up request 200 OK (cold boot + Modal 303 attempt-token protocol followed via `curl -L`); **preflight 4/4 PASS vs prod in 22.8s, EXIT=0** — proves the "any OpenAI SDK client works" acceptance against a deployed endpoint
+- **Deployed endpoint auth: PUBLIC** — dummy bearer token accepted (same as serve-mode dev URL). D7 verdict: Modal 1.5.3 `@modal.asgi_app` web endpoints do not enforce auth with this setup; any deployed endpoint is effectively public (accept for internal API; revisit with Modal web-token auth or a proxy if the endpoint is exposed beyond the workspace)
+- GPU spend for Phase 6 validation + deploy: ~$2.40 total (FP8 discovery + debug loop + validation boots + deploy boot, A10G $1/hr)
+- 6.1 sweep / 6.8 benchmark deferred: TTFB p50 < 500ms gate, W&B serve/* metrics (serve/ttfb_p50_ms etc.), cold-start measurement, and SERVING-BENCHMARK-REPORT.md all still pending user go-ahead (~$1-1.5)
+- Warm base chat: 653.6 ms for 64 tokens (preliminary, pre-benchmark); engine throughput "output 17.74 toks/s" during debug (cold-ish)
+- AWQ decision validated: KV cache 7.16 GiB in use vs FP8's 1.05 GiB
+- torch.compile cache: 124s → 5.85s after volume cache warm (Dynamo bytecode transform)
+- Local gates: ruff clean, mypy clean, pytest 462 passed / 1 skipped (pre-existing macOS patch skip)
+- GPU spend for validation: ~$2.30 (FP8 discovery + debug loop + 3 validation boots, A10G $1/hr)
+- Live serve-mode auth: dev URL public (dummy token accepted) — deployed endpoint TBD
 
 ---
 
@@ -897,7 +994,7 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 7.1 | GitHub OIDC for GCP | | | |
 | 7.2 | GitHub OIDC for Modal | | | |
 | 7.3 | CI workflow (lint/type/test) | | | |
@@ -944,7 +1041,7 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 8.1 | Structured JSON logging | | | |
 | 8.2 | Training metrics → W&B | | | |
 | 8.3 | Eval metrics → W&B | | | |
@@ -992,7 +1089,7 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 9.1 | Comparison engine | | | |
 | 9.2 | Promotion rules | | | |
 | 9.3 | W&B model registry | | | |
@@ -1037,7 +1134,7 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 10.1 | Architecture overview | | | |
 | 10.2 | Deployment guide | | | |
 | 10.3 | API reference | | | |
@@ -1085,7 +1182,7 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 11.1 | External API audit | | | |
 | 11.2 | GitHub API retry/backoff | | | |
 | 11.3 | Modal API retry/backoff | | | |
@@ -1132,7 +1229,7 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 12.1 | Full pipeline clean run | | | |
 | 12.2 | Data pipeline validation | | | |
 | 12.3 | Training pipeline validation | | | |
@@ -1180,7 +1277,7 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
+| ------ | --------- | -------- | -------- | -------- |
 | 13.1 | Deploy production endpoint | | | |
 | 13.2 | Portfolio showcase doc | | | |
 | 13.3 | Benchmark results package | | | |
@@ -1231,67 +1328,3 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 ---
 
 *Update this log during implementation. Do not retroactively edit past phases after completion — append clarifications as new entries if needed.*
-
-## Phase 3b (Extension): GCS Fix + Synthetic Disable + Tokenization Integration — 2026-07-30
-
-### Deviation Log
-
-| Task | Planned | Actual | Reason | Impact |
-|------|---------|--------|--------|--------|
-| 3b.25 | Fix GCS save bug | Fixed `_save_stage_gcs` to handle dict vs Pydantic model | `model_dump()` called on dict caused `'dict' object has no attribute 'model_dump'` | High |
-| 3b.26 | Disable synthetic augmentation by default | `augment_codecontests=False`, `augment_codealpaca=False` in config + CLI | Pure SWE-bench pipeline for primary experiment; avoids distribution shift | High |
-| 3b.27 | Change golden_source_split to "test" | Config default from "all" → "test" | Held-out eval set from test split only; zero leakage from train/val | High |
-| 3b.28 | Integrate tokenization into pipeline | New `tokenize` stage runs automatically at end | End-to-end: JSONL → .arrow shards → GCS in single pipeline run | High |
-| 3b.29 | Add tokenize stage to pipeline orchestrator | `_STAGE_MAP` + `_stage_enabled()` + CLI flags | Tokenization now part of standard pipeline flow | Medium |
-| 3b.30 | Add tokenize config fields | `tokenize_model`, `tokenize_max_length` in DataPipelineConfig | Configurable model + sequence length for tokenization | Low |
-| 3b.31 | Add tokenize CLI flags | `--tokenize-model`, `--tokenize-max-length` | User override without editing config | Low |
-| 3b.32 | Add tokenized_paths to PipelineResult | Schema extended with tokenized_paths dict | Downstream consumers (training) get tokenized data location | Low |
-
-### Decisions Made
-
-| Decision | Context | Alternatives Considered | Rationale |
-|----------|---------|------------------------|-----------|
-| Fix GCS save with hasattr check | `records` can be list of dicts or Pydantic models | Force all records to Pydantic before save | Minimal change; handles both checkpoint load (dicts) and fresh pipeline (models) |
-| Disable synthetic by default | Primary experiment should use pure SWE-bench | Keep enabled, document caveats | Cleaner baseline; ablation can re-enable via flags; avoids competitive programming distribution shift |
-| golden_source_split = "test" | MASTER-PLAN says golden from test split; earlier implementation used "all" | Keep "all" with Train+Test+Dev | "test" ensures held-out eval; Train has no test patches (no F2P); Dev small |
-| Tokenize as final pipeline stage | Phase 4 expects .arrow shards; manual step is error-prone | Separate script, manual invocation | Automated end-to-end pipeline; GCS upload built-in; reproducible |
-| Keep synthetic code in repo | Code works, tested, may be useful for ablation | Delete synthetic_augment.py | Stronger portfolio story: "clean baseline + ablation available"; git history preserves work |
-
-### Blockers & Resolutions
-
-| Blocker | Discovered | Resolved | Resolution | Time Lost |
-|---------|------------|----------|------------|-----------|
-| GCS save: `'dict' object has no attribute 'model_dump'` | 2026-07-30 | 2026-07-30 | `_save_stage_gcs`: check `hasattr(r, "model_dump")` before calling; fallback to `json.dumps(r)` | 10 min |
-| Synthetic augmentation running despite config=False | 2026-07-30 | 2026-07-30 | CLI defaults were `True` while config defaults were `False`; aligned both to `False` | 5 min |
-| Golden set included Train split (leakage risk) | 2026-07-30 | 2026-07-30 | Changed `golden_source_split` default from "all" → "test" | 5 min |
-
-### Technical Details (For Future Phases)
-
-| Area | Detail | Why It Matters |
-|------|--------|----------------|
-| GCS save fix | `_save_stage_gcs` now handles both `IssueRecord` (has model_dump) and `dict` (from checkpoint load) | Pipeline resume loads JSONL as dicts; fresh run passes Pydantic models; both must serialize |
-| Tokenization integration | `tokenize_pipeline()` called after archive/card; uses `tokenize_model` + `tokenize_max_length` from config | Single command produces JSONL + .arrow + GCS uploads for both |
-| Tokenized GCS path | `gs://swe-qwen-datasets/tokenized/{run_id}/{train,val,test,golden}/data-*.arrow` | Phase 4 `modal_train.py` loads via `load_tokenized_shards()` from local or GCS |
-| PipelineResult.tokenized_paths | Dict with keys: train, val, test, golden, dataset_dict pointing to local dirs | Downstream scripts can programmatically locate tokenized data |
-
-### Scope Changes
-
-| Change | Added/Removed/Modified | Justification |
-|--------|------------------------|---------------|
-| `_save_stage_gcs` hasattr fix | Modified | Bug fix: dict vs model serialization |
-| `config.py` defaults: `augment_codecontests=False`, `augment_codealpaca=False` | Modified | Pure SWE-bench baseline |
-| `config.py` default: `golden_source_split="test"` | Modified | Held-out eval, no leakage |
-| `config.py` fields: `tokenize_model`, `tokenize_max_length` | Added | Tokenization config |
-| `cli.py` flags: `--tokenize-model`, `--tokenize-max-length` | Added | User override |
-| `run_pipeline.py`: tokenize stage + `_STAGE_MAP` entry | Added | Automated tokenization |
-| `schema.py`: `PipelineResult.tokenized_paths` | Added | Return tokenized data locations |
-| `run_pipeline.py`: `--stages` includes `tokenize` by default | Modified | End-to-end default |
-
-### Metrics / Observations
-
-- **Run 92621d209d01** (resume from cleaned): 2,056 cleaned → 1,115 train / 95 val / 846 test / 846 golden — **no synthetic, golden from test only** ✅
-- **Run e7107c3bd883** (full with tokenize): 2,056 cleaned → 1,561 train / 118 val / 377 test / 377 golden + **tokenized .arrow shards uploaded to GCS** ✅
-- **GCS artifacts**: Both `datasets/{run_id}/` (JSONL) and `tokenized/{run_id}/` (.arrow) present
-- **W&B artifacts**: 8 dataset artifacts per run + proper lineage
-- **All 183 data engineering tests pass** (including new synthetic + SWE-bench tests)
-- **Tokenization stats**: train 1115/1561 examples, avg 961/942 tokens (max_length=4096), labels masked with -100 for prompt portion
