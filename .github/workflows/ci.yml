@@ -65,16 +65,19 @@ jobs:
 
       - name: Run pytest (fast — no slow tests)
         run: |
-          uv run pytest tests/ -v --tb=short -x -n auto \
+          uv run pytest tests/ -q --tb=short -x -n auto \
             -m "not requires_credentials and not slow" \
             --cov
 
-      - name: Run pytest (slow tests — coverage upload)
+      - name: Run pytest (slow tests — coverage gate + upload)
         if: always()
         run: |
-          uv run pytest tests/ -v --tb=short -n auto \
+          # --cov builds on the fast step's .coverage; --cov-fail-under enforces
+          # the 7.3 coverage gate over the combined run. Threshold calibrated on
+          # first CI run; adjust here if the repo's true coverage differs.
+          uv run pytest tests/ -q --tb=short -n auto \
             -m "slow and not requires_credentials" \
-            --cov --cov-report=xml --cov-append
+            --cov --cov-report=xml --cov-append --cov-fail-under=75
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -116,57 +119,8 @@ jobs:
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
 
-  terraform-plan:
-    name: Terraform Plan
-    needs: terraform-validate
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    defaults:
-      run:
-        working-directory: infra/terraform
-    continue-on-error: true
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v3
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.9.0
-
-      - name: Cache Terraform plugins
-        uses: actions/cache@v4
-        with:
-          path: infra/terraform/.terraform
-          key: terraform-${{ hashFiles('infra/terraform/**/*.tf', 'infra/terraform/**/*.tfvars') }}
-
-      - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Plan
-        id: plan
-        run: |
-          terraform plan -lock=false -no-color \
-            -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" \
-            -var="gcp_region=${{ secrets.GCP_REGION }}" \
-            -var="environment=dev" \
-            -var="repository_name=${{ github.repository }}" \
-            -var="repository_owner=${{ github.repository_owner }}" \
-            2>&1 | tee plan.txt
-
-      - name: Publish Plan to CI Summary
-        if: always()
-        run: |
-          echo '## Terraform Plan' >> $GITHUB_STEP_SUMMARY
-          echo '```terraform' >> $GITHUB_STEP_SUMMARY
-          cat plan.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+  # terraform-plan lives in cd.yml (plan on PR, apply gated by the
+  # `production` environment) — kept out of CI to match repo conventions.
 
   notify:
     name: Notify
