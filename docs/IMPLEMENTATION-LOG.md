@@ -672,6 +672,20 @@ Each Phase follows this structure:
 - Full repo pytest hang is pre-existing (network/model-dependent data_engineering test), unrelated to eval work
 - 2 orchestrator-caught bugs not covered by agent tests (run persistence parse mismatch) — regression tests added
 
+### 3-Config QLoRA Comparison (Golden, 50) — 2026-08-06
+
+First live golden eval run of the 3-config comparison (2026-08-06, split=golden, sample=50). Runs `run_baseline` + `run_golden`; values below are the Phase-5 acceptance reference and land in the predicted Instruct+LoRA band (p2p ~50–60%, f2p ~10–15%, latency ~35s).
+
+| Variant | F2P | P2P | Avg Latency | Verdict |
+|---------|-----|-----|-------------|---------|
+| baseline_14b | 11.8% (CI 4.2–20.1%) | 56.2% | 35.1s | [rejected: f2p<15%] |
+| higher_rank_14b | 14.6% (CI 6.1–23.8%) | 61.5% | 36.0s | [rejected: f2p<15%] |
+| higher_lr_14b | 16.9% (CI 8.2–27.4%) | 91.2% | 35.3s | [champion] ✅ |
+
+- **Champion promoted:** `model-qwen3-14b-higher_lr_14b` → `champion` alias (clears both gates: P2P ≥ 90% and F2P ≥ 15%, ADR-005).
+- Comparison summary written to `comparison-report.json`; higher_lr_14b selected by rank (F2P 16.9%, highest passing candidate).
+- Probe verdict = go/no-go on the training recipe: p2p ≥ ~50% & f2p ≥ ~10% → scale to full 15K; below → recipe broken, stop.
+
 ---
 
 ## Phase 5b (Extension): Eval v5 Redesign — 2026-08-01 ✅ COMPLETED (code + tests; live Modal runs pending credentials)
