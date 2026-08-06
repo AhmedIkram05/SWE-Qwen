@@ -1,0 +1,11 @@
+source "/Users/ahmedikram/GitHub Repos/SWE-Qwen/.venv/bin/activate"
+ahmedikram@192 SWE-Qwen % source "/Users/ahmedikram/GitHub Repos/SWE-Qwen/.venv/bin/activate"
+(.venv) ahmedikram@192 SWE-Qwen % export EVAL_DATASET_RUN_ID=expanded-repos && python -m evaluation.cli compare --run_ids run_baseline,run_golden
+| model | variant | total | f2p_rate | f2p_95ci | p2p_rate | avg_latency | flaky_rate | note |
+|---|---|---|---|---|---|---|---|---|
+| qwen3-14b | baseline | 50 | 2.46% | 0.4%-10.5% | 28.54% | 10.04 | 0.06% | [rejected: p2p<90%] [rejected: f2p<15%] |
+| qwen3-14b | baseline_14b | 50 | 0.00% | 0.0%-7.1% | 9.76% | 34.65 | 0.00% | [proxy-champion] [rejected: p2p<90%] [rejected: f2p<15%] |
+| qwen3-14b | higher_rank_14b | 50 | 0.00% | 0.0%-7.1% | 14.44% | 42.30 | 0.00% | [rejected: p2p<90%] [rejected: f2p<15%] |
+| qwen3-14b | higher_lr_14b | 50 | 0.00% | 0.0%-7.1% | 9.76% | 35.24 | 0.00% | [rejected: p2p<90%] [rejected: f2p<15%] |
+_no variant evaluated in both runs — paired significance skipped (compare runs that share a variant name, e.g. prompt A/B on one variant)_
+est. total cost across 2 run(s): $4.33
