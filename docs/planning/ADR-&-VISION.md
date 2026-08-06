@@ -214,6 +214,20 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 
 ---
 
+### ADR-013 — CD-Owned Smoke Baseline
+
+- **Decision:** The smoke-eval baseline is a CI artifact owned by the deploy branch (main): PR runs read it read-only, and only a push to main may write it (one write per `dataset_run_id`, monotonic `max(new, prev, floor)`), stored at `gs://swe-qwen-datasets/ci/smoke_baseline.json`.
+- **Rationale:** PRs competing for the baseline caused last-write-wins churn; making it CD-owned and run-id-keyed keeps the regression comparison stable and auditable for the dataset it was calibrated on.
+
+---
+
+### ADR-014 — Absolute Quality Floor in CI Gate
+
+- **Decision:** The CI smoke gate fails on `f2p < min_f2p_threshold` (default 0.15) regardless of the stored baseline, in addition to the relative regression check.
+- **Rationale:** A model sinking below an absolute minimum is unacceptable even if no baseline regression is measured; Phase 9 refines thresholding for candidate promotion, this floor guards the champion in the meantime.
+
+---
+
 # 6. Target High-Level Platform Architecture
 
 ```

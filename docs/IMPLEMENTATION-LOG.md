@@ -912,7 +912,8 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 ## Phase 6: Inference API — Serverless vLLM on Modal — 2026-08-06
 
 > Status: code complete + local tests green + **live validation boot PASSED (4/4 preflight)** + **DEPLOYED + integration PASSED (4/4 preflight vs prod URL)**.
-> 6.1 config sweep + 6.8 endpoint benchmark DEFERRED by user decision (spend not approved this pass; re-runnable via `python -m inference.benchmark sweep|benchmark`).
+> 6.8 endpoint benchmark: RUN ATTEMPTED (user-approved) → **ABORTED — exposed real concurrency bug** (sync vLLM engine not thread-safe under 8→16-way load; single requests fast). Fix (AsyncLLM) deferred — needs spend approval.
+> 6.1 config sweep: DEFERRED by user decision (spend not approved; re-runnable via `python -m inference.benchmark sweep`).
 
 ### Deviation Log
 
@@ -928,6 +929,7 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 | Modal 1.5.3 API surface | `@modal.build()` / `allow_concurrent_inputs` / `@modal.cls` | `Image.run_function(_build_smoke, gpu=...)` / `@modal.concurrent(max_inputs=16)` / `@app.cls` | Removed/changed in installed SDK (verified via hasattr + live InvalidError) | Medium |
 | Serving image deps | plan list | `pydantic-settings>=2.7.0` added | ServeConfig imports it at module level; vllm 0.26.0 does not pull it transitively | Low |
 | pyproject/CI wrap | in-plan | already in HEAD via out-of-session commits 07e249d (serve retarget), 17e0e4d (artifacts gitignore), 66c0234 (CI inference paths) | User committed outside session | Low |
+| 6.8 engine concurrency | `VLLMEngine` sync `LLM.generate()` from FastAPI sync-route threadpool | **Concurrency bug found in live benchmark**: single requests ~480ms, but 8→16-way concurrency serializes to ~4.9s each and a subset hangs forever | vLLM sync `LLM` is not thread-safe under concurrent `generate()` calls — requests serialize and stall; client SDK (timeout 600s × 2 retries) eventually times out | High (6.8 aborted). **FIXED in code**: `VLLMEngine` → vLLM `AsyncLLM` (async stream API, same singleton/lock pattern), `_stream_gen` + `chat_completions` route → async, `_build_smoke`/`_sweep_config` → async (`asyncio.gather` concurrency check, `asyncio.run(_sweep_config.remote(...))`). Local gates green: 462 tests passed / 1 skipped, ruff + mypy clean, 2 new stream-path tests (engine_error 500 frames + RuntimeError→"cancelled" guard). Redeploy + re-verify deferred pending spend approval |
 
 ### Decisions Made
 
@@ -950,6 +952,7 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 | Preflight step 2 404 | first preflight run | Yes | OpenAI SDK does not append `/v1` → `base_url=url.rstrip("/") + "/v1"` | ~10 min |
 | All variant requests 500 | live boot preflight step 3 | Yes | Branch-scoped `EvalConfig` import in `resolve_adapter_path` | ~30 min |
 | Modal 303 attempt-token retry protocol | requests during cold boot returned HTTP 303 with `__modal_attempt_token` JWT | Worked around | `curl -L` follows; OpenAI SDK does not auto-retry 303 → first request after scale-to-zero needs client retry (documented) | n/a |
+| 6.8 benchmark hangs under load | 6.8 run vs deployed endpoint: ramp 1 fast (~480ms), ramp 8/16 → ~4.9s each, 7 calls stuck "Running", client killed at ~35 min | Yes (code; redeploy pending) | Fix = vLLM `AsyncLLM` + async route (sync `LLM.generate()` not thread-safe) — implemented locally, all gates green (462 passed/1 skipped, ruff, mypy); redeploy + small-ramp re-verify deferred until spend approved (budget 93% of $35 cycle) | ~1h + 1h fix |
 
 ### Technical Details (For Future Phases)
 
@@ -980,6 +983,7 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 - **Deployed endpoint auth: PUBLIC** — dummy bearer token accepted (same as serve-mode dev URL). D7 verdict: Modal 1.5.3 `@modal.asgi_app` web endpoints do not enforce auth with this setup; any deployed endpoint is effectively public (accept for internal API; revisit with Modal web-token auth or a proxy if the endpoint is exposed beyond the workspace)
 - GPU spend for Phase 6 validation + deploy: ~$2.40 total (FP8 discovery + debug loop + validation boots + deploy boot, A10G $1/hr)
 - 6.1 sweep / 6.8 benchmark deferred: TTFB p50 < 500ms gate, W&B serve/* metrics (serve/ttfb_p50_ms etc.), cold-start measurement, and SERVING-BENCHMARK-REPORT.md all still pending user go-ahead (~$1-1.5)
+- **6.8 benchmark run (2026-08-06 ~18:25-19:00): ABORTED — real concurrency bug found.** Data: ramp 1 (10 req, 1 worker) ~480ms each (under 500ms gate); ramp 8 (80 req, 8 workers) ~4.9s each (serialized); ramp 16 (160 req) ~4.9s + subset hangs (7 calls stuck, never execute); server-side only 89× "200 OK" total in `modal app logs`. W&B run NOT created, SERVING-BENCHMARK-REPORT.md NOT written (client killed before completion). Root cause: sync vLLM `LLM.generate()` not thread-safe under concurrent FastAPI threadpool calls. Fix deferred: `AsyncLLM` + async route (or concurrency-1 serialization), verify with small ramp (~$0.10-0.30, needs approval). DoD gate status under load: TTFB p50 < 500ms **UNVERIFIED/FAILS at concurrency** — single-request ~480ms passes.
 - Warm base chat: 653.6 ms for 64 tokens (preliminary, pre-benchmark); engine throughput "output 17.74 toks/s" during debug (cold-ish)
 - AWQ decision validated: KV cache 7.16 GiB in use vs FP8's 1.05 GiB
 - torch.compile cache: 124s → 5.85s after volume cache warm (Dynamo bytecode transform)
@@ -989,50 +993,74 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 
 ---
 
-## Phase 7: CI/CD Integration with Quality Gates — YYYY-MM-DD
+## Phase 7: CI/CD Integration with Quality Gates — 2026-08-06
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 | ------ | --------- | -------- | -------- | -------- |
-| 7.1 | GitHub OIDC for GCP | | | |
-| 7.2 | GitHub OIDC for Modal | | | |
-| 7.3 | CI workflow (lint/type/test) | | | |
-| 7.4 | Eval workflow (F2P gate) | | | |
-| 7.5 | Quality gate logic | | | |
-| 7.6 | CD workflow (Terraform + deploy) | | | |
-| 7.7 | Secrets management | | | |
-| 7.8 | E2E pipeline test | | | |
-| 7.9 | CI/CD documentation | | | |
+| 7.1 | GitHub OIDC for GCP (WIF pool/provider/IAM) | Already done — `terraform-plan` job + `infra/terraform/modules/iam` WIF provider bind `roles/storage.admin` to the GitHub Actions SA | Implemented in prior scaffold | CI has GCS read/write with zero new secrets |
+| 7.2 | GitHub OIDC for Modal | Modal has no GitHub OIDC → scoped-secret route: `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET` passed as env to `modal run`/`deploy` | Modal lacks OIDC support | One token pair added to GH secrets; no keyless auth available |
+| 7.3 | CI workflow (lint/type/test) | Ruff + mypy + pytest already in `ci.yml`; added `--cov-fail-under=75` to the slow-pytest step | Coverage gate was the missing part of 7.3 | CI now blocks PRs under 75% combined coverage |
+| 7.4 | Eval workflow (F2P gate) | NEW `.github/workflows/eval.yml`: smoke gate (champion `higher_lr_14b`, seed-42×20@8192 tokens) on PRs touching model/eval/config code; `paths:` filter keeps docs/data PRs off the GPU | Champion-only + paths filter keep cost to ~$0.10–0.40/run | Per-PR model-performance gate exists |
+| 7.5 | Quality gate logic | Rewrote `_smoke_gate` in `evaluation/cli.py`: baseline now CD-owned in GCS (`gs://swe-qwen-datasets/ci/smoke_baseline.json`), schema `{"dataset_run_id", "rates"}`; PRs read-only, push→main `--update-baseline`; fails on drop >5% **or** `rate < min_f2p_threshold` (0.15) | User decision: literal absolute floor now, refinement in Phase 9 | ADR-013/014 (below); Phase 9 builds candidate gating on it |
+| 7.6 | CD workflow (Terraform + deploy) | NEW `.github/workflows/cd.yml` (convention from stocklens/laad/w3c-etl): `terraform-plan` runs on push+PR+dispatch → uploads `tfplan-${{ github.sha }}` artifact + job summary; `terraform-apply` gated by `environment: production` (manual approval) applies the reviewed plan on merge-to-main; Modal deploy is `workflow_dispatch`-only | Apply now requires explicit approval via GitHub Environments (plan reviewed in job summary first); 6.8 AsyncLLM/auth fix is code-complete but not redeployed (spend approval) | Infra auto-deploys; model deploy stays manual until 6.8 |
+| 7.7 | Secrets management | Added `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `WANDB_API_KEY`, `HF_TOKEN`; existing `GCP_WIF_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GCP_PROJECT_ID`, `GCP_REGION`, `CODECOV_TOKEN` stay | — | No long-lived cloud/Modal secrets in repo |
+| 7.8 | E2E pipeline test | NOT YET EXECUTED — requires repo Admin for branch protection + first main push to bootstrap GCS baseline | Blocked on Admin rights + merge approval | Runbook in `docs/planning/PHASE-7-CI-CD-PLAN.md` §6 |
+| 7.9 | CI/CD documentation | `docs/planning/PHASE-7-CI-CD-PLAN.md` written; ADR-013/014 added; this Phase 7 section filled | — | Reproducible architecture + E2E runbook |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| Gate = champion regression surveillance + literal absolute floor | Per-PR merge gate | Promoting Phase 9 candidate gating early | User decision: one-liner floor (`rate < min_f2p_threshold`) now; Phase 9 owns candidate promotion |
+| Baseline is CD-owned (GCS), PRs read-only | Local `data/eval_results/smoke_baseline.json` is gitignored | Ship baseline in-repo; let PRs write | Write-once-per-dataset semantics kill the ratchet + last-write-wins; GCS is WIF-accessible |
+| Baseline schema `{"dataset_run_id", "rates"}` + stale-run-id re-bootstrap | Sampling is deterministic per golden.jsonl; dataset regen changes the subset | Unkeyed baseline | Compare apples-to-apples; re-bootstrap on a new dataset run instead of silently wrong deltas |
+| Monotonic writes `rates[key] = max(new, prev, floor)` | Repeated near-threshold passes decayed the old baseline | Recompute-from-golden | Stop ratchet erosion |
+| smoke `tier_max_new_tokens` 2048 → 8192 | 2048 is the documented truncation regime for 14B out-loud reasoning | Calibrate `EVAL_MIN_F2P_THRESHOLD` down | Removes the truncation confounder from the gate that guards the 14B champion; +$0.20–0.40/run |
+| W&B stays LoRA artifact source | Harness resolves LoRAs via W&B artifacts; GCS champion mirror deferred | Rewrite artifact resolution to GCS | Zero eval-runner changes; `init-wandb` head job re-pins the project (auto-deleted once) |
+| Modal deploy manual until 6.8 | Deployed endpoint is public (no auth) + sync vLLM `LLM.generate()` not thread-safe | Automate deploy on push | Won't ship a known-broken endpoint automated; hard dependency on Phase 6.8 |
+| No auto-retrain on new data, ever | User explicit non-goal | Automated retrain trigger | Training/promotion remain human-triggered permanently; Phase 7 ships no retrain path |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
+| 7.8 E2E requires repo Admin (branch protection) | Planning | Pending | Manual step: Settings→Branches→main require lint-and-test, eval-gate, terraform-validate | — |
+| GitHub Actions SA lacks terraform control-plane roles (iam.securityAdmin, iam.workloadIdentityPoolAdmin, secretmanager.admin, artifactregistry.admin, serviceusage.apiUsageAdmin) — plan/apply would 403 outside storage | CI/CD audit | Mitigated in code; one-time manual grant remains | Added the 5 roles to `infra/terraform/modules/iam/main.tf` (github_actions blocks); bootstrap grant documented in PHASE-7-CI-CD-PLAN.md §6 step 3a (`gcloud projects add-iam-policy-binding ... --role=roles/owner` one-shot, since Terraform cannot grant its own first grant) | — |
+| `HF_TOKEN` GitHub secret absent (only `deploy-modal` consumes it; Modal-side artifacts use its own `hf-secret`) | CI/CD audit | Pending (manual) | Add `HF_TOKEN` repo secret before first workflow_dispatch deploy | — |
+| Smoke floor may exceed champion's real smoke-20 F2P | Review | Pending | E2E calibrates `EVAL_MIN_F2P_THRESHOLD` to measured−~0.05 before enabling branch protection | — |
+| Baseline not in GCS until first main push | Planning | By design | PR with no baseline passes gate only when it re-bootstraps via push; first main push writes bootstrap baseline | — |
+| `eval --mode smoke` invalid (typer subcommand) | Plan review | Resolved | `uv run eval run --mode smoke` — `run` is the subcommand | Small |
+| `modal deploy inference/modal_serve.py` invalid on Modal 1.5.3 | Plan review | Resolved | `uv run modal deploy -m inference.modal_serve` | Small |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| Dataset run-id threading | `DATASET_RUN_ID` defined once at workflow level (`expanded-repos`); eval.yml sets `EVAL_DATASET_RUN_ID=${{ env.DATASET_RUN_ID }}` → `EvalConfig.dataset_run_id` via `env_prefix="EVAL_"` | Golden path + baseline keying derive from one source of truth |
+| Baseline GCS layout | `gs://swe-qwen-datasets/ci/smoke_baseline.json` lives separate from results at `…/eval/{run_id}/`; results upload excludes `**/smoke_baseline.json` | Baseline must not be clobbered by artifact uploads |
+| Eval smoke cost | Champion-only run, seed-42×20 examples, 8192 max tokens ≈ $0.10–0.40 (A10G $1/hr + vCPU), Modal fn < 300 min, workflow timeout 240 | Cost-conscious per repo principles; guards CI against runaway GPU spend |
+| E2E measurement before protection | Measure champion on the exact smoke slice (seed-42×20@8192) and set `EVAL_MIN_F2P_THRESHOLD` if below 0.15 | Prevents a self-bricked gate on `min_f2p_threshold=0.15` |
+| W&B pin | `scripts/init_wandb.py --entity 2571642-university-of-dundee` head job before eval job (project `swe-qwen` auto-deleted once) | Artifact resolution fails if W&B project vanishes |
+| ADR-009 split | Phase 7 supplies the model-performance clause via champion-regression + absolute floor; the candidate-promotion clause (new models must pass thresholds) stays Phase 9 | Do not overclaim ADR-009 in Phase 7 |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| `--update-baseline` flag on `eval run` | Added | Separates read-only PR gate from CD-owned baseline writes |
+| `smoke_baseline.json` schema + location | Modified | Flat dict → `{"dataset_run_id", "rates"}`; local → GCS |
+| `_smoke_gate` signature | Modified | `(eval_run, config, update_baseline=False)` — backward compatible |
+| `tier_max_new_tokens["smoke"]` | Modified | 2048 → 8192 to remove truncation confounder |
+| `.github/workflows/eval.yml`, `cd.yml` | Added | One workflow per concern (modularity) |
+| Auto-retrain trigger | Removed (never planned) | Explicit user non-goal |
 
 ### Metrics / Observations
 
--
--
+- 32/32 tests in `tests/test_eval_review_fixes.py` pass, ruff/mypy clean after gate rewrite (incl. malformed-rates regression test).
+- 936 pre-existing passing tests baseline; full-suite pytest hang is pre-existing (network/model-dependent data_engineering test).
+- Eval smoke run ≈ the same cost as the Phase 5 smoke gate (~$0.10/run); E2E (7.8) still pending.
 
 ---
 
