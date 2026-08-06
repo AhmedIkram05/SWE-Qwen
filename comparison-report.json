@@ -4,25 +4,25 @@
   "golden_path": "/Users/ahmedikram/GitHub Repos/SWE-Qwen/data/expanded-repos/swebench/golden.jsonl",
   "variants": {
     "baseline_14b": {
-      "wandb_run_id": "escalztl",
+      "wandb_run_id": "iwhhmqv0",
       "artifact_name": "model-qwen3-14b-baseline_14b",
       "mean_f2p": 0.0,
-      "count": 118,
-      "train_loss": 0.9328
+      "count": 2313,
+      "train_loss": 0.6472
     },
     "higher_rank_14b": {
-      "wandb_run_id": "4lllxds8",
+      "wandb_run_id": "uuojspsg",
       "artifact_name": "model-qwen3-14b-higher_rank_14b",
-      "mean_f2p": 0.5225,
-      "count": 118,
-      "train_loss": 0.9008
+      "mean_f2p": 0.5589,
+      "count": 2313,
+      "train_loss": 0.627
     },
     "higher_lr_14b": {
-      "wandb_run_id": "30g522hk",
+      "wandb_run_id": "7rc48yq7",
       "artifact_name": "model-qwen3-14b-higher_lr_14b",
       "mean_f2p": 1.0,
-      "count": 118,
-      "train_loss": 0.8717
+      "count": 2313,
+      "train_loss": 0.611
     }
   },
   "failed_variants": {},
