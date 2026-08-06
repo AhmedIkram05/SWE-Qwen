@@ -584,6 +584,10 @@ class TestApplyPatch:
         assert result.method_used == "gnu_patch_fuzz"
         assert "line-new" in (repo / "drift.py").read_text()
 
+    @pytest.mark.skipif(
+        _gnu_patch_supported(),
+        reason="GNU patch present: git diff lands via gnu patch, not unidiff",
+    )
     def test_falls_back_to_unidiff_outside_git_repo(self, tmp_path: Path) -> None:
         workdir = tmp_path / "plain"
         workdir.mkdir()

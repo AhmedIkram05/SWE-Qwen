@@ -1204,8 +1204,8 @@ class EvaluationHarness:
                         _fallback_jobs,
                         self.config,
                     )
-                    for example, result in zip(missing, _fallback_results):  # noqa: B905
-                        swebench_results[example.instance_id] = result
+                    for example, fallback_result in zip(missing, _fallback_results):  # noqa: B905
+                        swebench_results[example.instance_id] = fallback_result
 
                 for example in group:
                     result = swebench_results.get(example.instance_id)

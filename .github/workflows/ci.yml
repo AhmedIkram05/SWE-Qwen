@@ -55,13 +55,13 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run Ruff (lint)
-        run: uv run ruff check data_engineering/ training/ tests/
+        run: uv run ruff check data_engineering/ training/ tests/ evaluation/
 
       - name: Run Ruff (format check)
-        run: uv run ruff format --check data_engineering/ training/ tests/
+        run: uv run ruff format --check data_engineering/ training/ tests/ evaluation/
 
       - name: Run MyPy
-        run: uv run mypy data_engineering/ training/
+        run: uv run mypy data_engineering/ training/ evaluation/
 
       - name: Run pytest (fast — no slow tests)
         run: |

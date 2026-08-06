@@ -13,6 +13,7 @@ import json
 import logging
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -294,7 +295,7 @@ def revalidate_proxy_champion(
     )
 
 
-def _clear_champion_alias(api, config: EvalConfig) -> None:
+def _clear_champion_alias(api: Any, config: EvalConfig) -> None:
     """Remove the ``champion`` alias from any artifact currently holding it."""
     try:
         collection = api.artifact_collection("eval-champion")

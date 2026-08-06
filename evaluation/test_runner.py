@@ -1000,7 +1000,7 @@ def _load_baseline_cache(instance_id: str, base_sha: str) -> dict[str, Any] | No
         if data.get("version") != _BASELINE_CACHE_VERSION or data.get("base_sha") != base_sha:
             logger.debug("baseline cache stale for %s (version/base_sha mismatch)", instance_id)
             return None
-        return data  # noqa: TRY300
+        return data  # type: ignore[no-any-return]  # noqa: TRY300
     except (OSError, json.JSONDecodeError):
         logger.warning("corrupt baseline cache for %s", instance_id)
         return None
@@ -1091,7 +1091,7 @@ def _swebench_image_tag_exists(tag: str) -> bool:
     url = f"https://hub.docker.com/v2/repositories/swebench/sweb.eval.x86_64.{tag}/tags/latest"
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310
-            return resp.status == 200  # noqa: PLR2004
+            return resp.status == 200  # type: ignore[no-any-return]  # noqa: PLR2004
     except HTTPError as e:
         # A 404 is the only definitive "image does not exist". Docker Hub
         # rate-limits anonymous API calls (429) and flakes on 5xx — failing
@@ -1613,7 +1613,7 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
         _install_repo(repo_dir)
     except (subprocess.TimeoutExpired, RuntimeError) as exc:
         logger.error("repo preparation failed for %s: %s", repo, exc, exc_info=True)
-        error_result = {
+        error_result: dict[str, object] = {
             "repo": repo,
             "base_sha": base_sha,
             "error": str(exc),

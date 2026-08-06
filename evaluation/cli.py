@@ -329,7 +329,7 @@ def _patch_harness_backend(*, ollama_model: str, ollama_url: str) -> None:
     def _run_tests(example, generated_patch, config):
         return run_tests_local(example, generated_patch, config)
 
-    harness_mod._generate_patches = _gen_patches  # type: ignore[attr-defined]
+    harness_mod._generate_patches = _gen_patches  # type: ignore[assignment]
     harness_mod._run_tests = _run_tests  # type: ignore[attr-defined]
     harness_mod._run_tests_batch_modal = _raise_modal_disabled  # type: ignore[attr-defined]
 
