@@ -129,7 +129,7 @@ def extract_golden(
     else:
         source = splits.test
 
-    golden: list[IssueRecord] = []
+    golden = []
     for rec in source:
         if rec.test_files_changed and _has_f2p_keywords(rec):
             golden.append(rec)

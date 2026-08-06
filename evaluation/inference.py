@@ -68,7 +68,7 @@ def _no_think_wrap(hf_id: str, prompt: str) -> str:
         from transformers import AutoTokenizer
 
         _TOKENIZER_CACHE[hf_id] = AutoTokenizer.from_pretrained(hf_id)
-    return _TOKENIZER_CACHE[hf_id].apply_chat_template(
+    return _TOKENIZER_CACHE[hf_id].apply_chat_template(  # type: ignore[no-any-return]
         [{"role": "user", "content": prompt}],
         tokenize=False,
         add_generation_prompt=True,
@@ -232,7 +232,7 @@ def _fetch_raw_file(repo: str, base_sha: str, path: str) -> str | None:
     url = f"https://raw.githubusercontent.com/{repo}/{base_sha}/{path}"
     try:
         with urllib.request.urlopen(url, timeout=20) as resp:
-            return resp.read().decode("utf-8", errors="replace")
+            return resp.read().decode("utf-8", errors="replace")  # type: ignore[no-any-return]
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
         return None
 
@@ -581,7 +581,7 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
     config = EvalConfig()
     gpu = _GPU_MAP.get(config.inference_gpu, "A100-80GB")
     fn = _get_inference_fn(gpu)
-    return fn.remote(
+    return fn.remote(  # type: ignore[no-any-return]
         model_name,
         variant,
         prompt_template,
