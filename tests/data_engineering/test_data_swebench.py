@@ -72,7 +72,7 @@ class TestSWEBenchConstants:
     """Tests for SWE-bench constants."""
 
     def test_python_repos_count(self):
-        assert len(SWE_BENCH_PYTHON_REPOS) == 74
+        assert len(SWE_BENCH_PYTHON_REPOS) == 80
 
     def test_python_repos_contains_expected(self):
         assert "django/django" in SWE_BENCH_PYTHON_REPOS
@@ -277,10 +277,10 @@ class TestFetchRepoStats:
         from data_engineering.config import DataPipelineConfig
         from data_engineering.swebench_ingest import _fetch_repo_stats
 
-        # Mock google.cloud.bigquery before function imports it
-        mock_bigquery = MagicMock()
+        # Patch the real Client class: patch.dict on sys.modules is ignored
+        # because `from google.cloud import bigquery` resolves via the parent
+        # package attribute once the real module has been imported.
         mock_client = MagicMock()
-        mock_bigquery.Client.return_value = mock_client
         mock_rows = MagicMock()
         mock_rows.__iter__.return_value = iter(
             [
@@ -289,7 +289,7 @@ class TestFetchRepoStats:
         )
         mock_client.query.return_value.result.return_value = mock_rows
 
-        with patch.dict("sys.modules", {"google.cloud.bigquery": mock_bigquery}):
+        with patch("google.cloud.bigquery.Client", return_value=mock_client):
             config = DataPipelineConfig(bigquery_project="test-project")
             result = _fetch_repo_stats(config, {"django/django"})
             assert "django/django" in result

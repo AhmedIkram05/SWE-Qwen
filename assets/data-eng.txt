@@ -1,0 +1,225 @@
+22:22:39 [WARNING] data_engineering.swebench_ingest: unidiff parse failed, returning empty hunks
+⠸ Ingesting SWE-bench dataset... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0/4 0:00:3222:22:39 [WARNING] data_engineering.swebench_ingest: unidiff parse failed, returning empty hunks
+22:22:39 [WARNING] data_engineering.swebench_ingest: unidiff parse failed, returning empty hunks
+22:22:39 [WARNING] data_engineering.swebench_ingest: unidiff parse failed, returning empty hunks
+22:22:39 [WARNING] data_engineering.swebench_ingest: unidiff parse failed, returning empty hunks
+⠋ Ingesting SWE-bench dataset... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0/4 0:00:3322:22:41 [WARNING] data_engineering.swebench_ingest: Skipped 469 examples with empty patches
+22:22:41 [INFO] data_engineering.swebench_ingest: Total SWE-bench records ingested: 20477
+⠼ Ingesting SWE-bench dataset... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0/4 0:03:3522:25:42 [WARNING] root: GCS save failed for stage raw (non-fatal): Timeout of 120.0s exceeded, last exception: ('Connection aborted.', BrokenPipeError(32, 'Broken pipe'))
+⠴ Ingesting SWE-bench dataset... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0/4 0:03:4022:25:47 [INFO] data_engineering.run_pipeline: SWE-bench raw records: 20477
+⠼ Validating records... ━━━━━━━━━━╺━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/4 0:03:5522:26:02 [WARNING] data_engineering.validate: Validation: 20470 valid, 7 errors across 20477 records
+⠦ Validating records... ━━━━━━━━━━╺━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/4 0:06:0922:28:16 [INFO] root: Uploaded 20470 records to gs://swe-qwen-datasets/datasets/expanded-repos/swebench/validated.jsonl
+⠼ Validating records... ━━━━━━━━━━╺━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/4 0:06:1122:28:18 [INFO] root: Uploaded 7 records to gs://swe-qwen-datasets/datasets/expanded-repos/swebench/validation_errors.jsonl
+22:28:18 [INFO] data_engineering.run_pipeline: SWE-bench validated records: 20470
+⠋ Cleaning records... ━━━━━━━━━━━━━━━━━━━━╺━━━━━━━━━━━━━━━━━━━ 2/4 0:06:5322:29:01 [INFO] root: Uploaded 17456 records to gs://swe-qwen-datasets/datasets/expanded-repos/swebench/cleaned.jsonl
+⠼ Cleaning records... ━━━━━━━━━━━━━━━━━━━━╺━━━━━━━━━━━━━━━━━━━ 2/4 0:06:5322:29:01 [INFO] data_engineering.run_pipeline: SWE-bench cleaned records: 17456
+  Complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4/4 0:06:53
+wandb:
+wandb: Run history:
+wandb:          clean_removed_binary ▁
+wandb:      clean_removed_empty_body ▁
+wandb:   clean_removed_no_f2p_signal ▁
+wandb:   clean_removed_no_test_files ▁
+wandb:      clean_removed_non_python ▁
+wandb: clean_removed_patch_too_large ▁
+wandb:         dedup_content_removed ▁
+wandb:           dedup_exact_removed ▁
+wandb:           stage_cleaned_count ▁
+wandb:               stage_raw_count ▁
+wandb:                            +2 ...
+wandb:
+wandb: Run summary:
+wandb:          clean_removed_binary 12
+wandb:      clean_removed_empty_body 0
+wandb:   clean_removed_no_f2p_signal 0
+wandb:   clean_removed_no_test_files 0
+wandb:      clean_removed_non_python 1212
+wandb: clean_removed_patch_too_large 1149
+wandb:         dedup_content_removed 258
+wandb:           dedup_exact_removed 468
+wandb:           stage_cleaned_count 17456
+wandb:               stage_raw_count 20477
+wandb:                            +2 ...
+wandb:
+wandb: 🚀 View run run-20260805-2221-expand at: https://wandb.ai/2571642-university-of-dundee/swe-qwen-data/runs/2t3a4j3m
+wandb: ⭐️ View project at: https://wandb.ai/2571642-university-of-dundee/swe-qwen-data
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./wandb/run-20260805_222147-2t3a4j3m/logs
+22:29:10 [INFO] data_engineering.split: Split: 37 train / 5 val / 4 test repos → 15011 / 1556 / 889 records
+22:29:10 [INFO] data_engineering.split: Golden set: 2313 examples from official SWE-bench F2P splits (verified+test+dev, min_target=200)
+22:29:10 [INFO] data_engineering.golden: Golden set built: 2313 records from 'verified+test+dev' split
+22:29:11 [INFO] data_engineering.run_pipeline: Saved 15011 records to data/expanded-repos/swebench/train.jsonl
+22:29:11 [INFO] data_engineering.run_pipeline: Saved 1556 records to data/expanded-repos/swebench/val.jsonl
+22:29:11 [INFO] data_engineering.run_pipeline: Saved 889 records to data/expanded-repos/swebench/test.jsonl
+22:29:11 [INFO] data_engineering.run_pipeline: Saved 2313 records to data/expanded-repos/swebench/golden.jsonl
+wandb: Currently logged in as: 2571642 (2571642-university-of-dundee) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.28.1
+wandb: Run data is saved locally in /Users/ahmedikram/GitHub Repos/SWE-Qwen/wandb/run-20260805_222946-2vc93152
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run run-20260805-2229-expand
+wandb: ⭐️ View project at https://wandb.ai/2571642-university-of-dundee/swe-qwen-data
+wandb: 🚀 View run at https://wandb.ai/2571642-university-of-dundee/swe-qwen-data/runs/2vc93152
+wandb: WARNING Artifact "dataset-raw" already exists with the same content. No new version will be created.
+22:29:54 [INFO] data_engineering.version: W&B artifact 'dataset-raw:v8' (raw): 20477 records
+22:30:00 [INFO] data_engineering.version: W&B artifact 'dataset-validated:v8' (validated): 20470 records
+22:30:03 [INFO] data_engineering.version: W&B artifact 'dataset-cleaned:v8' (cleaned): 17456 records
+22:30:06 [INFO] data_engineering.version: W&B artifact 'dataset-train:v23' (train): 15011 records
+22:30:08 [INFO] data_engineering.version: W&B artifact 'dataset-val:v18' (val): 1556 records
+22:30:10 [INFO] data_engineering.version: W&B artifact 'dataset-test:v14' (test): 889 records
+22:30:12 [INFO] data_engineering.version: W&B artifact 'dataset-golden:v23' (golden): 2313 records
+22:30:13 [INFO] data_engineering.version: W&B artifact 'dataset-validation_errors:v2' (validation_errors): 7 records
+wandb: 🚀 View run run-20260805-2229-expand at: https://wandb.ai/2571642-university-of-dundee/swe-qwen-data/runs/2vc93152
+wandb: ⭐️ View project at: https://wandb.ai/2571642-university-of-dundee/swe-qwen-data
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./wandb/run-20260805_222946-2vc93152/logs
+22:36:57 [INFO] data_engineering.archive: GCS upload complete: 10 files under gs://swe-qwen-datasets/datasets/expanded-repos
+22:37:00 [INFO] data_engineering.tokenize: Tokenizing for model qwen3-14b (hf_id=Qwen/Qwen3-14B, max_length=8192)
+22:37:00 [INFO] httpx: HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+22:37:00 [INFO] httpx: HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/config.json "HTTP/1.1 200 OK"
+22:37:00 [INFO] httpx: HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+22:37:00 [INFO] httpx: HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/tokenizer_config.json "HTTP/1.1 200 OK"
+22:37:00 [INFO] httpx: HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-14B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+22:37:00 [INFO] httpx: HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-14B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+22:37:01 [INFO] httpx: HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-14B "HTTP/1.1 200 OK"
+22:37:01 [INFO] data_engineering.tokenize: Loaded 15011 records from data/expanded-repos/swebench/train.jsonl
+00:59:03 [WARNING] data_engineering.tokenize: Tokenization: dropped 178/15011 records in split 'train' (prompt exceeds max_length=8192)
+00:59:36 [INFO] data_engineering.tokenize: Tokenized 'train' split: 15011 records → 14833 examples (max_length=8192, errors=0)
+00:59:44 [INFO] data_engineering.tokenize: Loaded 1556 records from data/expanded-repos/swebench/val.jsonl
+01:10:26 [WARNING] data_engineering.tokenize: Tokenization: dropped 6/1556 records in split 'val' (prompt exceeds max_length=8192)
+01:10:29 [INFO] data_engineering.tokenize: Tokenized 'val' split: 1556 records → 1550 examples (max_length=8192, errors=0)
+01:10:29 [INFO] data_engineering.tokenize: Loaded 889 records from data/expanded-repos/swebench/test.jsonl
+01:16:55 [WARNING] data_engineering.tokenize: Tokenization: dropped 4/889 records in split 'test' (prompt exceeds max_length=8192)
+01:16:57 [INFO] data_engineering.tokenize: Tokenized 'test' split: 889 records → 885 examples (max_length=8192, errors=0)
+01:16:57 [INFO] data_engineering.tokenize: Loaded 2313 records from data/expanded-repos/swebench/golden.jsonl
+01:31:50 [WARNING] data_engineering.tokenize: Tokenization: dropped 9/2313 records in split 'golden' (prompt exceeds max_length=8192)
+01:31:54 [INFO] data_engineering.tokenize: Tokenized 'golden' split: 2313 records → 2304 examples (max_length=8192, errors=0)
+Saving the dataset (2/2 shards): 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████| 14833/14833 [00:02<00:00, 5223.25 examples/s]
+Saving the dataset (1/1 shards): 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1550/1550 [00:00<00:00, 7208.27 examples/s]
+Saving the dataset (1/1 shards): 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 885/885 [00:00<00:00, 16313.08 examples/s]
+Saving the dataset (1/1 shards): 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2304/2304 [00:00<00:00, 21835.76 examples/s]
+01:31:58 [INFO] data_engineering.tokenize: Saved tokenized DatasetDict to data/expanded-repos_tokenized with splits: {'train': 14833, 'val': 1550, 'test': 885, 'golden': 2304}
+Saving the dataset (2/2 shards): 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████| 14833/14833 [00:00<00:00, 31838.45 examples/s]
+Saving the dataset (1/1 shards): 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1550/1550 [00:00<00:00, 36123.04 examples/s]
+Saving the dataset (1/1 shards): 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 885/885 [00:00<00:00, 29066.21 examples/s]
+Saving the dataset (1/1 shards): 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2304/2304 [00:00<00:00, 14829.03 examples/s]
+01:32:03 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/dataset_dict.json to GCS
+01:32:03 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/test/state.json to GCS
+01:32:03 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/test/dataset_info.json to GCS
+01:32:08 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/test/data-00000-of-00001.arrow to GCS
+01:32:08 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/golden/state.json to GCS
+01:32:09 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/golden/dataset_info.json to GCS
+01:32:23 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/golden/data-00000-of-00001.arrow to GCS
+01:32:23 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/train/state.json to GCS
+01:32:23 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/train/dataset_info.json to GCS
+01:33:23 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/train/data-00000-of-00002.arrow to GCS
+01:34:13 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/train/data-00001-of-00002.arrow to GCS
+01:34:14 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/val/state.json to GCS
+01:34:14 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/val/dataset_info.json to GCS
+01:34:23 [INFO] data_engineering.tokenize: Uploaded tokenized/expanded-repos/val/data-00000-of-00001.arrow to GCS
+01:34:23 [INFO] data_engineering.tokenize: Uploaded tokenized data to GCS: {'dataset': 'gs://swe-qwen-datasets/tokenized/tokenized/swe-qwen-datasets/expanded-repos'}
+01:34:23 [INFO] data_engineering.run_pipeline: Tokenized dataset saved to data/expanded-repos_tokenized
+
+Pipeline Complete!
+   Run expanded
+     Summary
+┏━━━━━━━━┳━━━━━━━┓
+┃ Split  ┃ Count ┃
+┡━━━━━━━━╇━━━━━━━┩
+│ Train  │ 15011 │
+│ Val    │  1556 │
+│ Test   │   889 │
+│ Golden │  2313 │
+│ Total  │ 17456 │
+└────────┴───────┘
+{
+  "run_id": "expanded-repos",
+  "manifest_hash": "44136fa355b3678a",
+  "stats": {
+    "total_raw": 20477,
+    "total_validated": 20470,
+    "total_validation_errors": 7,
+    "total_cleaned": 17456,
+    "dedup_stats": {
+      "total_input": 0,
+      "exact_duplicates_removed": 0,
+      "content_duplicates_removed": 0,
+      "unique_output": 0
+    },
+    "clean_stats": {
+      "total_input": 0,
+      "removed_no_test_files": 0,
+      "removed_patch_too_large": 0,
+      "removed_binary": 0,
+      "removed_non_python": 0,
+      "removed_empty_body": 0,
+      "removed_no_f2p_signal": 0,
+      "total_removed": 0,
+      "total_output": 0,
+      "warnings_non_python": []
+    },
+    "train_count": 15011,
+    "val_count": 1556,
+    "test_count": 889,
+    "golden_count": 2313,
+    "total_examples": 17456,
+    "repo_count": 1,
+    "repo_results": [
+      {
+        "repo_id": "swebench",
+        "raw_count": 20477,
+        "validated_count": 20470,
+        "cleaned_count": 17456,
+        "train_count": 0,
+        "val_count": 0,
+        "test_count": 0,
+        "golden_count": 0,
+        "error": null
+      }
+    ],
+    "gcs_paths": {
+      "raw": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/raw.jsonl",
+      "validated": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/validated.jsonl",
+      "cleaned": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/cleaned.jsonl",
+      "train": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/train.jsonl",
+      "val": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/val.jsonl",
+      "test": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/test.jsonl",
+      "golden": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/golden.jsonl",
+      "validation_errors": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/validation_errors.jsonl",
+      "manifest": "gs://swe-qwen-datasets/datasets/expanded-repos/manifest.json",
+      "dataset_card": "gs://swe-qwen-datasets/datasets/expanded-repos/dataset_card.md"
+    },
+    "wandb_artifacts": {
+      "raw": "dataset-raw:v8",
+      "validated": "dataset-validated:v8",
+      "cleaned": "dataset-cleaned:v8",
+      "train": "dataset-train:v23",
+      "val": "dataset-val:v18",
+      "test": "dataset-test:v14",
+      "golden": "dataset-golden:v23",
+      "validation_errors": "dataset-validation_errors:v2"
+    }
+  },
+  "gcs_paths": {
+    "raw": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/raw.jsonl",
+    "validated": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/validated.jsonl",
+    "cleaned": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/cleaned.jsonl",
+    "train": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/train.jsonl",
+    "val": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/val.jsonl",
+    "test": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/test.jsonl",
+    "golden": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/golden.jsonl",
+    "validation_errors": "gs://swe-qwen-datasets/datasets/expanded-repos/swebench/validation_errors.jsonl",
+    "manifest": "gs://swe-qwen-datasets/datasets/expanded-repos/manifest.json",
+    "dataset_card": "gs://swe-qwen-datasets/datasets/expanded-repos/dataset_card.md"
+  },
+  "wandb_artifacts": {
+    "raw": "dataset-raw:v8",
+    "validated": "dataset-validated:v8",
+    "cleaned": "dataset-cleaned:v8",
+    "train": "dataset-train:v23",
+    "val": "dataset-val:v18",
+    "test": "dataset-test:v14",
+    "golden": "dataset-golden:v23",
+    "validation_errors": "dataset-validation_errors:v2"
+  }
+}
+(.venv) ahmedikram@MacBook-Pro SWE-Qwen %

@@ -172,6 +172,36 @@ modal deploy src/swe_qwen/modal_app.py::serve_swe_qwen \
   --model_path /models/swe-qwen-finetuned
 ```
 
+### Run Eval
+
+The evaluation harness evaluates finetuned variants against SWE-bench Verified
+(and the full golden set) in one Modal pipeline: chunked single-turn inference,
+test execution inside the official per-instance SWE-bench images, statistical
+rigor (Wilson CIs, McNemar, paired bootstrap), and W&B logging of results,
+cost, latency percentiles, and model-checkpoint lineage.
+
+```bash
+# Smoke tier: 20 seed-42 instances + CI F2P gate vs stored baseline
+eval run --mode smoke
+
+# Dev tier (100) / Final tier (500) / Full golden set (2056)
+eval run --mode dev
+eval run --mode final
+eval run --mode full
+
+# Compare existing runs (local JSONL or W&B artifacts)
+eval compare --run_ids run_a,run_b
+```
+
+- Tiers: `smoke=20`, `dev=100`, `final=500` (all SWE-bench Verified),
+  `full` = whole golden set. All subset selection is seeded (seed 42).
+- `--mode smoke` runs the CI gate: exits 1 if any variant's F2P drops more
+  than 5% (absolute) vs `data/eval_results/smoke_baseline.json`.
+- A champion (best F2P above thresholds) is promoted to the W&B Registry
+  `eval-champion` collection after `compare`.
+- Expected cost: a full smoke run is ~$0.15-0.30 on Modal (cold starts and
+  image pulls dominate the first run).
+
 ## Project Structure
 
 ```

@@ -22,7 +22,7 @@ class TestDataPipelineConfig:
         cfg = DataPipelineConfig()
         assert cfg.batch_size == 50
         assert cfg.max_patch_lines == 500
-        assert cfg.min_golden_examples == 200
+        assert cfg.min_golden_examples == 100
         assert cfg.parallel_workers == 1
         assert cfg.max_issues_per_repo == 2000
         assert cfg.max_events_per_issue == 100
@@ -30,7 +30,7 @@ class TestDataPipelineConfig:
         assert str(cfg.output_dir) == "data"
         assert cfg.wandb_project == "swe-qwen-data"
         assert cfg.wandb_entity is None
-        assert cfg.golden_source_split == "test"
+        assert cfg.golden_source_split == "verified+test+dev"
         assert cfg.train_ratio == 0.8
         assert cfg.val_ratio == 0.1
         assert cfg.test_ratio == 0.1

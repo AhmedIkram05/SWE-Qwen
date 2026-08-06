@@ -208,15 +208,52 @@ class TestTokenizeSplit:
     def test_label_length_correction(
         self, tokenizer: Any, prompt_loader: PromptLoader, sample_record: dict[str, Any]
     ) -> None:
+        # max_length=2 is smaller than the prompt alone: the record is dropped
+        # rather than emitted with an all -100 (empty-target) label.
         ds = tokenize_split([sample_record], tokenizer, prompt_loader, max_length=2)
-        assert len(ds) == 1
-        row = ds[0]
-        assert len(row["input_ids"]) == 2
-        assert len(row["labels"]) == 2
-        assert all(l == -100 for l in row["labels"])
+        assert len(ds) == 0
 
 
 # ── tokenize_pipeline ────────────────────────────────────────────────────────
+
+
+class TestTokenizeSplitPromptOverflow:
+    """Records whose prompt alone exceeds max_length must be dropped, not
+    emitted with all -100 labels.
+
+    Regression: the prompt-only tokenization call had no truncation, so a
+    file-contents prompt blew up to 145K tokens and every truncated example
+    lost its gold-patch target.
+    """
+
+    def _rec(self, issue_id: str, body: str) -> dict[str, Any]:
+        return {
+            "issue_id": issue_id,
+            "issue_body": body,
+            "repo": "test/repo",
+            "repo_domain": "github.com",
+            "patch_diff": "--- a/main.py\n+++ b/main.py\n@@ -1 +1 @@\n-x=1\n+y=2\n",
+            "files_changed": [],
+            "test_files_changed": [],
+        }
+
+    def test_oversized_prompt_dropped(self, tokenizer: Any, prompt_loader: PromptLoader) -> None:
+        big = self._rec("big#1", "bug " * 3000)  # ~12K chars, far past max_length
+        small = self._rec("small#1", "Fix it.")
+        ds = tokenize_split([big, small], tokenizer, prompt_loader, max_length=2048)
+        assert len(ds) == 1
+        # The surviving example must keep a non-masked gold-patch tail.
+        row = ds[0]
+        assert any(t != -100 for t in row["labels"])
+
+    def test_all_oversized_yields_empty(self, tokenizer: Any, prompt_loader: PromptLoader) -> None:
+        ds = tokenize_split(
+            [self._rec("big#1", "bug " * 3000)],
+            tokenizer,
+            prompt_loader,
+            max_length=2048,
+        )
+        assert len(ds) == 0
 
 
 class TestTokenizePipeline:
@@ -520,3 +557,47 @@ class TestTokenizeDataset:
 
         assert result["run_id"] == run_id
         assert result["total_examples"] > 0
+
+
+# ── file contents in training prompts ────────────────────────────────────────
+
+
+class TestTrainingPromptFileContents:
+    """Training prompts must embed changed-file contents (### File Contents),
+    mirroring the eval prompt, so the LoRA learns to diff real code."""
+
+    def _record_with_base_sha(self, sample_record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **sample_record,
+            "metadata": {"base_sha": "a" * 40},
+            "files_changed": ["src/app.py"],
+            "test_files_changed": ["tests/test_app.py"],
+        }
+
+    def test_file_contents_embedded(
+        self, sample_record: dict[str, Any], prompt_loader: PromptLoader, monkeypatch: Any
+    ) -> None:
+        from evaluation import inference as inf
+
+        monkeypatch.setattr(
+            inf,
+            "_fetch_raw_file",
+            lambda repo, base_sha, path: (
+                "def foo():\n    return 1\n" if path == "src/app.py" else None
+            ),
+        )
+        text = format_training_prompt(self._record_with_base_sha(sample_record), prompt_loader)
+        assert "### File Contents" in text
+        assert "#### `src/app.py`" in text
+        assert "def foo():" in text
+
+    def test_no_base_sha_skips_fetch(
+        self, sample_record: dict[str, Any], prompt_loader: PromptLoader, monkeypatch: Any
+    ) -> None:
+        from evaluation import inference as inf
+
+        calls: list = []
+        monkeypatch.setattr(inf, "_fetch_raw_file", lambda *a, **k: calls.append(a) or None)
+        text = format_training_prompt(sample_record, prompt_loader)
+        assert calls == []
+        assert "### File Contents" not in text

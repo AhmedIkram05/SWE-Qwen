@@ -15,10 +15,10 @@ import wandb
 
 def init_wandb_project(
     project_name: str = "swe-qwen",
-    entity: str = None,
-    description: str = None,
-    tags: list = None,
-    config: dict = None,
+    entity: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    config: dict[str, object] | None = None,
 ):
     """
     Initialize W&B project with standard configuration.
@@ -90,7 +90,7 @@ def init_wandb_project(
     return True
 
 
-def create_sweep_config(project_name: str, entity: str = None):
+def create_sweep_config(project_name: str, entity: str | None = None):
     """Create a hyperparameter sweep configuration."""
     sweep_config = {
         "name": "swe-qwen-lora-sweep",
@@ -144,20 +144,25 @@ def create_sweep_config(project_name: str, entity: str = None):
     return sweep_id
 
 
-def setup_artifact_registries(project_name: str, entity: str = None):
+def _registry_path(project_name: str, entity: str | None) -> str:
+    """wandb.Api.artifact_type takes entity via an entity/project path."""
+    return f"{entity}/{project_name}" if entity else project_name
+
+
+def setup_artifact_registries(project_name: str, entity: str | None = None):
     """Set up model and dataset artifact registries."""
     api = wandb.Api()
 
     # Create model registry
     try:
-        api.artifact_type("model", project=project_name, entity=entity)
+        api.artifact_type("model", project=_registry_path(project_name, entity))
         print(f"Model registry ready: {project_name}")
     except Exception:
         print("Model registry will be created on first model upload")
 
     # Create dataset registry
     try:
-        api.artifact_type("dataset", project=project_name, entity=entity)
+        api.artifact_type("dataset", project=_registry_path(project_name, entity))
         print(f"Dataset registry ready: {project_name}")
     except Exception:
         print("Dataset registry will be created on first dataset upload")

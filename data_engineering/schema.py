@@ -68,9 +68,9 @@ class IssueRecord(BaseModel):
         if not v or not v.strip():
             raise ValueError("patch_diff is empty")
         try:
-            import unidiff
+            from unidiff.patch import PatchSet
 
-            ps = unidiff.PatchSet(v)
+            ps = PatchSet(v)
             if len(ps) > 0:
                 return v
         except Exception:

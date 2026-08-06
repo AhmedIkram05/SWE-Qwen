@@ -20,6 +20,7 @@ from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import AutoTokenizer
 
 from data_engineering.config import DataPipelineConfig
+from evaluation.inference import _file_snippets
 from training.prompt_loader import PromptLoader
 
 logger = logging.getLogger(__name__)
@@ -92,10 +93,13 @@ def load_jsonl_split(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def format_training_prompt(record: dict[str, Any], prompt_loader: PromptLoader) -> str:
-    """Format a record into a training prompt string.
+def _format_parts(record: dict[str, Any], prompt_loader: PromptLoader) -> tuple[str, str]:
+    """Render a record's (full_text, prompt_only_text) training prompts.
 
-    Uses the ``chat.j2`` template with issue body as the user message.
+    Fetches the contents of the changed files at the record's base_sha and
+    embeds them (### File Contents) so the model learns to write diffs
+    against real code — mirroring the eval prompt. Best-effort: a missing
+    base_sha or fetch failure degrades to the path-only prompt.
     """
     issue_id = record.get("issue_id", "unknown")
     issue_body = record.get("issue_body", "")
@@ -105,7 +109,20 @@ def format_training_prompt(record: dict[str, Any], prompt_loader: PromptLoader) 
     files_changed: list[str] = record.get("files_changed", [])
     test_files: list[str] = record.get("test_files_changed", [])
 
-    # Build user message
+    context_snippets: list[dict[str, str]] = []
+    metadata = record.get("metadata") or {}
+    base_sha = metadata.get("base_sha") or record.get("base_sha")
+    if base_sha and files_changed:
+        try:
+            # ponytail: tighter than the eval path (10 files x 500 lines) —
+            # the gold patch must survive the training context window, so
+            # file contents get 5 files x 150 lines (~8-11K tokens worst case).
+            context_snippets = _file_snippets(
+                repo, base_sha, files_changed[:20], max_files=5, max_lines=150
+            )
+        except Exception as exc:
+            logger.warning("Failed to fetch file contents for %s: %s", issue_id, exc)
+
     user_content = prompt_loader.render(
         "user",
         issue_title=issue_id,
@@ -114,23 +131,35 @@ def format_training_prompt(record: dict[str, Any], prompt_loader: PromptLoader) 
         repo_domain=repo_domain,
         context_files=files_changed[:20],  # cap context files
         test_files=test_files[:10],
+        context_snippets=context_snippets,
     )
-
-    # Build assistant response (the patch)
-    assistant_content = patch_diff
-
-    return prompt_loader.render_chat(
-        system_prompt=prompt_loader.render(
-            "system",
-            task_description="Fix the bug described in the issue by generating a correct patch.",
-            language="Python",
-            style_guide="Follow PEP 8 and the repository's existing code style.",
-        ),
+    system_prompt = prompt_loader.render(
+        "system",
+        task_description="Fix the bug described in the issue by generating a correct patch.",
+        language="Python",
+        style_guide="Follow PEP 8 and the repository's existing code style.",
+    )
+    prompt_only = prompt_loader.render_chat(
+        system_prompt=system_prompt,
+        messages=[{"role": "user", "content": user_content}],
+    )
+    full = prompt_loader.render_chat(
+        system_prompt=system_prompt,
         messages=[
             {"role": "user", "content": user_content},
-            {"role": "assistant", "content": assistant_content},
+            {"role": "assistant", "content": patch_diff},
         ],
     )
+    return full, prompt_only
+
+
+def format_training_prompt(record: dict[str, Any], prompt_loader: PromptLoader) -> str:
+    """Format a record into a training prompt string.
+
+    Uses the ``chat.j2`` template with issue body as the user message.
+    """
+    full_text, _ = _format_parts(record, prompt_loader)
+    return full_text
 
 
 def tokenize_split(
@@ -158,44 +187,26 @@ def tokenize_split(
     texts: list[str] = []
     prompt_ends: list[int] = []  # token index where prompt ends (response starts)
     errors = 0
+    dropped = 0  # examples whose prompt alone fills the window (no room for the gold patch)
 
     for i, rec in enumerate(records):
         try:
-            text = format_training_prompt(rec, prompt_loader)
+            text, prompt_only = _format_parts(rec, prompt_loader)
+
+            # Tokenize the prompt-only text to find where the response starts.
+            # Truncate to max_length: if the prompt alone fills the window the
+            # gold-patch target would be truncated away (all -100 labels), so
+            # drop the example instead of training on empty targets.
+            prompt_tokens = tokenizer(
+                prompt_only,
+                add_special_tokens=False,
+                max_length=max_length,
+                truncation=True,
+            )["input_ids"]
+            if len(prompt_tokens) >= max_length:
+                dropped += 1
+                continue
             texts.append(text)
-
-            # Find the boundary between prompt and response
-            # The chat template uses "### Response" as the delimiter
-            # We'll tokenize the prompt part separately to find its length
-            issue_id = rec.get("issue_id", "unknown")
-            issue_body = rec.get("issue_body", "")
-            repo = rec.get("repo", "unknown")
-            repo_domain = rec.get("repo_domain", "unknown")
-            files_changed: list[str] = rec.get("files_changed", [])
-            test_files: list[str] = rec.get("test_files_changed", [])
-
-            user_content = prompt_loader.render(
-                "user",
-                issue_title=issue_id,
-                issue_body=issue_body,
-                repo_name=repo,
-                repo_domain=repo_domain,
-                context_files=files_changed[:20],
-                test_files=test_files[:10],
-            )
-
-            prompt_only = prompt_loader.render_chat(
-                system_prompt=prompt_loader.render(
-                    "system",
-                    task_description="Fix the bug described in the issue"
-                    " by generating a correct patch.",
-                    language="Python",
-                    style_guide="Follow PEP 8 and the repository's existing code style.",
-                ),
-                messages=[{"role": "user", "content": user_content}],
-            )
-            # Tokenize prompt to find its length
-            prompt_tokens = tokenizer(prompt_only, add_special_tokens=False)["input_ids"]
             prompt_ends.append(len(prompt_tokens))
 
         except Exception as exc:
@@ -215,6 +226,15 @@ def tokenize_split(
             errors,
             len(records),
             split_name,
+        )
+
+    if dropped:
+        logger.warning(
+            "Tokenization: dropped %d/%d records in split '%s' (prompt exceeds max_length=%d)",
+            dropped,
+            len(records),
+            split_name,
+            max_length,
         )
 
     if not texts:

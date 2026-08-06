@@ -240,7 +240,7 @@ class TestPipelineConfigSources:
     def test_config_swebench_default(self):
         config = DataPipelineConfig()
         # source field no longer exists, check other SWE-bench config
-        assert config.golden_source_split == "test"
+        assert config.golden_source_split == "verified+test+dev"
         assert config.swe_bench_dir == Path("data/swe_bench")
 
     def test_config_bigquery_disabled_by_default(self, monkeypatch):

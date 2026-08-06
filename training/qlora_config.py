@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 from peft import LoraConfig
-from trl import SFTConfig
+from trl.trainer.sft_config import SFTConfig
 
 logger = logging.getLogger(__name__)
 

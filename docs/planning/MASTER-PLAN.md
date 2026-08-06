@@ -699,6 +699,30 @@ swe-qwen/
 | 6.8 | Benchmark latency and throughput; log to W&B | Benchmark artifact |
 | 6.9 | Configure scale-to-zero: idle timeout, cold start measurement | Scale-to-zero config |
 
+> **Phase 6 research notes — logic/method crossover from Phases 4-5 + Modal credit conservation (may be wrong).** Derived from repo inspection + manual-run experience, not a live serve run. The point of crossover is *general logic and methods*, not file reuse: Phase 6 should re-implement `inference.py`'s structure around a persistent engine, not copy its batch loop.
+>
+> **What crosses over as logic/method patterns:**
+> 1. **vLLM usage pattern** from `evaluation/inference.py`: single `LLM` instance → batched `generate` with `tokenize=False` → per-model tokenizer caching. Phase 6 keeps the same shape but the engine is persistent and batching is request-driven instead of dataset-driven.
+> 2. **Prompt-builder methods**: the same chat-template + golden few-shot + per-tier token-budget logic (methods, not just output). Keep method signatures stable and share the implementation so served inference and eval F2P can never drift (drift = silently re-debugging and re-evaluating).
+> 3. **Modal app skeleton** from `training/modal_train.py`: app/function-decorator layout, `Secret.from_name()`, volume `create_if_missing`, `add_local_dir` last, explicit teardown (the `wandb.finish()` lesson), cache-buster strings for image invalidation, concurrency caps (the aiohttp 1.5.3 bug at 64-way). Only genuinely-new pattern: persistent `@app.cls` engine with async one-time init + warm containers.
+> 4. **Config-layer pattern** from `EvalConfig`: pydantic-settings BaseSettings, env prefix, frozen — copy the *pattern* for a new `ServeConfig` (do not import `EvalConfig` itself).
+> 5. **Adapter resolution method**: how `model-qwen3-14b-{variant}` is located and loaded is proven; only the served-mode registration differs (`--lora-modules` + per-request `"model": "<lora_name>"`).
+>
+> **Credit-conservation strategy — limit Modal debugging spend (A100 budget is the constraint):**
+> - **Local-first before any Modal run.** Unit-test prompt building, SSE chunk assembly, and the OpenAI response schema against fixtures locally; mock vLLM with an LPU-less stub. Everything that can run without GPUs must never touch Modal in a debug loop.
+> - **One boot should validate many things.** Batch debug attempts: a single preflight/integration call that exercises adapter load + one chat + one stream together — not five sequential single-purpose boots. Iterate locally until confident, then boot.
+> - **Build the serving image once; do not rebuild it in the loop.** Modal caches images — only bump the cache-buster when dependencies change. Weight-load-only iterations must reuse the cached image, or every code tweak burns a full image rebuild + model load.
+> - **Fail fast at boot.** Let vLLM config errors (VRAM, `max-model-len`) surface during container warmup (30-60s of A100) rather than at first request. Adds warmup checks; removes mid-request crash-debug loops.
+> - **Prefer `modal serve` (hot reload) for the dev loop; `deploy` only when the endpoint is stable.** Minimizes one-shot cold boots.
+> - **Pin the Modal version** until Phase 6 is done — the 1.5.3 aiohttp regression shows upgrades carry debugging cost; treat a Modal bump as a separate task.
+> - **Structured logging to container stdout from day one** (`modal app logs`) — avoids blind 504/500 debugging, which is the most expensive loop of all (each guess = a boot).
+> - **Reuse smoke-tier sampling** (existing tier pattern, e.g. smoke:20) for validation instead of full benchmarks during debugging; full benchmarks only as acceptance.
+>
+> **Serving quantization recommendation (Path A — quantized base + live LoRA, may be wrong).** Training quantization (QLoRA 4-bit NF4) is an in-memory training state, NOT a servable format — the saved artifact is bf16 LoRA adapters, so training artifacts cannot be reused for serving. Serving on `a10g-24gb` (per the GPU-sizing advice above) therefore requires a servable-quantized base. Recommended path:
+> 1. Use a **pre-quantized base** from HF (e.g. `Qwen/Qwen3-14B-FP8` or an AWQ/GPTQ build) — zero quantization work, ~14GB (FP8) or ~7-9GB (4-bit).
+> 2. Serve in vLLM on Modal with `LLM(model=<quantized_path>, quantization='fp8'|'awq', enable_lora=True, ...)` and attach the trained LoRA adapter at request time (`lora_request`, every request carries `"model": "<variant>"`). No merge, no 28GB bf16 checkpoint, no re-quantization on new training — swap adapter, keep base.
+> 3. Fallback (Path B, only if served-mode LoRA registration bugs out): merge base+adapter to bf16 (one GPU pass, a few $), quantize with `llm-compressor` (FP8) or `autoawq` (AWQ, `group_size=128`), serve merged — simpler runtime but bakes the adapter in (new training = re-merge). Budget ~$5-15 for this retry if needed.
+
 **Dependencies:** Phase 4 complete (model checkpoint required). Phase 1 complete (Modal configured).
 
 **Risks:**
@@ -759,6 +783,17 @@ swe-qwen/
 | 7.7 | Store secrets (W&B, Modal) as GitHub repository secrets, no hardcoded values | GitHub secrets configured |
 | 7.8 | Test full CI/CD pipeline end-to-end on a feature branch | Pipeline validation |
 | 7.9 | Document CI/CD architecture and workflow descriptions | CI/CD documentation |
+
+> **Phase 7 research notes — automation advice (may be wrong).** Derived from inspecting the current repo + manual-run experience, not from a live CI run. Treat as hypotheses to validate during pre phase implementation (they change task details, not the phase's scope):
+>
+> 1. **The manual dev CLI is NOT the automation interface.** Tokenize prep is only reachable via the data CLI (`python -m data_engineering.cli run --run-id <id> --tokenize-model ...`) but it is CPU-only (downloads the Qwen3-14B *tokenizer*, not weights) and runs on a normal GitHub runner — $0 Modal GPU. Its only purpose is to materialize `tokenized/<run_id>/` in GCS (`tokenize._save_dataset_to_gcs`), which `modal_train.train_qlora` then pulls via the public GCS JSON API. For a retrain of an existing dataset this step is a **no-op that CI should skip**: hit the same public JSON API, check the prefix exists, and jump straight to Modal. It only needs to run when `run_id` changes or the prompt template (tokenization) changes.
+> 2. **Training is invoked directly, not through any CLI wrapper**: `modal run training/modal_train.py::train_qlora --model-name qwen3-14b --variant <v> --run-id <id> --run-name <n> ...` (or by subprocess-launching `scripts/run_3config_comparison.py`). Precondition already proven manually — 2/3 comparison variants completed on Modal.
+> 3. **The same run-id string is carried in three places** (tokenize call, training `--run-id`, and the eval env var). GitHub Actions does not persist shell env across jobs, so define it once at workflow level (`env: DATASET_RUN_ID: expanded-repos`) and derive per-job. The eval job MUST receive `EVAL_DATASET_RUN_ID: ${{ env.DATASET_RUN_ID }}`: it drives `EvalConfig.dataset_run_id` (env prefix `EVAL_`), which substitutes `{run_id}` into `golden_data_path` (`gs://swe-qwen-datasets/datasets/{run_id}/swebench/golden.jsonl`, cached by `_ensure_golden`). If absent, `load_examples` silently falls back to the eval resume id / errors out — a quiet failure mode, so assert it is set in the eval job. It is inert for training (nothing in `scripts/` reads it).
+> 4. **GitHub Actions job timeout is 360 min by default** vs Modal fn timeout 300 min — tight enough that a long training run can be cancelled mid-flight by CI. Every job that launches a training/eval Modal call must set `timeout-minutes:` explicitly above the expected runtime.
+> 5. **Secrets handoff is the new moving part** (GCS is already de-risked: the bucket is public-read because GCP org policy blocks HMAC key creation). CI needs `WANDB_API_KEY`, `HF_TOKEN`, plus the **Modal token pair** (`MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET`) — a GitHub Actions `modal run` CANNOT consume the Modal-hosted `wandb-secret`/`hf-secret` secrets by name. GCP write creds for the tokenize job come from the existing WIF provider (already wired in this file for terraform-plan).
+> 6. **Cost amplification:** Modal `Retries(max_retries=1)` + the orchestrator's auto-restart will auto-relaunch expensive jobs with no human watching. Add a spend/attempt guard (max N launches per invocation) before letting CI trigger training.
+> 7. **W&B auto-deletes inactive projects** (observed: project `swe-qwen` was auto-deleted once, all run telemetry lost). In CI, pin/re-create the project in a run-once init job before any training/eval job depends on it.
+> 8. **The per-PR eval gate (7.4) is the single most expensive and least-proven automation unit** — GPU batch inference + real per-repo test containers. Budget most debug effort there. Gate it with `paths:` filters so docs/data-only PRs never fire it, and keep samples small (config already ships `ci_sample_size=50`, `ci_random_seed=42`, tier sizes).
 
 **Dependencies:** All previous phases complete (at minimum Phase 6 — inference API must exist to test deployment). Phase 1 complete (Terraform + OIDC must be configured).
 
@@ -882,7 +917,7 @@ swe-qwen/
 - [ ] Champion/Challenger comparison runs automatically on any new model checkpoint
 - [ ] Promotion decision (promote/reject) is logged to W&B with full rationale
 - [ ] Successful promotion triggers automatic deployment to inference endpoint
-- [ rejected promotions have documented reason and metrics
+- [ ] rejected promotions have documented reason and metrics
 - [ ] Unit tests cover all promotion rule scenarios
 
 **Acceptance Criteria:**

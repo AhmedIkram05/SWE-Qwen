@@ -7,7 +7,7 @@ standard TRL + PEFT + bitsandbytes on any exception. Controlled by
 
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import logging
 import os
 from typing import Any

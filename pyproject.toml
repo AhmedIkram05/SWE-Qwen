@@ -32,6 +32,7 @@ dependencies = [
     "pydantic-settings>=2.7.0",
     # Cloud/Infrastructure
     "google-cloud-storage>=2.19.0",
+    "google-cloud-bigquery>=3.25.0",
     "google-auth>=2.29.0",
     "modal>=1.5.0",
     # Experiment tracking
@@ -59,6 +60,8 @@ dev = [
     "pytest-asyncio>=0.25.0",
     "pytest-mock>=3.14.0",
     "pytest-xdist>=3.6.0",
+    "pytest-timeout>=2.3.1",
+    "pytest-json-report>=1.5.0",
     "hypothesis>=6.100.0",
     "ruff==0.16.0",
     "mypy>=1.14.0",
@@ -87,7 +90,7 @@ docs = [
 swe-qwen = "swe_qwen.cli:app"
 data-pipeline = "data_engineering.run_pipeline:app"
 train = "training.qlora_train:app"
-eval = "evaluation.run_eval:app"
+eval = "evaluation.cli:app"
 serve = "inference.modal_serve:app"
 
 [build-system]
@@ -96,7 +99,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["swe_qwen*", "data_engineering*", "training*"]
+include = ["swe_qwen*", "data_engineering*", "training*", "evaluation*", "scripts*"]
 
 [tool.ruff]
 line-length = 100
@@ -145,9 +148,10 @@ ignore = [
     "PLC0415", # import at top-level — lazy imports in Modal functions are intentional
 ]
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "ARG001", "ARG002", "PLR2004", "B018", "F841", "E741", "SIM117", "PLR0913", "PLR0917", "E402"]
+"tests/*" = ["S101", "ARG001", "ARG002", "ARG004", "ARG005", "PLR2004", "B018", "F841", "E741", "SIM117", "PLR0913", "PLR0917", "E402"]
 "*.py" = ["T201"]
 "data_engineering/cli.py" = ["B008", "PLR0913", "PLR0917", "W292"]
+"evaluation/cli.py" = ["B008", "PLR0913", "PLR0917"]
 "data_engineering/card.py" = ["E501"]
 "data_engineering/split.py" = ["E402", "F401"]
 "data_engineering/run_pipeline.py" = ["SIM103", "PLW2901", "TRY401", "PLR0912", "PLR0915", "TRY003", "F841", "SIM105"]
@@ -172,6 +176,13 @@ check_untyped_defs = true
 no_implicit_optional = true
 strict_optional = true
 ignore_missing_imports = true
+files = [
+    "src",
+    "data_engineering",
+    "training",
+    "scripts",
+    "evaluation",
+]
 exclude = [
     "models/checkpoints",
     "wandb",

@@ -10,7 +10,7 @@ from difflib import unified_diff
 from typing import Any
 
 from datasets import load_dataset
-from unidiff import PatchSet
+from unidiff.patch import PatchSet
 
 from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import IssueRecord, ParsedHunk, TestResults
@@ -107,7 +107,7 @@ def load_codecontests(config: DataPipelineConfig) -> list[IssueRecord]:
     ds = load_dataset("deepmind/code_contests", split="train")
     records = []
 
-    for ex in ds:
+    for ex in (dict(e) for e in ds):
         problem_name = ex.get("name", "unknown")
         description = ex.get("description", "")
 
@@ -165,7 +165,7 @@ def load_codealpaca(config: DataPipelineConfig) -> list[IssueRecord]:
     ds = load_dataset("sahil2801/CodeAlpaca-20k", split="train")
     records = []
 
-    for ex in ds:
+    for ex in (dict(e) for e in ds):
         instruction = ex.get("instruction", "").strip()
         input_text = ex.get("input", "").strip()
         output = ex.get("output", "").strip()

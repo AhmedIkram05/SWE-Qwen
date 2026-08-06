@@ -80,19 +80,47 @@ def extract_golden(
     min_size: int,
     source_split: str = "test",
 ) -> list[IssueRecord]:
-    """Extract golden eval subset from the test split.
+    """Extract golden eval subset.
 
     Uses the V1 F2P proxy: ``test_files_changed`` non-empty AND F2P keywords
     in commit messages/PR description.
 
+    ``source_split="verified+test+dev"`` instead sources from records whose
+    ingest provenance is one of the official SWE-bench F2P splits
+    (verified/test/dev — all carry FAIL_TO_PASS ground truth), skipping the
+    F2P keyword heuristic.
+
     Args:
         splits: Pipeline splits (train/val/test).
         min_size: Minimum number of golden examples required.
-        source_split: Which split to source from (``"test"`` or ``"all"``).
+        source_split: Which split to source from (``"test"``, ``"all"``, or
+            ``"verified+test+dev"``).
 
     Returns:
         List of golden-eval-qualified records.
     """
+    if source_split == "verified+test+dev":
+        source = [
+            rec
+            for rec in splits.train + splits.val + splits.test
+            if rec.metadata.get("source_split") in {"verified", "test", "dev"}
+        ]
+        # All three official splits have FAIL_TO_PASS by construction.
+        golden = [rec for rec in source if rec.test_files_changed]
+        logger.info(
+            "Golden set: %d examples from official SWE-bench F2P splits "
+            "(verified+test+dev, min_target=%d)",
+            len(golden),
+            min_size,
+        )
+        if len(golden) < min_size:
+            logger.warning(
+                "Golden set has %d examples (min %d requested).",
+                len(golden),
+                min_size,
+            )
+        return golden
+
     if source_split == "all":
         source = splits.train + splits.val + splits.test
         logger.warning(
@@ -101,7 +129,7 @@ def extract_golden(
     else:
         source = splits.test
 
-    golden: list[IssueRecord] = []
+    golden = []
     for rec in source:
         if rec.test_files_changed and _has_f2p_keywords(rec):
             golden.append(rec)

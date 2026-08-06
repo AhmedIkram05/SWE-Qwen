@@ -277,16 +277,15 @@ variants:
 class QLoRATrainer:
     def __init__(
         self,
-        model_name: str,           # key from models.yaml
-        variant: str,              # key from qlora_variants.yaml
-        data_dir: str,             # path to tokenized .arrow shards
-        output_dir: str,           # local output dir (Modal volume)
+        model_name: str,  # key from models.yaml
+        variant: str,  # key from qlora_variants.yaml
+        data_dir: str,  # path to tokenized .arrow shards
+        output_dir: str,  # local output dir (Modal volume)
         wandb_project: str,
         wandb_entity: str,
         run_name: str | None = None,
         resume_from_checkpoint: str | None = None,
-    ):
-        ...
+    ): ...
 ```
 - **Methods**:
   - `setup_model_and_tokenizer()` — 4-bit NF4 via `BitsAndBytesConfig`, `AutoModelForCausalLM.from_pretrained`, `get_peft_model`
@@ -350,8 +349,7 @@ def train_qlora(
     data_volume: str = "training-data",
     run_name: str | None = None,
     resume: str | None = None,
-):
-    ...
+): ...
 ```
 - **GPU Resolution**: Read `models.yaml`, pick `gpu_mapping.primary` (or fallback if OOM), map to Modal GPU string via **GPU Mapping Table**:
 
