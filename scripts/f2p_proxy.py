@@ -49,7 +49,7 @@ def compute_proxy_f2p_scores(
     project = _wandb_project_entity()
     results: dict[str, dict[str, Any]] = {}
 
-    # First pass: collect all train_losses
+    # First pass: collect the per-variant train losses
     losses: dict[str, float] = {}
     for variant in variant_adapter_map:
         runs = api.runs(project, {"config.variant": variant})
@@ -71,16 +71,16 @@ def compute_proxy_f2p_scores(
             continue
 
         run = sorted(finished, key=lambda r: r.created_at, reverse=True)[0]
-        train_loss = run.summary.get("train_loss", None)
-        if train_loss is None:
+        loss = run.summary.get("train/loss", None)
+        if loss is None:
             results[variant] = {
                 "mean_f2p": 0.0,
                 "count": len(records),
-                "warning": "no train_loss in summary",
+                "warning": "no train/loss in summary",
             }
             continue
 
-        losses[variant] = train_loss
+        losses[variant] = loss
 
     # Second pass: normalize relative to min/max loss (lower loss → higher score)
     if not losses:
@@ -90,13 +90,13 @@ def compute_proxy_f2p_scores(
     max_loss = max(losses.values())
     loss_range = max_loss - min_loss
 
-    for variant, train_loss in losses.items():
-        score = 1.0 - (train_loss - min_loss) / loss_range if loss_range > 0 else 1.0
+    for variant, loss in losses.items():
+        score = 1.0 - (loss - min_loss) / loss_range if loss_range > 0 else 1.0
 
         results[variant] = {
             "mean_f2p": round(score, 4),
             "count": len(records),
-            "train_loss": round(train_loss, 4),
+            "loss": round(loss, 4),
         }
 
     return results

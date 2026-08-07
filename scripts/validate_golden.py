@@ -15,14 +15,15 @@ import logging
 import sys
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
+from evaluation.schema import EvalInput
+from observability.logging import configure_logging
+
+configure_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 def validate(path: str) -> int:
     """Validate all records in a golden.jsonl file. Returns exit code."""
-    from evaluation.schema import EvalInput
-
     p = Path(path)
     if not p.is_file():
         logger.error("file not found: %s", p)
@@ -70,9 +71,9 @@ def validate(path: str) -> int:
     return 1 if errors else 0
 
 
-def _check_input(inp, line_no: int) -> None:
+def _check_input(inp: EvalInput, line_no: int) -> None:
     """Sanity-check a constructed EvalInput."""
-    issues = []
+    issues: list[str] = []
     if not inp.instance_id:
         issues.append("missing instance_id")
     if not inp.repo:

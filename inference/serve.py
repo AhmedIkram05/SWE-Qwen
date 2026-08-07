@@ -17,6 +17,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 import threading
 import time
 from collections.abc import Iterator
@@ -40,7 +41,8 @@ from inference.openai_compat import (
     iter_chunks,
     resolve_engine_model,
 )
-from inference.telemetry import MetricsCollector, RequestRecord
+from inference.telemetry import MetricsCollector, RequestRecord, add_trace_record
+from observability.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +224,29 @@ def _build_prompt(
 _collector = MetricsCollector()
 
 
+def _record_and_trace(
+    rec: RequestRecord, config: ServeConfig, template_name: str | None = None
+) -> None:
+    """Record into the shared collector; sample successful requests for Langfuse.
+
+    Phase 8 decision 1: a sampled (non-error) request is queued for the
+    Langfuse drain — one bounded deque append, O(1), never blocks, never
+    raises, so the serving hot path is unaffected.  ``template_name`` is the
+    prompt-builder template (None here: the serving path never renders
+    ``prompt_builder.render_prompt`` templates).
+    """
+    _collector.record(rec)
+    if rec.error or random.random() >= config.telemetry_trace_sample_rate:
+        return
+    add_trace_record(
+        model=rec.model,
+        template_name=template_name,
+        ttfbs_ms=rec.ttfbs_ms,
+        latency_ms=rec.latency_ms,
+        output_tokens=rec.output_tokens,
+    )
+
+
 def _default_engine() -> Engine:
     """Stub engine by default; ``SERVING_STUB=0`` selects the vLLM engine."""
     if os.environ.get("SERVING_STUB", "1") == "0":
@@ -289,7 +314,7 @@ def _stream_gen(  # noqa: PLR0913, PLR0917
             yield json.dumps(body, ensure_ascii=False)
             yield "[DONE]"
     finally:
-        _collector.record(
+        _record_and_trace(
             RequestRecord(
                 ts=time.time(),
                 model=request.model,
@@ -300,7 +325,8 @@ def _stream_gen(  # noqa: PLR0913, PLR0917
                 error=error_type is not None,
                 error_type=error_type,
                 status=500 if error_type is not None else 200,
-            )
+            ),
+            config,
         )
 
 
@@ -326,7 +352,7 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
         status: int,
         t0: float,
     ) -> None:
-        _collector.record(
+        _record_and_trace(
             RequestRecord(
                 ts=time.time(),
                 model=model,
@@ -337,7 +363,8 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
                 error=error,
                 error_type=error_type,
                 status=status,
-            )
+            ),
+            config,
         )
 
     @app.get("/health")
@@ -455,4 +482,5 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
 
 # Module-level app for `uvicorn inference.serve:app` and the `serve` console
 # script (local dev; stub unless SERVING_STUB=0).
+configure_logging()
 app = create_app(_default_engine(), ServeConfig())

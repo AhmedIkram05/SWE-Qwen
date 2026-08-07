@@ -24,11 +24,9 @@ import logging
 import time
 from pathlib import Path
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+from observability.logging import configure_logging
+
+configure_logging(level=logging.INFO)
 logger = logging.getLogger("local_e2e_smoke")
 
 
@@ -86,24 +84,22 @@ def main() -> None:  # noqa: PLR0915
     import evaluation.harness as harness_mod
     from evaluation.local_backend import run_tests_local
 
-    if args.use_golden_patch:
-        # Skip inference: use ground-truth test_patch to validate patch apply + tests + metrics
-        def _gen_patches(model_name, variant, prompt_template, examples):  # noqa: ARG001
-            return [ex.test_patch for ex in examples]
-    else:
+    def _local_patches(model_name, variant, prompt_template, examples):
+        if args.use_golden_patch:
+            # Skip inference: use ground-truth test_patch to validate patch apply + tests + metrics
+            return [ex.test_patch for ex in examples]  # noqa: ARG001
         from evaluation.local_backend import generate_patches_local
 
-        def _gen_patches(model_name, variant, prompt_template, examples):
-            return generate_patches_local(
-                model_name,
-                variant,
-                prompt_template,
-                examples,
-                ollama_model=args.model,
-                ollama_base_url=args.ollama_url,
-            )
+        return generate_patches_local(
+            model_name,
+            variant,
+            prompt_template,
+            examples,
+            ollama_model=args.model,
+            ollama_base_url=args.ollama_url,
+        )
 
-    harness_mod._generate_patches = _gen_patches
+    harness_mod._generate_patches = _local_patches  # type: ignore[assignment]
 
     # Patch test runner
     def _run_tests(example, generated_patch, config):
@@ -142,7 +138,7 @@ def main() -> None:  # noqa: PLR0915
 
     # Print test outcome summary
     for phase, tests in [("before", result.tests_before), ("after", result.tests_after)]:
-        statuses = {}
+        statuses: dict[str, int] = {}
         for t in tests:
             statuses[t.status] = statuses.get(t.status, 0) + 1
         logger.info("  tests_%s: %s", phase, statuses)

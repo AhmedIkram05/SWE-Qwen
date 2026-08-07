@@ -31,6 +31,7 @@ from data_engineering.config import DataPipelineConfig
 from data_engineering.run_pipeline import run_pipeline
 from data_engineering.schema import PipelineResult
 from data_engineering.tokenize import tokenize_dataset
+from observability.logging import configure_logging
 
 app = typer.Typer(
     name="data-engineering",
@@ -270,11 +271,7 @@ def config() -> None:
 
 def _setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    configure_logging(level=level)
 
 
 if __name__ == "__main__":

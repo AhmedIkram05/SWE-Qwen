@@ -731,7 +731,7 @@ class WandbLogger:
         if wandb_mod is None:
             return
         if run.cost_usd > 0:
-            wandb_mod.log({"eval/cost_usd": run.cost_usd})
+            wandb_mod.log({"eval/total_cost_usd": run.cost_usd})
         try:
             scalars: dict[str, float] = {}
             for key, p in latency_percentiles(run.results).items():
@@ -741,6 +741,42 @@ class WandbLogger:
                 wandb_mod.log(scalars)
         except Exception:  # noqa: BLE001 — W&B must never break the harness
             logger.warning("W&B latency percentile logging failed for run %s", run.run_id)
+        self._log_finish_scalars(run, config, wandb_mod)
+
+    def _log_finish_scalars(self, run: EvalRun, config: EvalConfig, wandb_mod: Any) -> None:
+        """Log registry-normalized run-finish scalars (plan §5.7, decisions 3/4).
+
+        ``eval/num_examples`` (golden examples evaluated), ``eval/cost_per_fix``
+        (total eval cost ÷ F2P-passing examples) and the ``cost/*`` run-cost
+        trio (wall duration × config-driven rate). All emission is guarded —
+        W&B must never break the harness.
+        """
+        try:
+            from observability.cost import cost_per_fix, log_run_cost, rate_per_hour_from_config
+
+            if run.results:
+                wandb_mod.log({"eval/num_examples": len(run.results)})
+            if run.cost_usd > 0:
+                f2p_passes = sum(1 for r in run.results if r.f2p > 0.0)
+                wandb_mod.log({"eval/cost_per_fix": cost_per_fix(run.cost_usd, f2p_passes)})
+
+                elapsed = (
+                    (run.completed_at - run.started_at).total_seconds()
+                    if run.completed_at is not None
+                    else 0.0
+                )
+                # Rate from inference_gpu (a100-80gb, $2.50/hr) — matches the
+                # legacy _GPU_RATE_PER_MIN A100 constant used by
+                # estimate_run_cost, so cost/* stays consistent with
+                # eval/total_cost_usd. config.gpu_type (a10g-24gb, $1.00/hr)
+                # reflects the default executor tier, not the billed GPU.
+                log_run_cost(
+                    getattr(wandb_mod, "run", None),
+                    max(elapsed, 0.0),
+                    rate_per_hour_from_config(config.inference_gpu),
+                )
+        except Exception:  # noqa: BLE001 — W&B must never break the harness
+            logger.warning("W&B finish-scalar logging failed for run %s", run.run_id, exc_info=True)
 
     def log_per_example(
         self,
@@ -779,8 +815,10 @@ class WandbLogger:
     def log_aggregate(self, metrics: list[F2PMetrics], run_id: str) -> None:
         """Log summary scalars plus an ``eval-aggregate-{run_id}`` artifact.
 
-        Scalar keys follow ``eval/{model}/{variant}/{prompt}/<metric>``; the
-        artifact (type ``eval_metrics``) holds the full ``F2PMetrics`` dumps.
+        Scalar keys are the flat registry keys ``eval/f2p_rate`` /
+        ``eval/p2p_rate`` (per-group values; the last group in *metrics*
+        wins the W&B series); the artifact (type ``eval_metrics``) holds the
+        full ``F2PMetrics`` dumps including the per-group hierarchy.
         """
         if not metrics:
             return
@@ -788,15 +826,13 @@ class WandbLogger:
         if wandb_mod is None:
             return
         try:
-            scalars: dict[str, float | int] = {}
+            scalars: dict[str, float] = {}
             for m in metrics:
-                prefix = f"eval/{m.model_name}/{m.variant}/{m.prompt_template}"
-                scalars[f"{prefix}/f2p_rate"] = m.f2p_rate
-                scalars[f"{prefix}/p2p_rate"] = m.p2p_rate
-                scalars[f"{prefix}/avg_latency"] = m.avg_latency
-                scalars[f"{prefix}/flaky_test_rate"] = m.flaky_test_rate
-                scalars[f"{prefix}/successful_patches"] = m.successful_patches
-                scalars[f"{prefix}/total_examples"] = m.total_examples
+                # Flat registry keys only (plan §4, decision 7). Per-group
+                # detail (per-repo breakdown, latency, flakiness, counts)
+                # stays in the eval-aggregate artifact, not W&B scalars.
+                scalars["eval/f2p_rate"] = m.f2p_rate
+                scalars["eval/p2p_rate"] = m.p2p_rate
             wandb_mod.log(scalars)
             _log_text_artifact(
                 wandb_mod,
@@ -1298,6 +1334,40 @@ class EvaluationHarness:
                             generated_patch=patches_map.get(example.instance_id, ""),
                         )
                     results_by_repo[repo].append(eval_result)
+
+                    # Observability (Phase 8 §5.5 dual-write): one Langfuse
+                    # trace per completed example, cross-linked to W&B by
+                    # run_id/instance_id. trace_generation itself swallows SDK
+                    # errors; the try/except guards attribute surprises on
+                    # eval_result. Import kept lazy (use-site), matching the
+                    # cost/langfuse precedent in harness/telemetry.
+                    try:
+                        from observability.langfuse import trace_generation
+
+                        trace_generation(
+                            name=f"eval/{model_name}/{variant}/{prompt_template}",
+                            model=model_name,
+                            # The exact rendered prompt (few-shot golden, no-think
+                            # wrap, file contents) is built inside the Modal
+                            # container and never returned to the harness, so the
+                            # problem statement is the closest per-example text in
+                            # run_batch's scope.
+                            prompt=example.issue_body,
+                            completion=eval_result.generated_patch,
+                            metadata={
+                                "run_id": run_id,
+                                "instance_id": example.instance_id,
+                                "prompt_template": prompt_template,
+                                "variant": variant,
+                                "model": model_name,
+                            },
+                            scores={
+                                "f2p": float(eval_result.f2p),
+                                "p2p": float(eval_result.p2p),
+                            },
+                        )
+                    except Exception as exc:  # noqa: BLE001 — observability never breaks eval
+                        logger.warning("langfuse trace failed for %s: %s", example.instance_id, exc)
 
             repo_results = results_by_repo[repo]
             new.extend(repo_results)

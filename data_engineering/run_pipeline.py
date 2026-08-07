@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ from data_engineering.schema import (
     RepoResult,
     Splits,
 )
+from observability.metrics import log_metrics
 
 # ─── GCS Streaming Helpers ──────────────────────────────────────────────────
 
@@ -247,6 +249,8 @@ def run_pipeline_swebench(
         reinit=True,
     )
 
+    pipeline_start = time.monotonic()
+
     try:
         # Initialize stats for W&B logging
         dedup_stats = clean.DedupStats()
@@ -293,6 +297,12 @@ def run_pipeline_swebench(
             progress.update(task, advance=1, description=f"Raw: {len(raw_records)} records")
             # Log to W&B
             wandb_run.log({"stage_raw_count": len(raw_records)})
+            try:
+                # On --resume-from this is the checkpoint-loaded count for this
+                # invocation, not a cross-resume aggregation.
+                log_metrics({"data/records_ingested": len(raw_records)})
+            except Exception as exc:
+                logger.warning("W&B metric emission failed (non-fatal): %s", exc)
 
             if not raw_records:
                 raise RuntimeError("SWE-bench ingest produced 0 records")
@@ -348,6 +358,10 @@ def run_pipeline_swebench(
                     "stage_validation_errors": len(validation_errors),
                 }
             )
+            try:
+                log_metrics({"data/records_validated": len(validated)})
+            except Exception as exc:
+                logger.warning("W&B metric emission failed (non-fatal): %s", exc)
 
             if not validated and validate_enabled:
                 raise RuntimeError("SWE-bench validation produced 0 valid records")
@@ -388,11 +402,19 @@ def run_pipeline_swebench(
                     "clean_removed_no_f2p_signal": clean_stats.removed_no_f2p_signal,
                 }
             )
+            try:
+                log_metrics({"data/records_cleaned": len(cleaned_records)})
+            except Exception as exc:
+                logger.warning("W&B metric emission failed (non-fatal): %s", exc)
 
             # Stage 4: Complete
             progress.update(task, advance=1, description="Complete")
 
     finally:
+        try:
+            log_metrics({"data/pipeline_seconds": time.monotonic() - pipeline_start})
+        except Exception as exc:
+            logger.warning("W&B metric emission failed (non-fatal): %s", exc)
         wandb_run.finish()
 
     return cleaned_records

@@ -61,6 +61,13 @@ class ServeConfig(BaseSettings):
     # Telemetry
     telemetry_flush_interval_seconds: int = 60
     gpu_util_sample_interval_seconds: int = 5
+    # Phase 8 decision 8: flush-loop alert thresholds (wandb.alert; fires only
+    # while a run is active).
+    alert_error_rate_threshold: float = 0.10
+    alert_ttfb_p95_threshold_ms: float = 2000.0
+    # Phase 8 decision 1: fraction of successful requests traced to Langfuse
+    # (0.1 = 10%; eval traces are never sampled).
+    telemetry_trace_sample_rate: float = 0.1
 
     def registry_serving_hf_id(self) -> str:
         """Resolve serving_hf_id from config/models.yaml (single source of
