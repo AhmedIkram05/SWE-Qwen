@@ -79,7 +79,9 @@ jobs:
             -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" \
             -var="gcp_region=${{ secrets.GCP_REGION }}" \
             -var="environment=dev" \
-            -var="repository_name=${{ github.repository }}" \
+            # github.event.repository.name is the bare name (github.repository
+            # is "owner/name"); the IAM condition prepends owner itself.
+            -var="repository_name=${{ github.event.repository.name }}" \
             -var="repository_owner=${{ github.repository_owner }}" \
             || { rc=$?; [ $rc -eq 2 ] && true || exit $rc; }
 
