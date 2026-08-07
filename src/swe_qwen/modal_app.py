@@ -321,7 +321,7 @@ def train_swe_qwen(  # noqa: PLR0913,PLR0917
         "/models": modal.Volume.from_name("swe-qwen-models", create_if_missing=True),
     },
     timeout=3600,
-    concurrency_limit=4,
+    max_containers=4,  # modal 1.5+: concurrency_limit renamed to max_containers
     scaledown_window=300,
 )
 async def serve_swe_qwen(  # noqa: PLR0913,PLR0917
@@ -398,20 +398,10 @@ async def serve_swe_qwen(  # noqa: PLR0913,PLR0917
     return {"status": "serving", "model": model_path}
 
 
-@app.function(
-    image=data_pipeline_image,
-    secrets=[
-        modal.Secret.from_name("modal-api-token"),
-        modal.Secret.from_name("wandb-api-key"),
-        modal.Secret.from_name("github-token"),
-        modal.Secret.from_name("gcp-credentials"),  # for BigQuery if enabled
-    ],
-    volumes={
-        "/data": modal.Volume.from_name("swe-qwen-datasets", create_if_missing=True),
-    },
-    timeout=3600,  # 1 hour
-    retries=modal.Retries(max_retries=1, backoff_coefficient=2.0),
-)
+# ponytail: DataPipelineConfig is a plain dataclass, NOT a Modal function.
+# It was previously decorated with @app.function(...), which rebinds the class
+# to a _ModalFunctionWrapper instance and breaks `DataPipelineConfig | None`
+# annotations at import time (TypeError with real modal).
 @dataclass
 class DataPipelineConfig:
     """Configuration for the data pipeline."""

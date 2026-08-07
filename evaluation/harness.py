@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import math
+import os
 import random
 import statistics
 import tempfile
@@ -70,6 +71,9 @@ _APP_RUN_FAILED: set[Any] = set()
 # so the atexit handler can close it symmetrically.
 _OUTPUT_ENABLED: list[bool] = [False]
 _OUTPUT_CM: list[Any] = [None]
+# Apps a stop-watchdog thread is already running for (see
+# ``_start_stop_watchdog``). Guarded by ``_APP_LOCK``.
+_APP_WATCHED: set[Any] = set()
 
 
 def _close_modal_apps() -> None:
@@ -98,6 +102,71 @@ def _close_modal_apps() -> None:
 
 
 atexit.register(_close_modal_apps)
+
+
+def _app_heartbeat_alive(client: Any, request: Any, loop: Any) -> bool:
+    """One heartbeat probe: True if the app is alive, False if stopped.
+
+    Modal 1.5.x raises ``ConflictError`` on ``AppHeartbeat`` once the app
+    leaves the running state (e.g. stopped from the dashboard). Any other
+    error counts as alive so a transient network blip doesn't kill the eval.
+    """
+    try:
+        loop.run_until_complete(client.stub.AppHeartbeat(request))
+    except Exception as exc:  # noqa: BLE001 — deliberate: only stop on ConflictError
+        from modal.exception import ConflictError
+
+        return not isinstance(exc, ConflictError)
+    return True
+
+
+def _start_stop_watchdog(app: Any) -> None:
+    """Exit the process if the app is stopped from the Modal dashboard.
+
+    Modal 1.5.x's client keeps heartbeating forever after a dashboard stop
+    (the ``ConflictError`` is logged and swallowed by ``_run_app``'s infinite
+    loop) and the in-flight ``.remote()`` result wait never resolves, so a CI
+    eval step would hang until the job timeout. This watchdog replays modal's
+    own heartbeat probe from a daemon thread and aborts the process shortly
+    after the app is stopped, so the GH Actions step fails fast instead of
+    burning 240 minutes of runner time.
+
+    Must be called with ``_APP_LOCK`` held (from ``_ensure_app_running``).
+    """
+    if app in _APP_WATCHED:
+        return
+    running = getattr(app, "_running_app", None)
+    app_id = getattr(running, "app_id", None)
+    if not app_id:
+        return
+    _APP_WATCHED.add(app)
+
+    def _watch() -> None:
+        import asyncio
+
+        from modal import Client
+        from modal_proto import api_pb2
+
+        try:
+            client = Client.from_env()
+        except Exception:  # noqa: BLE001 — no client, nothing to watch
+            logger.debug("modal stop watchdog: no client available", exc_info=True)
+            return
+        request = api_pb2.AppHeartbeatRequest(app_id=app_id)
+        loop = asyncio.new_event_loop()
+        while True:
+            time.sleep(15)  # mirror modal's own HEARTBEAT_INTERVAL
+            if not _app_heartbeat_alive(client, request, loop):
+                logger.error(
+                    "Modal app %s was stopped from the dashboard — aborting "
+                    "(modal 1.5.x client would heartbeat forever)",
+                    app_id,
+                )
+                # App is gone; modal teardown is pointless. os._exit skips
+                # atexit, which is exactly what we want on the abort path.
+                os._exit(1)
+
+    threading.Thread(target=_watch, name="modal-stop-watchdog", daemon=True).start()
 
 
 def _ensure_app_running(app: Any) -> None:
@@ -145,6 +214,7 @@ def _ensure_app_running(app: Any) -> None:
                 _APP_RUN_FAILED.add(app)
                 raise
             _APP_RUN_STACKS[app] = stack
+        _start_stop_watchdog(app)
 
 
 # ── Executor indirection (monkeypatchable in tests) ─────────────────────────

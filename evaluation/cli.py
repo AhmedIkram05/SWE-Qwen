@@ -74,6 +74,12 @@ def run(
         "--mode",
         help="smoke|dev|final|full preset (seed-42 subsets); smoke runs the CI F2P gate",
     ),
+    update_baseline: bool = typer.Option(
+        False,
+        "--update-baseline",
+        help="write the smoke baseline (and bootstrap it if absent). CI PR runs leave it "
+        "read-only; main/CD runs pass this flag.",
+    ),
     backend: str = typer.Option("modal", help="modal|local"),
     ollama_model: str = typer.Option("qwen2.5-coder:7b", help="Ollama model tag (local backend)"),
     ollama_url: str = typer.Option("http://localhost:11434", help="Ollama base URL"),
@@ -115,7 +121,7 @@ def run(
         _echo_interrupt(resume)
     _report_run(eval_run)
     if mode == "smoke":
-        _smoke_gate(eval_run, config)
+        _smoke_gate(eval_run, config, update_baseline)
 
 
 @app.command()
@@ -387,21 +393,76 @@ def _report_run(eval_run: EvalRun) -> None:
     typer.echo(f"run_id: {eval_run.run_id}")
 
 
-def _smoke_gate(eval_run: EvalRun, config: EvalConfig) -> None:
-    """CI regression gate: exit 1 if any model:variant F2P dropped > tolerance.
+def _write_baseline(path: Path, dataset_run_id: str, rates: dict[str, float]) -> None:
+    """Persist *rates* in the current shape (run_id + nested mapping)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"dataset_run_id": dataset_run_id, "rates": rates}, indent=2) + "\n")
+
+
+def _read_smoke_baseline(path: Path) -> tuple[str, dict[str, float]]:
+    """Load the annotated (run_id, rates) baseline; exit 1 on corrupt JSON.
+
+    A legacy flat ``{key: rate}`` file (no run_id) is normalized to run_id "".
+    """
+    if not path.exists():
+        return "", {}
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        typer.echo(f"SMOKE GATE FAIL: corrupt baseline {path}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    def _coerce(rates: object) -> dict[str, float]:
+        if not isinstance(rates, dict):
+            raise TypeError("rates must be an object")
+        try:
+            return {str(k): float(v) for k, v in rates.items()}
+        except (TypeError, ValueError):
+            raise ValueError("rates must be numeric") from None
+
+    if isinstance(raw, dict) and "rates" in raw:
+        try:
+            rates = _coerce(raw["rates"])
+        except (TypeError, ValueError) as exc:
+            typer.echo(f"SMOKE GATE FAIL: corrupt baseline {path}: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        return str(raw.get("dataset_run_id", "")), rates
+    if isinstance(raw, dict):
+        try:
+            return "", _coerce(raw)
+        except (TypeError, ValueError) as exc:
+            typer.echo(f"SMOKE GATE FAIL: corrupt baseline {path}: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+    typer.echo(f"SMOKE GATE FAIL: corrupt baseline {path}", err=True)
+    raise typer.Exit(code=1) from None
+
+
+def _gate_failures(
+    current: dict[str, float], rates: dict[str, float], tolerance: float, floor: float
+) -> tuple[list[tuple[str, float, float]], list[tuple[str, float]], list[str]]:
+    """Rows for: relative-drop failure, absolute-floor failure, vanished key."""
+    failures = [
+        (k, r, rates[k]) for k, r in current.items() if k in rates and r < rates[k] - tolerance
+    ]
+    below_floor = [(k, r) for k, r in current.items() if r < floor]
+    missing = [k for k in rates if k not in current]
+    return failures, below_floor, missing
+
+
+def _smoke_gate(eval_run: EvalRun, config: EvalConfig, update_baseline: bool = False) -> None:
+    """CI regression gate: exit 1 if a variant's F2P dropped > tolerance or
+    sits below the absolute floor ``config.min_f2p_threshold``.
 
     Baseline lives at ``{output_dir}/smoke_baseline.json`` as
-    ``{"model:variant:prompt": f2p_rate}``.  The first run writes the baseline
-    and passes; later runs fail when F2P < baseline - ``_SMOKE_TOLERANCE``.
+    ``{"dataset_run_id": ..., "rates": {"model:variant:prompt": f2p_rate}}``
+    (a legacy flat mapping is read and normalized).  The baseline is written
+    only when *update_baseline* is true (main/CD runs); PR runs are read-only.
+    A ``dataset_run_id`` mismatch — the evaluation data was regenerated, so
+    every deterministic subset was redrawn — is treated as no baseline and
+    forces a re-bootstrap around the current data.
     """
     baseline_path = config.output_dir / "smoke_baseline.json"
-    baseline: dict[str, float] = {}
-    if baseline_path.exists():
-        try:
-            baseline = json.loads(baseline_path.read_text())
-        except json.JSONDecodeError:
-            typer.echo(f"SMOKE GATE FAIL: corrupt baseline {baseline_path}", err=True)
-            raise typer.Exit(code=1) from None
+    baseline_run_id, rates = _read_smoke_baseline(baseline_path)
     # key by (model, variant, prompt) — a multi-prompt run must not let one
     # template's rate silently mask another's
     current = {
@@ -412,29 +473,44 @@ def _smoke_gate(eval_run: EvalRun, config: EvalConfig) -> None:
             "SMOKE GATE FAIL: run produced no aggregate metrics (all repos checkpointed?)", err=True
         )
         raise typer.Exit(code=1)
-    if not baseline:
-        baseline_path.parent.mkdir(parents=True, exist_ok=True)
-        baseline_path.write_text(json.dumps(current, indent=2) + "\n")
+    if not rates or baseline_run_id != config.dataset_run_id:
+        if not update_baseline:
+            typer.echo(
+                "SMOKE GATE FAIL: no baseline for dataset_run_id "
+                f"{config.dataset_run_id!r}; rerun with --update-baseline to bootstrap it",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        rates = {key: max(rate, config.min_f2p_threshold) for key, rate in current.items()}
+        _write_baseline(baseline_path, config.dataset_run_id, rates)
         typer.echo(f"smoke baseline written: {baseline_path}")
         return
-    failures = [
-        (key, rate, baseline[key])
-        for key, rate in current.items()
-        if key in baseline and rate < baseline[key] - _SMOKE_TOLERANCE
-    ]
-    # a variant previously gated that vanished from this run is also a failure
-    missing = [key for key in baseline if key not in current]
-    if failures or missing:
+    failures, below_floor, missing = _gate_failures(
+        current, rates, _SMOKE_TOLERANCE, config.min_f2p_threshold
+    )
+    if failures or below_floor or missing:
         for key, rate, base in failures:
             typer.echo(
                 f"SMOKE GATE FAIL: {key} f2p {rate:.2%} < baseline {base:.2%}"
                 f" (drop > {_SMOKE_TOLERANCE:.0%})"
             )
+        for key, rate in below_floor:
+            typer.echo(
+                f"SMOKE GATE FAIL: {key} f2p {rate:.2%} < floor {config.min_f2p_threshold:.2%}"
+            )
         for key in missing:
             typer.echo(f"SMOKE GATE FAIL: {key} missing from this run (was in baseline)")
         raise typer.Exit(code=1)
-    baseline.update(current)
-    baseline_path.write_text(json.dumps(baseline, indent=2) + "\n")
+    if not update_baseline:
+        typer.echo("smoke gate passed; baseline unchanged (read-only)")
+        return
+    rates.update(
+        {
+            key: max(rate, rates.get(key, 0.0), config.min_f2p_threshold)
+            for key, rate in current.items()
+        }
+    )
+    _write_baseline(baseline_path, config.dataset_run_id, rates)
     typer.echo("smoke gate passed; baseline updated")
 
 

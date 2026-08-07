@@ -1,0 +1,32 @@
+# Dependabot: PR-based dependency updates (no auto-merge — every bump is
+# reviewed and passes CI + the eval gate before landing).
+version: 2
+updates:
+  # Python deps (pyproject.toml + uv.lock). A bump touches uv.lock, which is
+  # in both ci and eval.yml path filters, so the eval gate fires deliberately.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    # Collapse minor/patch bumps into one PR per run so the GPU eval gate
+    # fires once, not once per package. Major versions stay individual PRs.
+    groups:
+      python-minor-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions (workflow versions). Also weekly, merged via review.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"

@@ -246,7 +246,7 @@ class TestConfigYamlFiles:
     """Verify the actual YAML files are valid."""
 
     def test_models_yaml_is_valid(self):
-        config_dir = Path(__file__).resolve().parent.parent / "config"
+        config_dir = Path(__file__).resolve().parents[2] / "config"
         models_path = config_dir / "models.yaml"
         assert models_path.exists(), "models.yaml not found"
         with models_path.open() as f:
@@ -256,7 +256,7 @@ class TestConfigYamlFiles:
         assert "qwen3-14b" in data["models"]
 
     def test_qlora_variants_yaml_is_valid(self):
-        config_dir = Path(__file__).resolve().parent.parent / "config"
+        config_dir = Path(__file__).resolve().parents[2] / "config"
         variants_path = config_dir / "qlora_variants.yaml"
         assert variants_path.exists(), "qlora_variants.yaml not found"
         with variants_path.open() as f:

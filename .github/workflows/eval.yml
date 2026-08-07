@@ -1,0 +1,157 @@
+name: Model Eval Gate (SWE-bench Smoke Test)
+
+# Phase 7 (7.4/7.5): run the smoke evaluation on PRs that touch model/eval
+# code, GATE the merge on the champion's F2P (absolute floor + regression vs
+# the CD-owned baseline). PRs read the baseline only; pushes to main update it.
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'evaluation/**'
+      - 'training/**'
+      - 'inference/**'
+      - 'config/**'             # models.yaml, qlora_variants.yaml: re-validate champion on config change
+      - 'training/prompts/**'   # prompt template changes must re-run the gate
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/eval.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'evaluation/**'
+      - 'training/**'
+      - 'inference/**'
+      - 'config/**'
+      - 'training/prompts/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/eval.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  # Same run id consumed by tokenize, training, and eval. EvalConfig reads
+  # EVAL_DATASET_RUN_ID via env_prefix="EVAL_" -> drives golden_data_path.
+  DATASET_RUN_ID: "expanded-repos"
+  EVAL_DATASET_RUN_ID: "expanded-repos"
+
+jobs:
+  init-wandb:
+    name: Init Weights & Biases Project
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      # research note 7: the swe-qwen project auto-deleted once (W&B
+      # inactivity policy). Pin/recreate it BEFORE any eval job resolves
+      # artifacts from it. Entity must match EvalConfig.wandb_entity.
+      - name: Pin / recreate W&B project
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: uv run python scripts/init_wandb.py --entity 2571642-university-of-dundee
+
+  eval-gate:
+    name: Smoke-Test Model vs Baseline
+    needs: init-wandb
+    runs-on: ubuntu-latest
+    timeout-minutes: 240  # Modal fn cap is 300 min; keep headroom for eval jobs
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      # Baseline lives in GCS (gitignored locally). Split download so a first
+      # run without a baseline doesn't fail: bootstrap happens on push to main.
+      - name: Download smoke baseline
+        run: |
+          set +e
+          gcloud storage cp gs://swe-qwen-datasets/ci/smoke_baseline.json data/eval_results/ \
+            2> /tmp/gcs_baseline_err.txt
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "::warning::No smoke baseline in GCS yet (rc=$rc); will bootstrap on push to main."
+          fi
+          ls -la data/eval_results/ 2>/dev/null || true
+
+      # PR:  read-only gate. Main push:  --update-baseline writes it (CD-owned,
+      # write-once-per-dataset semantics). develop only arrives via PR trigger.
+      # Debug mode: while GitHub repo/org var RUN_MODAL_EVAL=="false", PRs run a
+      # free `modal token info` (validates the Modal secret pair) instead of
+      # spending GPU. Delete the variable -> real gate resumes. Main is always
+      # real: the CD-owned baseline bootstraps there.
+      - name: Run smoke eval gate
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            FLAGS="--update-baseline"
+          else
+            FLAGS=""
+          fi
+          if [ "${{ vars.RUN_MODAL_EVAL }}" = "false" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::notice::RUN_MODAL_EVAL=false — validating Modal creds instead of running GPU eval"
+            uv run modal token info
+          else
+            uv run eval run --mode smoke --models qwen3-14b:higher_lr_14b $FLAGS
+          fi
+
+      # CD-owned baseline: write it back to the ci/ path the download step reads.
+      # Only on main; PR runs never touch it.
+      - name: Upload smoke baseline (CD-owned)
+        if: github.ref == 'refs/heads/main' && !cancelled()
+        run: gcloud storage cp data/eval_results/smoke_baseline.json gs://swe-qwen-datasets/ci/smoke_baseline.json
+
+      - name: Upload eval results to GCS
+        if: always() && !cancelled()
+        run: |
+          if [ -d data/eval_results ]; then
+            gcloud storage cp data/eval_results/ \
+              gs://swe-qwen-datasets/eval/${{ env.DATASET_RUN_ID }}/ \
+              --recursive --exclude '**/smoke_baseline.json'
+          fi

@@ -1,0 +1,173 @@
+name: "CD: Terraform Infra & Modal Deploy"
+
+# Phase 7 (7.6): Terraform plan runs on every PR (read-only, reviewable via
+# the job summary); apply is a separate job gated by the `production`
+# GitHub Environment (manual approval) and runs on merge to main.
+# The Modal endpoint deploys on merge to main (and manual dispatch).
+# Phase 9 owns the "if promoted then deploy" promotion logic; this workflow
+# only wires the triggers.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - 'inference/**'
+      - 'config/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/cd.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - 'inference/**'
+      - 'config/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/cd.yml'
+  workflow_dispatch:
+
+concurrency:
+  # Never cancel a run mid-apply. PR plans for the same ref supersede each other.
+  group: cd-terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: "1.9.0"
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: infra/terraform/.terraform
+          key: terraform-${{ hashFiles('infra/terraform/**/*.tf', 'infra/terraform/**/*.tfvars') }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      # ponytail: -lock=false safe for read-only plan; the cd-terraform-${{ github.ref }}
+      # concurrency group prevents parallel applies. Exit code 2 = changes detected.
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -lock=false -no-color -out=tfplan \
+            -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            -var="gcp_region=${{ secrets.GCP_REGION }}" \
+            -var="environment=dev" \
+            -var="repository_name=${{ github.repository }}" \
+            -var="repository_owner=${{ github.repository_owner }}" \
+            || { rc=$?; [ $rc -eq 2 ] && true || exit $rc; }
+
+      - name: Publish Plan to Job Summary
+        run: |
+          echo '## Terraform Plan' >> $GITHUB_STEP_SUMMARY
+          echo '```terraform' >> $GITHUB_STEP_SUMMARY
+          terraform show -no-color tfplan >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: infra/terraform/tfplan
+          retention-days: 7
+
+  terraform-apply:
+    name: Terraform Apply
+    needs: terraform-plan
+    # Merge to main (or manual dispatch). Pull requests stop at plan.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production # requires manual approval in Settings → Environments
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: infra/terraform/.terraform
+          key: terraform-${{ hashFiles('infra/terraform/**/*.tf', 'infra/terraform/**/*.tfvars') }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: infra/terraform
+
+      - name: Terraform Apply
+        run: terraform apply tfplan # applies the reviewed plan, no re-plan
+
+  deploy-modal:
+    name: Deploy Modal Endpoint
+    runs-on: ubuntu-latest
+    # Deploy on merge to main and on manual dispatch (skip PRs).
+    # Phase 9 adds the "if champion promoted" condition on top.
+    if: github.event_name != 'pull_request'
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      # Modal 1.5.3 requires -m for module paths (IMPLEMENTATION-LOG 6.7).
+      - name: Deploy serving endpoint
+        run: uv run modal deploy -m inference.modal_serve

@@ -27,6 +27,7 @@ from evaluation.cli import (
     _resolve_proxy_champion,
     _run_best_f2p,
     _smoke_gate,
+    _write_baseline,
 )
 from evaluation.cli import (
     app as cli_app,
@@ -132,12 +133,21 @@ class TestRunCommand:
         assert _StubHarness.calls[0][3] == 50
 
     def test_mode_smoke_resolves_tier(self, stub_harness):
-        result = _runner().invoke(cli_app, ["run", "--mode", "smoke"])
+        # first run on a fresh output dir must bootstrap the baseline
+        result = _runner().invoke(cli_app, ["run", "--mode", "smoke", "--update-baseline"])
         assert result.exit_code == 0, result.output
         assert _StubHarness.calls[0][0] == "swebench"
         assert _StubHarness.calls[0][3] == stub_harness.tier_sizes["smoke"]
         # smoke gate ran -> baseline written
         assert (stub_harness.output_dir / "smoke_baseline.json").is_file()
+
+    def test_mode_smoke_requires_update_baseline_on_first_run(self, stub_harness):
+        # PR-style run with no baseline present must refuse, not mint one.
+        result = _runner().invoke(cli_app, ["run", "--mode", "smoke"])
+        assert result.exit_code == 1
+        assert "SMOKE GATE FAIL" in result.output
+        assert "--update-baseline" in result.output
+        assert not (stub_harness.output_dir / "smoke_baseline.json").exists()
 
     @pytest.mark.parametrize("mode", ["dev", "final", "full"])
     def test_mode_tiers(self, stub_harness, mode):
@@ -200,13 +210,114 @@ class TestRunCommand:
 
     def test_smoke_gate_fails_on_drop(self, stub_harness):
         runner = _runner()
-        first = runner.invoke(cli_app, ["run", "--mode", "smoke"])
+        first = runner.invoke(cli_app, ["run", "--mode", "smoke", "--update-baseline"])
         assert first.exit_code == 0, first.output
 
         _StubHarness.f2p = 0.3  # 0.5 -> 0.3 = 0.20 drop > 0.05 tolerance
         second = runner.invoke(cli_app, ["run", "--mode", "smoke"])
         assert second.exit_code == 1
         assert "SMOKE GATE FAIL" in second.output
+
+
+# ── smoke gate internals (new --update-baseline contract) ────────────────
+
+
+class TestSmokeGate:
+    @staticmethod
+    def _raw_baseline(config: EvalConfig, content: str) -> Path:
+        path = config.output_dir / "smoke_baseline.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        return path
+
+    def test_no_aggregate_exits(self, stub_harness):
+        run = _canned_run(stub_harness)
+        run.aggregate = []
+        with pytest.raises(typer.Exit) as exc:
+            _smoke_gate(run, stub_harness, update_baseline=True)
+        assert exc.value.exit_code == 1
+
+    def test_corrupt_baseline_exits(self, stub_harness):
+        self._raw_baseline(stub_harness, "{not json")
+        with pytest.raises(typer.Exit) as exc:
+            _smoke_gate(_canned_run(stub_harness), stub_harness)
+        assert exc.value.exit_code == 1
+
+    def test_corrupt_rates_exits(self, stub_harness):
+        self._raw_baseline(
+            stub_harness,
+            json.dumps({"rates": {f"{stub_harness.dataset_run_id}": "nan!"}}),
+        )
+        with pytest.raises(typer.Exit) as exc:
+            _smoke_gate(_canned_run(stub_harness), stub_harness)
+        assert exc.value.exit_code == 1
+
+    def test_legacy_flat_baseline_read_only_pass(self, stub_harness, capsys):
+        self._raw_baseline(stub_harness, json.dumps({"qwen3-14b:baseline_14b:chat": 0.4}))
+        # flat legacy file -> normalized run_id "" -> matches default dataset_run_id
+        _smoke_gate(_canned_run(stub_harness), stub_harness)
+        assert "baseline unchanged (read-only)" in capsys.readouterr().out
+
+    def test_legacy_flat_baseline_update_merges(self, stub_harness):
+        path = self._raw_baseline(stub_harness, json.dumps({"qwen3-14b:baseline_14b:chat": 0.4}))
+        _smoke_gate(_canned_run(stub_harness), stub_harness, update_baseline=True)
+        baseline = json.loads(path.read_text())
+        assert baseline["dataset_run_id"] == stub_harness.dataset_run_id
+        assert baseline["rates"]["qwen3-14b:baseline_14b:chat"] == max(
+            0.5, 0.4, stub_harness.min_f2p_threshold
+        )
+
+    def test_missing_variant_from_run_exits(self, stub_harness):
+        path = stub_harness.output_dir / "smoke_baseline.json"
+        _write_baseline(
+            path,
+            stub_harness.dataset_run_id,
+            {
+                "qwen3-14b:baseline_14b:chat": 0.5,
+                "qwen3-14b:lora_x:chat": 0.4,
+            },
+        )
+        with pytest.raises(typer.Exit) as exc:
+            _smoke_gate(_canned_run(stub_harness), stub_harness)
+        assert exc.value.exit_code == 1
+
+    def test_below_floor_exits(self, stub_harness):
+        path = stub_harness.output_dir / "smoke_baseline.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_baseline(
+            path,
+            stub_harness.dataset_run_id,
+            {"qwen3-14b:baseline_14b:chat": 0.5},
+        )
+        cfg = stub_harness.model_copy(update={"min_f2p_threshold": 0.9})
+        with pytest.raises(typer.Exit) as exc:
+            _smoke_gate(_canned_run(cfg), cfg)
+        assert exc.value.exit_code == 1
+
+    def test_update_rewrites_baseline(self, stub_harness):
+        runner = _runner()
+        first = runner.invoke(cli_app, ["run", "--mode", "smoke", "--update-baseline"])
+        assert first.exit_code == 0, first.output
+        second = runner.invoke(cli_app, ["run", "--mode", "smoke", "--update-baseline"])
+        assert second.exit_code == 0, second.output
+        assert "baseline updated" in second.output
+
+    def test_update_merge_adds_new_keys(self, stub_harness):
+        path = stub_harness.output_dir / "smoke_baseline.json"
+        _write_baseline(path, stub_harness.dataset_run_id, {"qwen3-14b:baseline_14b:chat": 0.3})
+        run = _canned_run(stub_harness)
+        run.aggregate = [
+            _metrics(),  # in baseline
+            _metrics(variant="lora_x", f2p=0.8),  # brand-new key
+        ]
+        _smoke_gate(run, stub_harness, update_baseline=True)
+        baseline = json.loads(path.read_text())
+        assert baseline["rates"]["qwen3-14b:baseline_14b:chat"] == max(
+            0.5, 0.3, stub_harness.min_f2p_threshold
+        )
+        assert baseline["rates"]["qwen3-14b:lora_x:chat"] == max(
+            0.8, 0.0, stub_harness.min_f2p_threshold
+        )
 
 
 # ── other run commands ────────────────────────────────────────────────────

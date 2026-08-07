@@ -98,11 +98,15 @@ vllm_image = (
     # Phase 6 Wave 1: evaluation.inference now imports inference.prompt_builder
     # at module level, so the container needs the package baked in.
     .add_local_dir(str(_INFERENCE_DIR), remote_path="/root/inference", copy=True)
-    # Gold patch diffs for few-shot prompting (see _golden_patches).
-    .add_local_file(
+)
+# Gold patch diffs for few-shot prompting (see _golden_patches). Baked only
+# when present: data/golden.jsonl is gitignored (CI has no data dir — image
+# build used to FileNotFoundError), and the container fetches golden from GCS
+# at runtime (_ensure_golden), so the bake is just an air-gap fallback.
+if (_REPO_ROOT / "data" / "golden.jsonl").is_file():
+    vllm_image = vllm_image.add_local_file(
         str(_REPO_ROOT / "data" / "golden.jsonl"), remote_path="/root/data/golden.jsonl"
     )
-)
 
 model_volume = modal.Volume.from_name("eval-model-cache", create_if_missing=True)
 

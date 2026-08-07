@@ -222,6 +222,51 @@ resource "google_project_iam_member" "github_actions_bigquery_job_user" {
   member  = "serviceAccount:${google_service_account.github_actions[0].email}"
 }
 
+# Control-plane roles so the GitHub Actions SA can run terraform against this
+# project (projects.setIamPolicy, WIF pools, secrets, artifact registry).
+# Chicken-and-egg: terraform grants them, so the FIRST grant must be
+# bootstrapped manually once:
+#   gcloud projects add-iam-policy-binding $PROJECT \
+#     --member="serviceAccount:github-actions-${environment}@${PROJECT}.iam.gserviceaccount.com" \
+#     --role=roles/owner
+#   (or the four roles below; roles/owner is the pragmatic one-shot)
+# After that, this module keeps the grants in sync on every plan/apply.
+# ponytail: roles/serviceusage.apiUsageAdmin is REJECTED by GCP at project
+# IAM level ("not supported for this resource") — no google_project_iam_member
+# for it. It is only needed to enable/disable APIs; the 13 required_apis are
+# already enabled, so CI never needs it. If a new API is ever added, enable it
+# once with an owner credential.
+resource "google_project_iam_member" "github_actions_iam_security_admin" {
+  count   = var.enable_workload_identity ? 1 : 0
+  project = var.project_id
+  role    = "roles/iam.securityAdmin"
+  member  = "serviceAccount:${google_service_account.github_actions[0].email}"
+}
+
+resource "google_project_iam_member" "github_actions_wif_pool_admin" {
+  count   = var.enable_workload_identity ? 1 : 0
+  project = var.project_id
+  role    = "roles/iam.workloadIdentityPoolAdmin"
+  member  = "serviceAccount:${google_service_account.github_actions[0].email}"
+}
+
+resource "google_project_iam_member" "github_actions_secret_admin" {
+  count   = var.enable_workload_identity ? 1 : 0
+  project = var.project_id
+  role    = "roles/secretmanager.admin"
+  member  = "serviceAccount:${google_service_account.github_actions[0].email}"
+}
+
+resource "google_project_iam_member" "github_actions_artifact_registry_admin" {
+  count   = var.enable_workload_identity ? 1 : 0
+  project = var.project_id
+  role    = "roles/artifactregistry.admin"
+  member  = "serviceAccount:${google_service_account.github_actions[0].email}"
+}
+
+# NOTE: no roles/serviceusage.apiUsageAdmin grant — GCP rejects it at project
+# level ("not supported for this resource"). See comment above.
+
 # IAM Roles for Cloud Build Service Account
 resource "google_project_iam_member" "cloud_build_storage_admin" {
   project = var.project_id

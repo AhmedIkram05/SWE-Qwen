@@ -1125,3 +1125,70 @@ def test_estimate_run_cost_a10g_rate(monkeypatch: pytest.MonkeyPatch) -> None:
         assert out["inference_usd"] == pytest.approx(1.0 * 0.0167)
     finally:
         hv._GPU_RATE_PER_MIN = original_rate
+
+
+# ── Modal stop-watchdog heartbeat probe ────────────────────────────────────
+
+
+class _FakeHeartbeatStub:
+    """Minimal stub: raises *exc* (or succeeds) on AppHeartbeat."""
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        self.exc = exc
+
+    async def AppHeartbeat(self, request: Any) -> Any:  # noqa: ANN401, N802 — mirrors modal's stub method name
+        if self.exc is not None:
+            raise self.exc
+        return object()
+
+
+def _resolve_modal_conflict(monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
+    """Point the lazy ``from modal.exception import ConflictError`` at a local
+    stand-in (tests run with a fake ``modal`` module, so the real class is
+    unreachable). Returns the stand-in class."""
+    import sys
+    import types
+
+    exc_mod = types.ModuleType("modal.exception")
+    exc_cls = type("ConflictError", (Exception,), {})
+    exc_mod.ConflictError = exc_cls
+    monkeypatch.setitem(sys.modules, "modal.exception", exc_mod)
+    return exc_cls
+
+
+def test_app_heartbeat_alive_ok() -> None:
+    """A successful heartbeat means the app is still running."""
+    import asyncio
+
+    from evaluation.harness import _app_heartbeat_alive
+
+    loop = asyncio.new_event_loop()
+    client = types.SimpleNamespace(stub=_FakeHeartbeatStub())
+    assert _app_heartbeat_alive(client, object(), loop) is True
+
+
+def test_app_heartbeat_alive_false_on_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ConflictError heartbeat means the app was stopped (dashboard stop)."""
+    import asyncio
+
+    from evaluation.harness import _app_heartbeat_alive
+
+    conflict = _resolve_modal_conflict(monkeypatch)
+    loop = asyncio.new_event_loop()
+    stub = _FakeHeartbeatStub(conflict("App state is APP_STATE_STOPPED"))
+    client = types.SimpleNamespace(stub=stub)
+    assert _app_heartbeat_alive(client, object(), loop) is False
+
+
+def test_app_heartbeat_alive_ignores_transient_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Network blips must not kill the eval — only a stopped app does."""
+    import asyncio
+
+    from evaluation.harness import _app_heartbeat_alive
+
+    _resolve_modal_conflict(monkeypatch)
+    loop = asyncio.new_event_loop()
+    client = types.SimpleNamespace(stub=_FakeHeartbeatStub(TimeoutError("transient")))
+    assert _app_heartbeat_alive(client, object(), loop) is True

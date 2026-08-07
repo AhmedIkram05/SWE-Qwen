@@ -79,45 +79,128 @@ def _run(run_id: str, results: list[EvalResult]) -> EvalRun:
 
 # ── _smoke_gate ──────────────────────────────────────────────────────────────
 
+_KEY = "qwen3-14b:baseline_14b:chat"
 
-def _smoke_gate(run: EvalRun, cfg: EvalConfig) -> None:
+
+def _smoke_gate(run: EvalRun, cfg: EvalConfig, update_baseline: bool = False) -> None:
     from evaluation.cli import _smoke_gate
 
-    return _smoke_gate(run, cfg)
+    return _smoke_gate(run, cfg, update_baseline)
+
+
+def _set_run_id(cfg: EvalConfig, run_id: str) -> EvalConfig:
+    return cfg.model_copy(update={"dataset_run_id": run_id})
 
 
 class TestSmokeGate:
-    def test_first_run_writes_baseline(self, tmp_path):
+    def _read(self, cfg: EvalConfig) -> dict:
+        return json.loads((cfg.output_dir / "smoke_baseline.json").read_text())
+
+    def _seed(self, cfg: EvalConfig, rates: dict[str, float], run_id: str = "") -> None:
+        (cfg.output_dir / "smoke_baseline.json").write_text(
+            json.dumps({"dataset_run_id": run_id, "rates": rates})
+        )
+
+    def test_bootstrap_without_flag_exits_1(self, tmp_path):
         cfg = _cfg(tmp_path)
         run = _run("smoke-1", [_result("inst-a", f2p=0.5), _result("inst-b", f2p=1.0)])
-        _smoke_gate(run, cfg)
-        baseline = json.loads((cfg.output_dir / "smoke_baseline.json").read_text())
-        assert baseline["qwen3-14b:baseline_14b:chat"] == pytest.approx(0.75)
+        with pytest.raises(typer.Exit) as exc:
+            _smoke_gate(run, cfg)
+        assert exc.value.exit_code == 1
+        assert not (cfg.output_dir / "smoke_baseline.json").exists()
+
+    def test_bootstrap_with_flag_writes_floor_wrapped(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        run = _run("smoke-1", [_result("inst-a", f2p=0.5), _result("inst-b", f2p=1.0)])
+        _smoke_gate(run, cfg, update_baseline=True)
+        baseline = self._read(cfg)
+        assert baseline["dataset_run_id"] == ""
+        assert baseline["rates"][_KEY] == pytest.approx(0.75)
+
+    def test_bootstrap_wraps_subfloor_rate_up_to_floor(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        run = _run("smoke-1", [_result("inst-a", f2p=0.05), _result("inst-b", f2p=0.10)])
+        _smoke_gate(run, cfg, update_baseline=True)
+        assert self._read(cfg)["rates"][_KEY] == pytest.approx(cfg.min_f2p_threshold)
+
+    def test_stale_run_id_rebootstraps(self, tmp_path):
+        cfg = _set_run_id(_cfg(tmp_path), "expanded-repos")
+        self._seed(cfg, {_KEY: 0.80}, run_id="old-dataset")
+        run = _run("smoke-1", [_result("inst-a", f2p=0.5), _result("inst-b", f2p=1.0)])
+        _smoke_gate(run, cfg, update_baseline=True)
+        baseline = self._read(cfg)
+        assert baseline["dataset_run_id"] == "expanded-repos"
+        assert baseline["rates"][_KEY] == pytest.approx(0.75)
+
+    def test_stale_run_id_readonly_exits_1(self, tmp_path):
+        cfg = _set_run_id(_cfg(tmp_path), "expanded-repos")
+        self._seed(cfg, {_KEY: 0.80}, run_id="old-dataset")
+        run = _run("smoke-1", [_result("inst-a", f2p=1.0)])
+        with pytest.raises(typer.Exit) as exc:
+            _smoke_gate(run, cfg)
+        assert exc.value.exit_code == 1
+
+    def test_legacy_flat_baseline_normalized(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        (cfg.output_dir / "smoke_baseline.json").write_text(json.dumps({_KEY: 0.80}))
+        run = _run("smoke-2", [_result("inst-a", f2p=1.0), _result("inst-b", f2p=1.0)])
+        _smoke_gate(run, cfg)  # read-only: passes, file untouched
+        assert json.loads((cfg.output_dir / "smoke_baseline.json").read_text())[_KEY] == 0.80
 
     def test_drop_beyond_tolerance_exits_1(self, tmp_path):
         cfg = _cfg(tmp_path)
-        (cfg.output_dir / "smoke_baseline.json").write_text(
-            json.dumps({"qwen3-14b:baseline_14b:chat": 0.80})
-        )
+        self._seed(cfg, {_KEY: 0.80})
         run = _run("smoke-2", [_result("inst-a", f2p=0.5), _result("inst-b", f2p=0.5)])
         with pytest.raises(typer.Exit) as exc:
             _smoke_gate(run, cfg)
         assert exc.value.exit_code == 1
 
-    def test_within_tolerance_updates_baseline(self, tmp_path):
+    def test_within_tolerance_updates_monotonically(self, tmp_path):
         cfg = _cfg(tmp_path)
-        (cfg.output_dir / "smoke_baseline.json").write_text(
-            json.dumps({"qwen3-14b:baseline_14b:chat": 0.80})
-        )
+        self._seed(cfg, {_KEY: 0.80})
+        run = _run("smoke-3", [_result("inst-a", f2p=1.0), _result("inst-b", f2p=1.0)])
+        _smoke_gate(run, cfg, update_baseline=True)
+        assert self._read(cfg)["rates"][_KEY] == pytest.approx(1.0)
+
+    def test_readonly_passes_unchanged(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        self._seed(cfg, {_KEY: 0.80})
         run = _run("smoke-3", [_result("inst-a", f2p=1.0), _result("inst-b", f2p=1.0)])
         _smoke_gate(run, cfg)
-        baseline = json.loads((cfg.output_dir / "smoke_baseline.json").read_text())
-        assert baseline["qwen3-14b:baseline_14b:chat"] == pytest.approx(1.0)
+        assert self._read(cfg)["rates"][_KEY] == pytest.approx(0.80)
+
+    def test_absolute_floor_blocks_despite_healthy_baseline(self, tmp_path):
+        # inside relative tolerance (0.13 >= 0.16 - 0.05) but below the floor.
+        cfg = _cfg(tmp_path)
+        self._seed(cfg, {_KEY: 0.16})
+        run = _run("smoke-4", [_result("inst-a", f2p=0.13), _result("inst-b", f2p=0.13)])
+        with pytest.raises(typer.Exit) as exc:
+            _smoke_gate(run, cfg)
+        assert exc.value.exit_code == 1
 
     def test_corrupt_baseline_exits_1(self, tmp_path):
         cfg = _cfg(tmp_path)
         (cfg.output_dir / "smoke_baseline.json").write_text("{not json")
         run = _run("smoke-4", [_result("inst-a")])
+        with pytest.raises(typer.Exit) as exc:
+            _smoke_gate(run, cfg)
+        assert exc.value.exit_code == 1
+
+    def test_non_object_baseline_exits_1(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        (cfg.output_dir / "smoke_baseline.json").write_text("[1, 2, 3]")
+        run = _run("smoke-4", [_result("inst-a")])
+        with pytest.raises(typer.Exit) as exc:
+            _smoke_gate(run, cfg)
+        assert exc.value.exit_code == 1
+
+    def test_malformed_rates_exit_1(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        # Valid JSON but un-parseable rates must fail cleanly (no traceback).
+        (cfg.output_dir / "smoke_baseline.json").write_text(
+            json.dumps({"dataset_run_id": "", "rates": {"k": "abc"}})
+        )
+        run = _run("smoke-4b", [_result("inst-a")])
         with pytest.raises(typer.Exit) as exc:
             _smoke_gate(run, cfg)
         assert exc.value.exit_code == 1
@@ -133,9 +216,7 @@ class TestSmokeGate:
 
     def test_missing_variant_from_run_exits_1(self, tmp_path):
         cfg = _cfg(tmp_path)
-        (cfg.output_dir / "smoke_baseline.json").write_text(
-            json.dumps({"qwen3-14b:baseline_14b:chat": 0.80})
-        )
+        self._seed(cfg, {_KEY: 0.80})
         run = _run("smoke-6", [_result("inst-a", variant="other_14b", f2p=1.0)])
         with pytest.raises(typer.Exit) as exc:
             _smoke_gate(run, cfg)
