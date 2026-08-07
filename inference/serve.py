@@ -95,7 +95,7 @@ class VLLMEngine:
                 return _LLM_CACHE[key]
             llm = LLM(
                 model=key,
-                quantization=self.config.quantization,
+                quantization=self.config.quantization,  # type: ignore[arg-type]  # validated against vLLM at load time
                 enable_lora=True,  # allow both LoRA and non-LoRA generations
                 max_lora_rank=self.config.max_lora_rank,
                 gpu_memory_utilization=self.config.gpu_memory_utilization,
@@ -204,11 +204,14 @@ def _build_prompt(
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": user_text})
-    return tokenizer.apply_chat_template(  # type: ignore[no-any-return]
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
+    # tokenize=False always yields str; str() also satisfies warn_return_any.
+    return str(
+        tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
     )
 
 

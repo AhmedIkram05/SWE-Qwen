@@ -32,6 +32,10 @@ class TestResults(BaseModel):
     base-SHA vs head-SHA for ground-truth before/after.
     """
 
+    # ponytail: pytest collects imported classes named Test*; opt out once
+    # here so every test file importing this model stays warning-free.
+    __test__ = False
+
     passed: list[str] = []
     failed: list[str] = []
     errored: list[str] = []

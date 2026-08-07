@@ -20,6 +20,10 @@ Method = Literal["git_apply", "gnu_patch_fuzz", "unidiff_fallback", "failed", "n
 class TestResult(BaseModel):
     """Outcome of a single test run (before or after patch application)."""
 
+    # ponytail: pytest collects imported classes named Test*; opt out once
+    # here so every test file importing this model stays warning-free.
+    __test__ = False
+
     name: str
     status: Status
     duration: float

@@ -82,7 +82,7 @@ jobs:
             -var="environment=dev" \
             -var="repository_name=${{ github.repository }}" \
             -var="repository_owner=${{ github.repository_owner }}" \
-            f|| { rc=$?; [ $rc -eq 2 ] && true || exit $rc; }
+            || { rc=$?; [ $rc -eq 2 ] && true || exit $rc; }
 
       - name: Publish Plan to Job Summary
         run: |
