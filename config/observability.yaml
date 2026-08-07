@@ -1,0 +1,19 @@
+# ── Observability cost config ─────────────────────────────────────────────────
+# Shape: `rates: {gpu_type: USD/hour}` — Modal pay-per-use estimates (master
+# plan cost model; decision 3 "estimate-first", rate logged for auditability).
+# Keys must match the gpu_type values used in this repo:
+#   - a10g-24gb  inference/config.py::ServeConfig.gpu_type, evaluation/config.py,
+#                models.yaml qwen3-14b gpu_mapping.fallback
+#   - a100-80gb  models.yaml qwen3-14b gpu_mapping.primary (training + eval inference)
+#   - a100-40gb  training/qlora_config.py GPU_MEMORY_OVERRIDES
+#   - h100-80gb  models.yaml qwen3-30b-a3b gpu_mapping.primary (future phases)
+# "default" is used when gpu_type is None or unknown. Rates align with the
+# eval harness legacy constants (A10G 0.0167/min, A100-80GB 0.0417/min).
+# Env override: OBSERVABILITY_RATE_PER_HOUR wins when set and parseable.
+
+rates:
+  a10g-24gb: 1.0
+  a100-40gb: 2.0
+  a100-80gb: 2.5
+  h100-80gb: 4.0
+  default: 2.0

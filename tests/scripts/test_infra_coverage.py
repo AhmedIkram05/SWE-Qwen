@@ -989,7 +989,7 @@ class Test3ConfigAdvanced:
         mock_run.state = "running"
         mock_run.id = "run-456"
         mock_run.config.get.return_value = "higher_rank_14b"
-        mock_run.summary = {"train_loss": 0.5}
+        mock_run.summary = {"train/loss": 0.5}
         sys.modules["wandb"].Api.return_value.runs.return_value = [mock_run]
 
         result = mod._wandb_run_finished("test-run")
@@ -1251,7 +1251,7 @@ class Test3ConfigAdvanced:
         runs = [
             _run("3config-baseline_14b", "finished", "r1", "baseline_14b"),
             _run("3config-qlora_32b", "crashed", "r2", "qlora_32b"),
-            _run("3config-qlora_8b", "running", "r3", "qlora_8b", {"train_loss": 0.5}),
+            _run("3config-qlora_8b", "running", "r3", "qlora_8b", {"train/loss": 0.5}),
             _run("3config-qlora_16b", "running", "r4", "qlora_16b"),
         ]
         w.Api.return_value.runs.return_value = runs
@@ -1319,7 +1319,7 @@ class TestF2PProxyAdvanced:
         mock_run = mock.MagicMock()
         mock_run.created_at = "2024-01-02"
         mock_run.state = "finished"
-        mock_run.summary = {"train_loss": 0.5}
+        mock_run.summary = {"train/loss": 0.5}
         w.Api.return_value.runs.return_value = [mock_run]
 
         result = compute_proxy_f2p_scores(golden, {"baseline": "adapter-path"})
@@ -1362,7 +1362,7 @@ class TestF2PProxyAdvanced:
         w = self._setup()
         run_a = mock.MagicMock()
         run_a.created_at = "2024-01-03"
-        run_a.summary = {"train_loss": 0.5}
+        run_a.summary = {"train/loss": 0.5}
         w.Api.return_value.runs.return_value = [run_a]
 
         result = compute_proxy_f2p_scores(golden, {"variant_a": "path_a", "variant_b": "path_b"})

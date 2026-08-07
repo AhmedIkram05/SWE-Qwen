@@ -28,7 +28,7 @@ from trl.trainer.sft_trainer import SFTTrainer
 
 from training.callbacks import WandbCheckpointCallback, WandbLoggingCallback
 from training.prompt_loader import PromptLoader
-from training.qlora_config import _get_model_config, build_qlora_config
+from training.qlora_config import GPU_MAP, _get_model_config, build_qlora_config
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +88,9 @@ class QLoRATrainer:
         self.prompt_template_dir = prompt_template_dir
         self.gpu_type = gpu_type
 
+        # When training started (set near wandb.init); drives the finish cost estimate.
+        self._train_started: float | None = None
+
         # Pre-built model/tokenizer (e.g., from Unsloth factory)
         self._prebuilt_model = model
         self._prebuilt_tokenizer = tokenizer
@@ -144,6 +147,8 @@ class QLoRATrainer:
 
     def _setup_wandb(self) -> None:
         """Initialize W&B run."""
+        if self._train_started is None:
+            self._train_started = time.time()  # finish cost = duration × rate
         api_key = os.environ.get("WANDB_API_KEY")
         if not api_key:
             raise RuntimeError(
@@ -349,11 +354,18 @@ class QLoRATrainer:
         # Save final model
         self.save_model()
 
-        # Log final metrics
+        # Log final metrics. Only registered keys go to W&B (plan §5.7):
+        # train/loss is the registered home for the final loss. The raw
+        # train_loss key stays in the *returned* metrics dict only — it is the
+        # pre-Phase-8 training-result schema (consumed by modal_train's result
+        # JSON / tests) and is never emitted to W&B; scripts reading the W&B
+        # summary (f2p_proxy, run_3config_comparison) use train/loss.
+        # train_runtime / train_samples_per_second have no registered home and
+        # no consumers — returned to callers only, never emitted to W&B.
+        final_loss = train_result.training_loss if hasattr(train_result, "training_loss") else 0.0
         metrics = {
-            "train_loss": train_result.training_loss
-            if hasattr(train_result, "training_loss")
-            else 0.0,
+            # trainer-return schema (modal_train result JSON), NOT emitted
+            "train_loss": final_loss,
             "train_runtime": train_result.metrics.get("train_runtime", 0)
             if hasattr(train_result, "metrics")
             else 0,
@@ -363,10 +375,40 @@ class QLoRATrainer:
                 else 0
             ),
         }
-        wandb.log(metrics)
+        wandb.log({"train/loss": final_loss})
+        self._log_train_cost()
         logger.info("Training complete. Metrics: %s", metrics)
 
         return metrics
+
+    def _log_train_cost(self) -> None:
+        """Log the estimated training cost at finish (decision 3, plan §5.7).
+
+        ``cost/*`` via ``log_run_cost`` plus ``train/cost_usd``. Wrapped so
+        cost/W&B failures never break training.
+        """
+        try:
+            from observability.cost import (
+                estimate_cost_usd,
+                log_run_cost,
+                rate_per_hour_from_config,
+            )
+
+            started = self._train_started if self._train_started is not None else time.time()
+            gpu_seconds = max(time.time() - started, 0.0)
+            # Reverse GPU_MAP so Modal GPU specs ("A100-80GB") resolve to the
+            # yaml rate keys (a100-80gb, $2.50/hr) instead of falling through
+            # to the yaml default; unknown values / None keep the default.
+            gpu_reverse = {v: k for k, v in GPU_MAP.items()}
+            rate_key = (
+                gpu_reverse.get(self.gpu_type, self.gpu_type) if self.gpu_type is not None else None
+            )
+            rate = rate_per_hour_from_config(rate_key)
+            if wandb.run is not None:
+                log_run_cost(wandb.run, gpu_seconds, rate)
+                wandb.log({"train/cost_usd": estimate_cost_usd(gpu_seconds, rate)})
+        except Exception:  # noqa: BLE001 — cost logging must never break training
+            logger.warning("training cost logging failed", exc_info=True)
 
     def save_model(self) -> None:
         """Save the LoRA adapter and tokenizer."""

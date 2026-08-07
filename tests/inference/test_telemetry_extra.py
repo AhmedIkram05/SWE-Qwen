@@ -128,6 +128,64 @@ class TestFlushLoop:
         assert len(stop.waits) == 2
 
 
+class TestTraceQueue:
+    """Phase 8 decision 1: bounded sample queue + Langfuse drain."""
+
+    def test_add_trace_record_and_drain_calls_trace_request(self, mocker):
+        captured: list[dict] = []
+        fake_langfuse = types.SimpleNamespace(trace_request=lambda **kw: captured.append(kw))
+        mocker.patch.dict(sys.modules, {"observability.langfuse": fake_langfuse})
+        try:
+            telemetry.add_trace_record("qwen3-14b", None, 100.0, 1100.0, 30)
+            telemetry.add_trace_record("baseline_14b", "chat", 50.0, 900.0, 12)
+            telemetry._drain_trace_queue()
+        finally:
+            telemetry._trace_queue.clear()
+        assert captured == [
+            {
+                "model": "qwen3-14b",
+                "template_name": None,
+                "ttfbs_ms": 100.0,
+                "latency_ms": 1100.0,
+                "output_tokens": 30,
+            },
+            {
+                "model": "baseline_14b",
+                "template_name": "chat",
+                "ttfbs_ms": 50.0,
+                "latency_ms": 900.0,
+                "output_tokens": 12,
+            },
+        ]
+        assert not telemetry._trace_queue
+
+    def test_drain_survives_failing_trace_request(self, mocker):
+        calls: list[str] = []
+
+        def _boom(**kwargs):
+            calls.append(kwargs["model"])
+            raise RuntimeError("langfuse down")
+
+        fake_langfuse = types.SimpleNamespace(trace_request=_boom)
+        mocker.patch.dict(sys.modules, {"observability.langfuse": fake_langfuse})
+        try:
+            telemetry.add_trace_record("m1", None, 1.0, 2.0, 3)
+            telemetry.add_trace_record("m2", None, 1.0, 2.0, 3)
+            telemetry._drain_trace_queue()
+        finally:
+            telemetry._trace_queue.clear()
+        assert calls == ["m1", "m2"]  # one failure never stalls the drain
+        assert not telemetry._trace_queue
+
+    def test_queue_is_bounded_at_500(self):
+        try:
+            for i in range(600):
+                telemetry.add_trace_record(f"m{i}", None, 1.0, 2.0, 3)
+            assert len(telemetry._trace_queue) == 500
+        finally:
+            telemetry._trace_queue.clear()
+
+
 class TestFinishWandb:
     def test_active_run_finishes(self, mocker):
         finished: list[bool] = []

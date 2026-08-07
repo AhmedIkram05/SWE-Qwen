@@ -482,6 +482,7 @@ class TestQLoRATrainerUnit:
         from training.qlora_trainer import QLoRATrainer
 
         monkeypatch.setenv("WANDB_API_KEY", "test-key")
+        monkeypatch.delenv("OBSERVABILITY_RATE_PER_HOUR", raising=False)  # yaml rate is the oracle
         mock_wandb = mocker.patch("training.qlora_trainer.wandb", autospec=False)
         mock_wandb.run = MagicMock()
         mock_wandb.run.id = "run-id"
@@ -507,7 +508,39 @@ class TestQLoRATrainerUnit:
         assert result["train_loss"] == 0.5
         assert result["train_runtime"] == 120.0
         assert result["train_samples_per_second"] == 10.0
-        mock_wandb.log.assert_called_once()
+        # Phase 8 §5.7: registered keys only — final loss logged as train/loss
+        # (the raw train_loss key remains only in the *returned* metrics dict,
+        # the pre-Phase-8 training-result schema; the W&B summary only ever
+        # sees train/loss); train_runtime / train_samples_per_second never
+        # emitted.
+        assert mock_wandb.log.call_count == 2
+        summary = mock_wandb.log.call_args_list[0].args[0]
+        assert set(summary) == {"train/loss"}
+        assert summary["train/loss"] == 0.5
+        # ... plus train/cost_usd (second call) and the cost/* trio on the run
+        # (decision 3). gpu_type is None here -> yaml default rate.
+        assert "train/cost_usd" in mock_wandb.log.call_args_list[1].args[0]
+        run_cost = mock_wandb.run.log.call_args.args[0]
+        assert set(run_cost) == {"cost/cost_usd", "cost/gpu_seconds", "cost/rate_per_hour"}
+        assert run_cost["cost/rate_per_hour"] == pytest.approx(2.0)
+
+    def test_log_train_cost_modal_gpu_spec_rate(self, mocker, monkeypatch):
+        """Modal GPU spec ('A100-80GB') resolves to the yaml a100-80gb rate."""
+        import time
+
+        from training.qlora_trainer import QLoRATrainer
+
+        monkeypatch.delenv("OBSERVABILITY_RATE_PER_HOUR", raising=False)  # yaml rate is the oracle
+        mock_wandb = mocker.patch("training.qlora_trainer.wandb", autospec=False)
+        mock_wandb.run = MagicMock()
+
+        trainer = QLoRATrainer(model=MagicMock(), tokenizer=MagicMock(), gpu_type="A100-80GB")
+        trainer._train_started = time.time()
+        trainer._log_train_cost()
+
+        run_cost = mock_wandb.run.log.call_args.args[0]
+        assert run_cost["cost/rate_per_hour"] == pytest.approx(2.5)  # a100-80gb yaml rate
+        assert "train/cost_usd" in mock_wandb.log.call_args.args[0]
 
     def test_train_with_resume(self, mocker, monkeypatch, tmp_path):
         """train() resolves checkpoint and passes it to trainer.train()."""

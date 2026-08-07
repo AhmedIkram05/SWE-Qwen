@@ -112,17 +112,38 @@ class WandbLoggingCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs: Any,
     ) -> Any:
-        """Log metrics to W&B."""
+        """Log registry-normalized metrics to W&B.
+
+        Only ``train/*`` registry keys are emitted (decision 7, plan §5.7):
+        HF raw keys are renamed into their namespace and everything else is
+        dropped. ``train/gpu_util`` is sampled on each log step (None on
+        machines without nvidia-smi — key skipped).
+        """
         logs: dict[str, float] | None = kwargs.get("logs")
         if wandb.run is None or not logs:
             return
 
-        # Add step info
-        metrics = dict(logs)
-        metrics["global_step"] = state.global_step
-        metrics["epoch"] = state.epoch
+        normalized: dict[str, float | int] = {}
+        if "loss" in logs:
+            normalized["train/loss"] = logs["loss"]
+        if "learning_rate" in logs:
+            normalized["train/lr"] = logs["learning_rate"]
+        if "grad_norm" in logs:
+            normalized["train/grad_norm"] = logs["grad_norm"]
+        normalized["train/epoch"] = state.epoch if state.epoch is not None else 0.0
+        normalized["train/step"] = state.global_step
 
-        wandb.log(metrics)
+        try:
+            from inference.telemetry import log_gpu_util
+        except ImportError:
+            gpu_util = None
+        else:
+            gpu_util = log_gpu_util()
+        if gpu_util is not None:
+            normalized["train/gpu_util"] = gpu_util
+
+        if normalized:
+            wandb.log(normalized)
 
     def on_train_begin(
         self,

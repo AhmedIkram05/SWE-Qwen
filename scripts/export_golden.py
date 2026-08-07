@@ -28,6 +28,7 @@ from data_engineering.swebench_ingest import (
     load_swebench_splits,
     swebench_to_issue_record,
 )
+from observability.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +36,7 @@ GOLDEN_SPLITS = ("verified", "test", "dev")  # all carry FAIL_TO_PASS ground tru
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    )
+    configure_logging(level=logging.INFO)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, default=Path("data/golden.jsonl"))
     ap.add_argument("--swe-bench-dir", type=Path, default=Path("data/swe_bench"))

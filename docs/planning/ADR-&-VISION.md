@@ -5,8 +5,6 @@
 
 ---
 
-
-
 # 1. Project Vision & Positioning
 
 Build a production-grade **LLMOps and AI Engineering platform** that demonstrates the complete lifecycle of developing, evaluating, deploying, and maintaining a fine-tuned open-weight Large Language Model for automated software issue resolution.
@@ -22,8 +20,6 @@ The finished project represents a modern platform that mirrors cutting-edge AI E
 
 ---
 
-
-
 # 2. Primary Objectives & Key Competencies
 
 The project demonstrates production competency across the following engineering disciplines:
@@ -38,11 +34,7 @@ The project demonstrates production competency across the following engineering 
 
 ---
 
-
-
 # 3. Project Scope & Model Task
-
-
 
 ## Model Task Formulation
 
@@ -64,8 +56,6 @@ Including execution feedback reflects modern AI engineering workflows and produc
 - Real-time monitoring and observability for training and inference latency
 - Production-grade technical documentation
 
-
-
 ## Out of Scope
 
 The project will **not**:
@@ -77,8 +67,6 @@ The project will **not**:
 - Compete with commercial coding agents or optimize for benchmark leadership at the expense of engineering rigor
 
 ---
-
-
 
 # 4. Core Engineering Principles
 
@@ -93,13 +81,9 @@ Every architectural decision must maximize:
 
 ---
 
-
-
 # 5. Consolidated Architecture Decision Records (ADRs)
 
 ---
-
-
 
 ### ADR-001 — Project Framing & Domain Focus
 
@@ -108,8 +92,6 @@ Every architectural decision must maximize:
 
 ---
 
-
-
 ### ADR-002 — Platform & Model Independence Philosophy
 
 - **Decision:** The platform architecture must remain strictly model-agnostic and cloud-portable. Compute and serving layers must be fully decoupled from storage and state layers.
@@ -117,16 +99,12 @@ Every architectural decision must maximize:
 
 ---
 
-
-
 ### ADR-003 — Fine-Tuning Methodology (QLoRA)
 
 - **Decision:** Adopt Parameter-Efficient Fine-Tuning using **QLoRA** (Quantized Low-Rank Adaptation).
 - **Rationale:** QLoRA is the industry standard for cost-effective, high-performance LLM adaptation. It allows production-grade fine-tuning within accessible GPU compute limits.
 
 ---
-
-
 
 ### ADR-004 — Dataset Engineering & Strategy
 
@@ -136,8 +114,6 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 - **Rationale:** Data quality directly dictates model utility. Establishing a versioned, schema-validated data pipeline guarantees reproducibility.
 
 ---
-
-
 
 ### ADR-005 — Evaluation Philosophy & Primary Metrics
 
@@ -152,16 +128,12 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 
 ---
 
-
-
 ### ADR-006 — Experiment Tracking & Artifact Management
 
 - **Decision:** Standardize on **Weights & Biases (W&B)** for experiment tracking, prompt versioning, artifact storage, and model registry management.
 - **Rationale:** A central, managed tracking platform enforces 100% reproducibility across datasets, configurations, evaluation outputs, and model lineage without adding self-hosted infrastructure overhead.
 
 ---
-
-
 
 ### ADR-007 — Champion / Challenger Model Promotion
 
@@ -170,16 +142,12 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 
 ---
 
-
-
 ### ADR-008 — Infrastructure as Code (IaC) & Cloud Foundation
 
 - **Decision:** Provision all cloud storage (GCS), IAM policies, OIDC keyless authentication, and environment secrets using **Terraform**. Manual cloud console creation is prohibited.
 - **Rationale:** Ensures complete infrastructure reproducibility, version-controlled cloud configuration, and secure keyless authentication via GitHub Actions.
 
 ---
-
-
 
 ### ADR-009 — CI/CD & Model Quality Gates
 
@@ -188,16 +156,12 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 
 ---
 
-
-
 ### ADR-010 — Model Deployment Architecture & Serving Stack
 
 - **Decision:** Deploy candidate models as a serverless, high-throughput **Inference API** utilizing **vLLM** hosted on a serverless GPU platform, **Modal**.
 - **Rationale:** `vLLM` provides industry-standard PagedAttention and high token throughput. Serverless GPU orchestration provides automatic scale-to-zero capabilities ($0 cost when idle), eliminates GCP GPU quota approval friction, and demonstrates modern AI engineering architecture.
 
 ---
-
-
 
 ### ADR-011 — Observability & Telemetry
 
@@ -225,6 +189,34 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 
 - **Decision:** The CI smoke gate fails on `f2p < min_f2p_threshold` (default 0.15) regardless of the stored baseline, in addition to the relative regression check.
 - **Rationale:** A model sinking below an absolute minimum is unacceptable even if no baseline regression is measured; Phase 9 refines thresholding for candidate promotion, this floor guards the champion in the meantime.
+
+---
+
+### ADR-015 — Langfuse as V1 Trace Store (Eval + Sampled Serving, Cloud-Hosted)
+
+- **Decision:** Langfuse (Cloud, hobby tier) is the V1 trace store alongside W&B: every evaluation run traces each golden example as prompt → completion → f2p/p2p scores, and the serving path traces only successful requests at `sample_rate=0.1`, drained asynchronously by the telemetry flush thread — never on the request hot path. Missing `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` makes the module a silent no-op so CI and local dev stay hermetic. OpenTelemetry (v2) coexists rather than replaces this (master plan Monitoring v2: W&B + Langfuse + OTel).
+- **Rationale:** Dual observability (W&B aggregates, Langfuse per-call traces) gives prompt-versioning, trace debugging, and eval comparisons with bounded trace volume and zero serving latency risk; Cloud hosting matches the V1 managed-platform pattern (W&B, Modal) and avoids owning Postgres/Redis ops.
+
+---
+
+### ADR-016 — Cost Tracking Is Estimate-First
+
+- **Decision:** Cost is estimated as `gpu_seconds / 3600 × rate_per_hour`, with `rate_per_hour` logged alongside `cost/cost_usd` and `cost/gpu_seconds` so every number is auditable; the Modal usage API is a stretch goal, not a DoD requirement. "Cost per F2P point" is defined as **cost per successful fix**: eval cost ÷ number of F2P-passing golden examples (`cost/cost_per_fix`).
+- **Rationale:** Duration × rate is dependency-free, reproducible from run metadata, and accurate to the master plan's cost model (~$0.50–2.00/hr Modal pay-per-use); the real-spend API is thin-documented and would put the phase at risk for marginal accuracy gain. Per-fix semantics were chosen because it is the intuitive, communicable dollar cost of a working fix.
+
+---
+
+### ADR-017 — Metric Registry as the Telemetry Contract
+
+- **Decision:** `observability/metrics.py` holds the single registry of allowed `{domain}/{metric}` keys (max 5–7 per domain), enforced by a CI test that fails any unregistered `wandb.log` key. Dashboards are generated **as code** via the official `wandb-workspaces` library (Reports + Workspaces API, `wandb_workspaces.reports.v2` + `wandb_workspaces.workspaces`) from the versioned PANELS spec in `observability/dashboards.py`, after a seed run emits every registered key so panels render real-shaped data; the manual UI build from the same spec is the documented fallback (the API is Public Preview, not a DoD dependency). Dashboard URLs are documented in `docs/observability/dashboards.md`.
+- **Rationale:** Dashboards depend on key names, so an ad-hoc key regime means silent dashboard drift; the registry + CI test makes the telemetry contract versioned and reviewable, the seed run guarantees every panel renders real-shaped data, and the as-code generation (verified working via `wandb-workspaces` 0.4.4, 2026-08-07 — this ADR's earlier "no dashboard-as-code API" claim is retracted) keeps the dashboards themselves versioned in the repo. The preview-status API is isolated behind one script so the spec, not the API, is the source of truth.
+
+---
+
+### ADR-018 — V1 Reliability Telemetry: SLO Layer + Deploy Status
+
+- **Decision:** The phase operationalizes two things the vision already promised but the task list didn't cover: (a) an SLO layer (`observability/slo.py`) deriving attainment and error-budget burn from the existing serving `MetricsCollector` against the master plan's success criteria S3 (TTFB p50 < 500ms) and S9 (cold start < 10s), alerting via `wandb.alert` (WARN ≥ 1× budget, ERROR ≥ 5×, min 10 samples per window to suppress low-traffic noise); (b) deploy-status telemetry (`scripts/log_deploy.py`, a `if: always()` step in `cd.yml`) emitting `deploy/status` and `deploy/duration_s` using the WANDB_API_KEY already provisioned in CI, feeding the infrastructure dashboard. Neither adds new metric keys beyond `deploy/*` — the SLO layer is derived from registered `serve/*` keys.
+- **Rationale:** ADR-011 explicitly requires "deployment status" among the stage outputs and the master plan already defines S3/S9 targets, so leaving both unobserved would be a gap between the vision and the delivered telemetry. Deriving SLOs from the existing collector (rather than a new pipeline) respects the clutter guard and the no-new-deps rule; the CI-owned deploy step makes the code-push → gate → deploy → observe loop visible end to end. OTel v2 replaces the heuristic burn model with proper SLO tooling.
 
 ---
 
@@ -274,8 +266,6 @@ The project will use a **hybrid strategy**: training data curated from real GitH
 
 ---
 
-
-
 # 7. Deferred Implementation Decisions
 
 To maintain architectural adaptability, specific execution details are intentionally postponed until the benchmarking phase:
@@ -286,8 +276,6 @@ To maintain architectural adaptability, specific execution details are intention
 - **Inference Runtime Engine Config:** Exact `vLLM` container parameters (tensor parallelism, GPU memory utilization fraction, max num seqs) deferred to serving performance benchmarks.
 
 ---
-
-
 
 # 8. Project Deliverables
 
@@ -303,8 +291,6 @@ Upon completion, the project will yield:
 8. **Technical Documentation:** Architecture notes, deployment guides, and experimental benchmark results analysis.
 
 ---
-
-
 
 # 9. Planning Hierarchy & Next Steps
 

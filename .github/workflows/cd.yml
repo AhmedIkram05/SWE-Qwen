@@ -72,14 +72,20 @@ jobs:
 
       # ponytail: -lock=false safe for read-only plan; the cd-terraform-${{ github.ref }}
       # concurrency group prevents parallel applies. Exit code 2 = changes detected.
+      # github.event.repository.name is the BARE name; github.repository is
+      # "owner/name". The IAM provider condition and SA binding member both
+      # prepend the owner, so passing "owner/name" here re-breaks WIF auth
+      # (assertion.repository == 'owner/owner/name'). Guard below enforces it.
       - name: Terraform Plan
         id: plan
         run: |
+          test "${{ github.repository_owner }}/${{ github.event.repository.name }}" = "${{ github.repository }}" \
+            || { echo "::error::repository_name must be the bare repo name"; exit 1; }
           terraform plan -lock=false -no-color -out=tfplan \
             -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" \
             -var="gcp_region=${{ secrets.GCP_REGION }}" \
             -var="environment=dev" \
-            -var="repository_name=${{ github.repository }}" \
+            -var="repository_name=${{ github.event.repository.name }}" \
             -var="repository_owner=${{ github.repository_owner }}" \
             || { rc=$?; [ $rc -eq 2 ] && true || exit $rc; }
 
@@ -168,6 +174,31 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      # Phase 8 (5.6b): wall-clock anchor for deploy telemetry (captured before
+      # the deploy step begins). if: always() so a failed install still anchors.
+      - name: Record deploy start
+        if: always()
+        run: echo "DEPLOY_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+
       # Modal 1.5.3 requires -m for module paths (IMPLEMENTATION-LOG 6.7).
       - name: Deploy serving endpoint
+        id: deploy
         run: uv run modal deploy -m inference.modal_serve
+
+      # Phase 8 (5.6b): report deploy outcome + duration to the infra
+      # dashboard. if: always() so a failed deploy still emits — the red dot
+      # on the dashboard is the point (decision 10).
+      - name: Report deploy telemetry
+        if: always()
+        # Telemetry failure must never red out a deploy that succeeded
+        # (code-review B2): the report is observability, not deploy health.
+        continue-on-error: true
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: |
+          DURATION=$(( $(date +%s) - ${DEPLOY_START_EPOCH:-$(date +%s)} ))
+          if [ "${{ steps.deploy.outcome }}" = "success" ]; then STATUS=1; else STATUS=0; fi
+          uv run python scripts/log_deploy.py \
+            --status "$STATUS" \
+            --duration-s "$DURATION" \
+            --sha "${{ github.sha }}"

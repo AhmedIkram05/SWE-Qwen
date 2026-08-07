@@ -38,6 +38,7 @@ try:
 except ImportError:
     _unsloth_patched = False
 
+from observability.logging import configure_logging
 from training.qlora_config import resolve_gpu_type
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,7 @@ training_image = (
     # Copy local source into the image — must be LAST
     .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
     .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)
+    .add_local_dir(str(_REPO_ROOT / "observability"), remote_path="/root/observability", copy=True)
 )
 
 # ── Modal volumes ─────────────────────────────────────────────────────────────
@@ -231,6 +233,7 @@ def train_qlora(  # noqa: PLR0913, PLR0917
         Dict with training results.
     """
     # Validate W&B API key is available (injected via Modal secret)
+    configure_logging()
     api_key = os.environ.get("WANDB_API_KEY")
     if not api_key:
         raise RuntimeError(

@@ -25,7 +25,7 @@ _METRICS = {
     "serve/tokens_per_sec": 88.0,
     "serve/request_count": 25,
     "serve/error_rate": 0.04,
-    "serve/cost_per_inference": 0.0012,
+    "serve/cost_per_inference_usd": 0.0012,
 }
 
 
@@ -320,7 +320,9 @@ class TestMeasureEndpoint:
         assert metrics["serve/tokens_per_sec"] == pytest.approx(workers * 30 / 0.5)
         assert metrics["serve/ttfb_p50_ms"] == 10.0
         assert metrics["serve/ttfb_p95_ms"] == 20.0
-        assert metrics["serve/cost_per_inference"] == pytest.approx(0.5 / 3600.0 / (workers * 2))
+        assert metrics["serve/cost_per_inference_usd"] == pytest.approx(
+            0.5 / 3600.0 / (workers * 2)
+        )
         assert req_per_sec == pytest.approx(workers * 2 / 0.5)
 
     def test_no_latencies_is_safe(self, mocker):

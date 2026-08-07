@@ -22,6 +22,7 @@ from fastapi import FastAPI
 
 from inference.config import ServeConfig
 from inference.serve import VLLMEngine, create_app
+from observability.logging import configure_logging
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -90,6 +91,7 @@ image = (
     .add_local_dir(str(_REPO_ROOT / "training"), remote_path="/root/training", copy=True)
     # prompts/*.j2 for PromptLoader (swe_bench requests)
     .add_local_dir(str(_REPO_ROOT / "config"), remote_path="/root/config", copy=True)
+    .add_local_dir(str(_REPO_ROOT / "observability"), remote_path="/root/observability", copy=True)
 )
 # data/golden.jsonl is gitignored and absent in CI; the container fetches
 # golden from GCS (_ensure_golden), so bake the fallback only when present —
@@ -131,6 +133,7 @@ class QwenServer:
 
     @modal.enter()
     def enter(self) -> None:
+        configure_logging()
         self._engine = VLLMEngine(ServeConfig())
 
     @modal.asgi_app()

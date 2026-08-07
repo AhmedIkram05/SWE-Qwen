@@ -85,6 +85,10 @@ docs = [
     "mkdocs-material>=9.6.0",
     "mkdocstrings[python]>=0.28.0",
 ]
+dashboards = [
+    # Dashboards-as-code (Public Preview), decision 5 — requires `wandb login`
+    "wandb-workspaces>=0.4.4",
+]
 
 [project.scripts]
 swe-qwen = "swe_qwen.cli:app"
@@ -99,7 +103,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["swe_qwen*", "data_engineering*", "training*", "evaluation*", "inference*", "scripts*"]
+include = ["swe_qwen*", "data_engineering*", "training*", "evaluation*", "inference*", "scripts*", "observability*"]
 
 [tool.ruff]
 line-length = 100
@@ -183,6 +187,7 @@ files = [
     "scripts",
     "evaluation",
     "inference",
+    "observability",
 ]
 exclude = [
     "models/checkpoints",
@@ -216,7 +221,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["src/swe_qwen", "training", "data_engineering", "scripts", "inference", "evaluation"]
+source = ["src/swe_qwen", "training", "data_engineering", "scripts", "inference", "evaluation", "observability"]
 omit = ["tests/*", "*/__pycache__/*", "*/conftest.py"]
 branch = true
 

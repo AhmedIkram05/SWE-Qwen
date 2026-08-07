@@ -28,12 +28,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from observability.logging import configure_logging
+
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
+configure_logging(level=logging.INFO)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -89,7 +87,7 @@ def _load_state(run_id: str) -> dict[str, Any]:
     """Load pipeline state, returning a fresh state if none exists or run_id changed."""
     if _STATE_PATH.exists():
         with _STATE_PATH.open("r") as f:
-            state = json.load(f)
+            state: dict[str, Any] = json.load(f)
         if state.get("run_id") == run_id:
             return state
         print(f"  State file found for different run_id ({state.get('run_id')}), starting fresh.")
@@ -219,7 +217,7 @@ def _reconcile_state_with_wandb(  # noqa: PLR0915
                 }
                 logger.warning("  %s: W&B run %s crashed — will re-launch", variant, matched_run.id)
             elif matched_run.state == "running":
-                if "train_loss" in matched_run.summary:
+                if "train/loss" in matched_run.summary:
                     if variant not in state["completed_variants"]:
                         state["completed_variants"].append(variant)
                     state["variants"][variant] = {
@@ -468,8 +466,8 @@ def _wandb_run_finished(run_name: str) -> dict[str, Any] | None:
             }
         # Catch runs where training completed but Modal killed the container
         # before wandb.finish() was called (state stays "running" indefinitely).
-        # Presence of train_loss in the summary confirms training finished.
-        if run.state == "running" and "train_loss" in run.summary:
+        # Presence of train/loss in the summary confirms training finished.
+        if run.state == "running" and "train/loss" in run.summary:
             return {
                 "wandb_run_id": run.id,
                 "artifact_name": _artifact_name(run.config.get("variant", "")),
@@ -671,11 +669,12 @@ def evaluate_proxy_f2p(
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    scores = mod.compute_proxy_f2p_scores(
+    scores: dict[str, Any] = mod.compute_proxy_f2p_scores(
         golden_path=golden_path,
         variant_adapter_map={variant: adapter_path},
     )
-    return scores[variant]
+    out: dict[str, Any] = scores[variant]
+    return out
 
 
 def promote_champion(
@@ -837,7 +836,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — 63 stmts for sequential orches
         for variant, f2p in all_f2p.items():
             if variant in results:
                 results[variant].update(f2p)
-                loss = f2p.get("train_loss", "?")
+                loss = f2p.get("loss", "?")
                 print(f"  {variant}: F2P={f2p['mean_f2p']} (loss={loss})")
         print()
 

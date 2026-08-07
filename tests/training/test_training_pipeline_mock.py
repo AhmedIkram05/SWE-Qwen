@@ -182,8 +182,12 @@ class TestCallbacks:
         )
         mock_wandb.assert_called_once()
         call_args = mock_wandb.call_args[0][0]
-        assert call_args["loss"] == 0.5
-        assert call_args["eval_loss"] == 0.4
+        # registry-normalized keys (Phase 8 decision 7): raw HF keys renamed,
+        # unregistered keys dropped
+        assert call_args["train/loss"] == 0.5
+        assert call_args["train/step"] == state.global_step
+        assert "loss" not in call_args
+        assert "eval_loss" not in call_args
 
     def test_on_train_begin_logs_config(self, mocker):
         """on_train_begin logs training config to W&B."""

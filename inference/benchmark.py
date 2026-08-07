@@ -266,7 +266,7 @@ def benchmark(  # noqa: PLR0913, PLR0917
         f"ttfb_p50={metrics['serve/ttfb_p50_ms']:.1f}ms "
         f"p95={metrics['serve/ttfb_p95_ms']:.1f}ms "
         f"tokens/s={metrics['serve/tokens_per_sec']:.1f} req/s={req_per_sec:.1f} "
-        f"cost/inference=${metrics['serve/cost_per_inference']:.5f}"
+        f"cost/inference=${metrics['serve/cost_per_inference_usd']:.5f}"
     )
 
     cold_start_s: float | None = None
@@ -342,7 +342,7 @@ def _measure_endpoint(
         "serve/tokens_per_sec": tokens_per_sec,
         "serve/request_count": request_count,
         "serve/error_rate": error_rate,
-        "serve/cost_per_inference": telemetry.cost_per_inference(
+        "serve/cost_per_inference_usd": telemetry.cost_per_inference(
             wall_seconds, request_count, gpu_rate
         ),
     }
@@ -434,7 +434,7 @@ def _endpoint_report(
         f"- Latency p50: {metrics['serve/latency_p50_ms']:.1f} ms, "
         f"p95: {metrics['serve/latency_p95_ms']:.1f} ms",
         f"- Tokens/s: {metrics['serve/tokens_per_sec']:.1f}, throughput: {req_per_sec:.1f} req/s",
-        f"- Cost per inference: ${metrics['serve/cost_per_inference']:.5f}",
+        f"- Cost per inference: ${metrics['serve/cost_per_inference_usd']:.5f}",
         f"- **S3 gate (TTFB p50 < 500 ms): {gate}**",
     ]
     if cold_start_s is not None:
