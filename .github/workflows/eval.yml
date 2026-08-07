@@ -144,7 +144,7 @@ jobs:
       # CD-owned baseline: write it back to the ci/ path the download step reads.
       # Only on main; PR runs never touch it.
       - name: Upload smoke baseline (CD-owned)
-        if: github.ref == 'refs/heads/main' && !cancelled()
+        if: success() && github.ref == 'refs/heads/main'
         run: gcloud storage cp data/eval_results/smoke_baseline.json gs://swe-qwen-datasets/ci/smoke_baseline.json
 
       - name: Upload eval results to GCS
