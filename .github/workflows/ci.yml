@@ -122,18 +122,3 @@ jobs:
 
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
-
-  # terraform-plan lives in cd.yml (plan on PR, apply gated by the
-  # `production` environment) — kept out of CI to match repo conventions.
-
-  notify:
-    name: Notify on Failure
-    needs: [lint-and-test, terraform-validate]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Send notification
-        if: failure()
-        run: |
-          echo "Workflow failed. Check GitHub Actions for details."
-          # Add Slack/Discord/Email notification here

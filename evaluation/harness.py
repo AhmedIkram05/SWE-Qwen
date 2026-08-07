@@ -144,7 +144,9 @@ def _start_stop_watchdog(app: Any) -> None:
     def _watch() -> None:
         import asyncio
 
-        from modal._load_context import load_context
+        from modal._load_context import (
+            load_context,  # type: ignore[attr-defined]  # module-level instance, absent from modal's stubs
+        )
         from modal_proto import api_pb2
 
         try:
