@@ -1064,51 +1064,87 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 
 ---
 
-## Phase 8: Observability & Telemetry — YYYY-MM-DD
+## Phase 8: Observability & Telemetry — 2026-08-07 ✅ COMPLETED
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 | ------ | --------- | -------- | -------- | -------- |
-| 8.1 | Structured JSON logging | | | |
-| 8.2 | Training metrics → W&B | | | |
-| 8.3 | Eval metrics → W&B | | | |
-| 8.4 | Inference metrics → W&B | | | |
-| 8.5 | W&B dashboard templates | | | |
-| 8.6 | Cost tracking (cost.py) | | | |
-| 8.7 | Langfuse integration | | | |
-| 8.8 | Alert configuration | | | |
-| 8.9 | Observability docs | | | |
-| 8.10 | OTel deferred | | | |
+| 8.1 | Structured JSON logging | Completed | `observability/logging.py` (stdlib `JsonFormatter` + `configure_logging(json=True, stream=sys.stdout)`), retrofitted into 11 entry points (data_engineering cli, evaluation cli, 5 scripts, modal_train, serve, modal_serve); Modal images must bake `observability/` + `config/` (added `.add_local_dir`) | Low |
+| 8.2 | Training metrics → W&B | Completed | `WandbLoggingCallback` normalized HF log keys to `train/*` (loss, lr, grad_norm, gpu_util, epoch, step); `qlora_trainer` cost via `train/cost_usd`; raw `train_loss` summary key migrated to `train/loss` in `scripts/f2p_proxy.py` + `run_3config_comparison.py` (was a cross-component contract) | Medium |
+| 8.3 | Eval metrics → W&B | Completed | Harness normalized to `eval/f2p_rate`, `p2p_rate`, `eval/{key}/latency_p50/95`, `eval/cost_per_fix = total/(f2p_passes)`, `eval/num_examples`; **rate fix: `config.inference_gpu` (a100-80gb → $2.50/hr) replaces `config.gpu_type` (a10g → $1.00) — killed a 2.5× cost discrepancy** vs legacy `_GPU_RATE_PER_MIN` | Medium |
+| 8.4 | Inference metrics → W&B | Completed | `serve/*` (existing) + `serve/cost_usd` + `serve/cost_per_inference_usd` (uptime×rate from flush-loop entry, `rate_per_hour_from_config(config.gpu_type)`); SLO attainment + error-budget burn; Lar; `wandb.alert` on thresholds from `ServeConfig`; Langfuse sampling 0.1 | Low |
+| 8.5 | W&B dashboard templates | Completed as code | Plan assumed no as-code API; **`wandb-workspaces` 0.4.x discovered (2026-08-07) → PANELS spec + `seed_dashboards.py` synthetic run + `build_dashboards.py` created all 4 Workspaces LIVE** (Training/Evaluation/Serving/Infrastructure-Cost); UI build demoted to fallback; ADR-017 decision+rationale RETRACTED/rewritten | High (overturned plan assumption) |
+| 8.6 | Cost tracking (cost.py) | Completed (estimate-first) | `observability/cost.py`: `estimate_cost_usd`, `rate_per_hour_from_config` (config/observability.yaml rates + `OBSERVABILITY_RATE_PER_HOUR` override), `log_run_cost`; Modal usage API = documented stretch, non-DoD | Low |
+| 8.7 | Langfuse integration | Completed | **Installed langfuse is 4.14.1 — v4 API, plan's v2-era surface (`lf.generation()`/`lf.score()`) does NOT exist**; adapted to `start_observation(...).end()` + `create_score(...)` (explicit `.end()` mandatory); eval per-example traces + serving sampled 0.1, keyless no-op, fire-and-forget | Medium |
+| 8.8 | Alert configuration | Completed | `wandb.alert` levels **MUST be uppercase** INFO/WARN/ERROR (wandb 0.28.1 raises ValueError on lowercase) — code-review C1; thresholds `alert_error_rate_threshold=0.10`, `alert_ttfb_p95_threshold_ms=2000` in `ServeConfig`; flush tick wrapped in try/except (B1) | Medium |
+| 8.9 | Observability docs | Completed | `docs/observability/architecture.md` + `dashboards.md` (dataflow, JSON format, SLO/alerts/cost/deploy sections, live dashboard URIs) | Low |
+| 8.10 | OTel deferred | Deferred as planned | V1 = W&B + Langfuse; OTel/Prometheus/Grafana = v2 path documented | Low |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| Metric registry = telemetry contract | Dashboards break silently on key drift | Ad-hoc keys, per-module constants | `observability/metrics.py` METRIC_REGISTRY (namespaces serve/train/eval/cost/data/deploy/sweep); static AST test walks all `wandb.log`/`log_metrics` sites; higher-level drift guard than unit tests |
+| Dashboards as code via wandb-workspaces | Plan claimed "no dashboard-as-code API" (wrong — Public Preview exists) | Manual UI build, in-repo JSON spec | PANELS spec is single source of truth; seed run emits every registered key; `build_dashboards.py` recreates 4 Workspaces; UI = documented fallback |
+| Langfuse = V1 trace store (Cloud) | Per-call traces need a home; W&B only aggregates | Self-host, OTel now | Free Cloud tier; eval full + serving sampled 0.1 (successful only, async drain, never on hot path); keyless → silent no-op |
+| Cost estimate-first | Modal usage API is heavy + fragile | Query Modal GraphQL, W&B run cost | `cost_usd = gpu_seconds/3600 × rate`; rate logged alongside (config/observability.yaml) |
+| Cost per fix semantics | "Cost per F2P point" ambiguous | Per-percentage-point | = eval cost ÷ F2P-passing golden examples (`eval/cost_per_fix`) |
+| SLO + error budget from collector | Serve metrics already streamed | New metric keys, OTel | Derives attainment (S3 TTFB p50<500ms, S9 cold start<10s) + burn (budget 0.01, WARN ≥1×, ERROR ≥5×, min-10-sample guard) with zero new keys |
+| Coverage floor 100 → 90 | User decision: "90-95 is fine ... as long as all testable code is tested" | Strict 100 | Pure helpers tested to 100%; carve-outs (lazy client construction, nvidia-smi on macOS) documented; final measured 99.76% |
+| Alerts = serving degradation only | Constant-flux training/eval alerts = noise | Alert on all metrics | `error_rate > 0.10` / `ttfb_p95 > 2000ms` → email via `wandb.alert`, active-run only |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
+| Context7 OAuth failed (server infra) | Langfuse SDK verification | Yes | Installed-package introspection → langfuse 4.14.1 v4 API surface (plan's v2 examples were wrong) | ~20 min |
+| `wandb.alert(level="error")` raises ValueError | Code review (C1) | Yes | Uppercase `"ERROR"/"WARN"` + flush tick wrapped in try/except (B1) so one bad tick can't kill the telemetry thread | 10 min |
+| cd.yml telemetry step could red a green deploy | Code review (B2) | Yes | `continue-on-error: true` + `DURATION=$(( $(date +%s) - ${DEPLOY_START_EPOCH:-$(date +%s)} ))` | 5 min |
+| Coverage gate 86.29% < 90 | SA-L top-up | Yes | 2 new test files (tests/observability/test_observability_coverage.py + test_scripts_coverage.py) → 99.76% total | ~1 h |
+| Seed run exited 1: 9 registered keys unemitted | Seed self-check | Yes | `sweep/*` namespace (from inference/benchmark.py sweep mode) was not synthesized by `build_step` — added synthetic sweep row | 10 min |
+| 5 benchmark test failures after Phase 8 | Contract gate surfaced pre-existing bug | Yes | `_endpoint_report` read stale `serve/cost_per_inference` → registered `serve/cost_per_inference_usd` (one line, inference/benchmark.py) — pre-existing Phase 6 bug, NOT introduced here | 20 min |
+| `run.get_url()` deprecation warning | Seed run output | Yes | `run.url` (wandb 0.28.1) | 5 min |
+| Langfuse trace export never fires without `.end()` | SDK probe | Yes | Explicit `generation.end()` mandatory (start_observation is lazy) | 15 min |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| Lazy-import discipline | `observability/*` module level = stdlib + yaml only; wandb/langfuse/wandb-workspaces imported function-locally | 43 offline tests + CI run with zero cloud deps; container images stay lean |
+| Dual-write contract | Same event → W&B aggregated scalars + Langfuse per-call trace, linked by `run_id` + `instance_id`; serving sampled 0.1 successful-only via `random.random() >= telemetry_trace_sample_rate` | One source of truth for events, two views (trends vs. debug) |
+| Metric namespaces | serve/train/eval/cost/data/deploy (+ sweep from benchmark); hierarchical eval keys `eval/{model}/{variant}/{template}/latency_p50` | Registry + AST contract test prevents silent dashboard drift |
+| SLO math | SLO_TARGETS `{ttfb_p50_ms: 500, cold_start_s: 10}`; burn budget 0.01; `burn_level` WARN ≥1×, ERROR ≥5× budget, min 10 samples | Recruiter-visible service-quality layer on raw request metrics |
+| Modal image baking | Both modal_train.py + modal_serve.py images `.add_local_dir(observability)` + config rates | Containers would crash on `from observability...` import otherwise |
+| V2 upgrade path | OTel spans + Prometheus/Grafana replace the registry-driven dual-write; metric namespaces carry over | Registry makes the v2 migration mechanical, not forensic |
+| Langfuse v4 API | `client.start_observation(name, as_type="generation", input, output, model, metadata)` → `.end()`; `create_score(name, value, trace_id, observation_id)`; sync client, background export | Plan's v2 API examples are stale for langfuse ≥ 2.60; verified against installed 4.14.1 |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| `observability/` package (logging, metrics, cost, slo, langfuse, dashboards, `__init__`) | Added | Phase 8 deliverable (§5); ~450 lines |
+| `scripts/{seed_dashboards,build_dashboards,log_deploy}.py` | Added | Seed run → as-code dashboards; deploy-status telemetry (ADR-011) |
+| `tests/observability/` (test_telemetry_contract.py, test_observability_coverage.py, test_scripts_coverage.py) | Added | Registry contract + 90%+ coverage floor (43 tests) |
+| `config/observability.yaml` | Added | GPU hourly rates + default (a10g-24gb $1.00, a100-80gb $2.50, a100-40gb $2.00, h100-80gb $4.00, default $2.00) |
+| pyproject | Modified | `observability*` in packages.find; mypy `files`; coverage `source`; optional `dashboards = ["wandb-workspaces>=0.4.4"]` |
+| `.github/workflows/cd.yml` | Modified | `Record deploy start` + `Report deploy telemetry` steps (if: always(), continue-on-error) |
+| `evaluation/harness.py` | Modified | Normalized eval scalars, cost rate fix, `cost_per_fix` hoist, Langfuse `trace_generation` per example |
+| `inference/{telemetry,serve,config,benchmark}.py` | Modified | Flush-loop cost+alerts+SLO+safe-tick; `_record_and_trace`; 3 new ServeConfig fields; stale-key fix |
+| `data_engineering/run_pipeline.py` | Modified | `data/*` 4 keys (ingested/validated/cleaned/pipeline_seconds) |
+| `training/{callbacks,qlora_trainer}.py` | Modified | train/* normalization + train/cost_usd |
+| ADR-017 | Modified | "no dashboard-as-code API" claim retracted, rewritten for wandb-workspaces |
+| ADR-015/016/018 + CONTEXT.md | Added | Langfuse V1 trace store; cost estimate-first; SLO+deploy telemetry; telemetry vocabulary |
 
 ### Metrics / Observations
 
--
--
+- **Full fast suite: 1316 → 1331 passing, 0 failed, 1 skipped** (after review fixes; `-m "not requires_credentials and not slow"`), 1366 under the coverage gate.
+- **Coverage gate: TOTAL 99.76%** (`--cov=observability --cov=scripts --cov-fail-under=90 --cov-branch`); observability/{metrics,logging,langfuse,dashboards,slo} 100%, cost 97.14% (1 defensive except-arm untriggerable offline); scripts/{log_deploy,seed_dashboards,build_dashboards} 100%.
+- **Live W&B artifacts (entity 2571642-university-of-dundee, project swe-qwen):** 4 dashboards (Training `nfnemmwlrtl`, Evaluation `nklwebmg1q8`, Serving `f3jvhf7qlz8`, Infrastructure-Cost `pi71byd0ynj`); seed run `ffq2ig4b` (43 registered keys, exit 0); deploy probe `iixs1n2l` (deploy/status=1, duration_s=42); project re-pin `958ixwaw` (W&B auto-deletes inactive projects — Phase 7 lesson).
+- **Code-review verdict: REQUEST-CHANGES → all 5 findings fixed** (C1 alerts uppercase + flush-tick guard; B2 cd.yml continue-on-error; N1 stdout logging; N2 cost_per_fix hoist; plus lint debt in nested tests/observability/).
+- Pre-existing bug found via the contract gate: benchmark `serve/cost_per_inference` stale key (Phase 6 report-only path).
+- Unexpected: wandb-workspaces Public Preview shipped — dashboards are now reproducible from PANELS instead of hand-built in the UI.
+- Performance note: Langfuse drain runs outside the wandb guard every flush tick (bounded deque 500, per-datum try/except) — dual-write partner must not depend on W&B presence.
 
 ---
 

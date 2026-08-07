@@ -168,6 +168,31 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      # Phase 8 (5.6b): wall-clock anchor for deploy telemetry (captured before
+      # the deploy step begins). if: always() so a failed install still anchors.
+      - name: Record deploy start
+        if: always()
+        run: echo "DEPLOY_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+
       # Modal 1.5.3 requires -m for module paths (IMPLEMENTATION-LOG 6.7).
       - name: Deploy serving endpoint
+        id: deploy
         run: uv run modal deploy -m inference.modal_serve
+
+      # Phase 8 (5.6b): report deploy outcome + duration to the infra
+      # dashboard. if: always() so a failed deploy still emits — the red dot
+      # on the dashboard is the point (decision 10).
+      - name: Report deploy telemetry
+        if: always()
+        # Telemetry failure must never red out a deploy that succeeded
+        # (code-review B2): the report is observability, not deploy health.
+        continue-on-error: true
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: |
+          DURATION=$(( $(date +%s) - ${DEPLOY_START_EPOCH:-$(date +%s)} ))
+          if [ "${{ steps.deploy.outcome }}" = "success" ]; then STATUS=1; else STATUS=0; fi
+          uv run python scripts/log_deploy.py \
+            --status "$STATUS" \
+            --duration-s "$DURATION" \
+            --sha "${{ github.sha }}"

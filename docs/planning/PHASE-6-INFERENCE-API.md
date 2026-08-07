@@ -85,40 +85,53 @@ inference/
 ```python
 class ServeConfig(BaseSettings):
     """Serving config. Copy the EvalConfig pattern; do NOT import EvalConfig."""
-    model_config = SettingsConfigDict(env_prefix="SERVING_", env_file=".env", extra="ignore", frozen=True)
+
+    model_config = SettingsConfigDict(
+        env_prefix="SERVING_", env_file=".env", extra="ignore", frozen=True
+    )
 
     # Model / adapter registry
-    base_model: str = "qwen3-14b"                      # registry key from config/models.yaml
-    serving_hf_id: str = "Qwen/Qwen3-14B-FP8"          # pre-quantized base (AWQ fallback: "Qwen/Qwen3-14B-AWQ")
-    quantization: str = "fp8"                          # "fp8" | "awq"
-    variants: tuple[str, ...] = ("baseline_14b", "higher_rank_14b", "higher_lr_14b")  # served LoRA variants
+    base_model: str = "qwen3-14b"  # registry key from config/models.yaml
+    serving_hf_id: str = (
+        "Qwen/Qwen3-14B-FP8"  # pre-quantized base (AWQ fallback: "Qwen/Qwen3-14B-AWQ")
+    )
+    quantization: str = "fp8"  # "fp8" | "awq"
+    variants: tuple[str, ...] = (
+        "baseline_14b",
+        "higher_rank_14b",
+        "higher_lr_14b",
+    )  # served LoRA variants
     lora_artifact_pattern: str = "model-qwen3-14b-{variant}"
     default_variant: str = "baseline_14b"
 
     # Engine (6.1 sweep knobs; defaults = Phase 5 eval-proven)
-    gpu_memory_utilization: float = 0.85               # 0.85 | 0.90
-    max_num_seqs: int = 16                             # 8 | 16 | 32
-    max_lora_rank: int = 64                            # REQUIRED: higher_rank_14b is rank 32 (vLLM default 16 kills EngineCore)
-    max_model_len: int = 16384                         # 32768 does not fit 24GB with FP8; sweep knob
-    enforce_eager: bool = False                        # serving: keep CUDA graphs (eval used eager=True to save ~150s boot)
+    gpu_memory_utilization: float = 0.85  # 0.85 | 0.90
+    max_num_seqs: int = 16  # 8 | 16 | 32
+    max_lora_rank: int = (
+        64  # REQUIRED: higher_rank_14b is rank 32 (vLLM default 16 kills EngineCore)
+    )
+    max_model_len: int = 16384  # 32768 does not fit 24GB with FP8; sweep knob
+    enforce_eager: bool = (
+        False  # serving: keep CUDA graphs (eval used eager=True to save ~150s boot)
+    )
 
     # Sampling defaults (Phase 5-proven values; request params override)
     temperature: float = 0.1
     top_p: float = 0.95
-    repetition_penalty: float = 1.15                   # no penalty → ~1000x "```" fence degeneracy
-    default_max_tokens: int = 4096                     # hard cap = max_model_len - prompt
+    repetition_penalty: float = 1.15  # no penalty → ~1000x "```" fence degeneracy
+    default_max_tokens: int = 4096  # hard cap = max_model_len - prompt
     max_tokens_cap: int = 8192
 
     # Modal / W&B
-    gpu_type: str = "a10g-24gb"                        # A10G:1
+    gpu_type: str = "a10g-24gb"  # A10G:1
     modal_volume: str = "serve-model-cache"
     wandb_entity: str = "2571642-university-of-dundee"
     wandb_project: str = "swe-qwen"
-    idle_timeout_seconds: int = 600                    # scale-to-zero idle window (documented, measured)
-    max_concurrent_requests: int = 16                  # allow_concurrent_inputs; 64-way broke modal 1.5.3 aiohttp
+    idle_timeout_seconds: int = 600  # scale-to-zero idle window (documented, measured)
+    max_concurrent_requests: int = 16  # allow_concurrent_inputs; 64-way broke modal 1.5.3 aiohttp
 
     # Telemetry
-    telemetry_flush_interval_seconds: int = 60         # in-container W&B flush cadence
+    telemetry_flush_interval_seconds: int = 60  # in-container W&B flush cadence
     gpu_util_sample_interval_seconds: int = 5
 ```
 

@@ -61,13 +61,13 @@ jobs:
         run: uv sync --extra dev --frozen
 
       - name: Run Ruff (lint)
-        run: uv run ruff check data_engineering/ training/ tests/ evaluation/ inference/
+        run: uv run ruff check data_engineering/ training/ tests/ evaluation/ inference/ observability/ scripts/
 
       - name: Run Ruff (format check)
-        run: uv run ruff format --check data_engineering/ training/ tests/ evaluation/ inference/
+        run: uv run ruff format --check data_engineering/ training/ tests/ evaluation/ inference/ observability/ scripts/
 
       - name: Run MyPy
-        run: uv run mypy data_engineering/ training/ evaluation/ inference/
+        run: uv run mypy data_engineering/ training/ evaluation/ inference/ observability/ scripts/
 
       - name: Run pytest (all tests — coverage gate)
         run: |
