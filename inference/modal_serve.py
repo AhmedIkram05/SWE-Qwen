@@ -90,19 +90,23 @@ image = (
     .add_local_dir(str(_REPO_ROOT / "training"), remote_path="/root/training", copy=True)
     # prompts/*.j2 for PromptLoader (swe_bench requests)
     .add_local_dir(str(_REPO_ROOT / "config"), remote_path="/root/config", copy=True)
-    .add_local_file(
+)
+# data/golden.jsonl is gitignored and absent in CI; the container fetches
+# golden from GCS (_ensure_golden), so bake the fallback only when present —
+# a missing file must not break image builds (used to FileNotFoundError).
+if (_REPO_ROOT / "data" / "golden.jsonl").is_file():
+    image = image.add_local_file(
         str(_REPO_ROOT / "data" / "golden.jsonl"),
         remote_path="/root/data/golden.jsonl",
         copy=True,
     )
-    # Build-time fail-fast must run last: it needs /root/inference baked in.
-    .run_function(
-        _build_smoke,
-        gpu="A10G:1",
-        volumes={"/models": serve_volume},
-        secrets=_secrets,
-        timeout=1800,
-    )
+# Build-time fail-fast must run last: it needs /root/inference baked in.
+image = image.run_function(
+    _build_smoke,
+    gpu="A10G:1",
+    volumes={"/models": serve_volume},
+    secrets=_secrets,
+    timeout=1800,
 )
 
 
