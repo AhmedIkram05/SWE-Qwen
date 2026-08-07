@@ -381,13 +381,13 @@ def _load_wandb_run(run_id: str, config: EvalConfig) -> EvalRun | None:
     """Load a run from the W&B artifact ``eval-results-{run_id}``."""
     import wandb  # lazy: never imported at module import time
 
-    api = wandb.Api(timeout=30)
     artifact_name = _ARTIFACT_NAME.format(run_id=run_id)
     try:
+        api = wandb.Api(timeout=30)
         artifact = api.artifact(
             f"{config.wandb_entity}/{config.wandb_project}/{artifact_name}:latest"
         )
-    except Exception as exc:  # missing artifact, auth failure, no network
+    except Exception as exc:  # no API key, missing artifact, auth failure, no network
         logger.warning("run %s: W&B artifact %s unavailable: %s", run_id, artifact_name, exc)
         return None
     download_dir = Path(artifact.download())

@@ -39,7 +39,13 @@ def _import_plain():
     with unittest_mock.patch.dict(
         sys.modules, {"modal": plain_modal, "wandb": unittest_mock.MagicMock()}
     ):
-        return importlib.import_module(_MODULE_NAME)
+        mod = importlib.import_module(_MODULE_NAME)
+    # mock.patch.dict restores sys.modules on exit, evicting the module we
+    # just imported; re-cache it so a later bare `_mod()` import reuses this
+    # plain-Modal shape instead of re-importing under the real installed
+    # modal (which would crash on decorator/annotation evaluation).
+    sys.modules[_MODULE_NAME] = mod
+    return mod
 
 
 if _MODULE_NAME not in sys.modules:
@@ -52,9 +58,18 @@ def _mod():
 
 
 def _unwrap(func):
-    """Return the underlying callable of a ``_ModalFunctionWrapper`` if any."""
+    """Return the underlying callable of a Modal wrapper if any.
+
+    modal 1.5.x ``Function`` objects expose ``get_raw_f()`` (the old ``_func``
+    attribute is gone); MagicMock-shape functions are plain functions.
+    """
     wrapped = getattr(func, "_func", None)
-    return wrapped if wrapped is not None else func
+    if wrapped is not None:
+        return wrapped
+    get_raw_f = getattr(func, "get_raw_f", None)
+    if callable(get_raw_f):
+        return get_raw_f()
+    return func
 
 
 def _call(func, *args, **kwargs):
