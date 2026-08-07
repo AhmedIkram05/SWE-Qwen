@@ -1,10 +1,9 @@
-name: CD
+name: "CD: Terraform Infra & Modal Deploy"
 
 # Phase 7 (7.6): Terraform plan runs on every PR (read-only, reviewable via
 # the job summary); apply is a separate job gated by the `production`
 # GitHub Environment (manual approval) and runs on merge to main.
-# Deploying the Modal endpoint is MANUAL (workflow_dispatch) until Phase 6.8
-# lands (AsyncLLM thread-safety + auth on the public endpoint).
+# The Modal endpoint deploys on merge to main (and manual dispatch).
 # Phase 9 owns the "if promoted then deploy" promotion logic; this workflow
 # only wires the triggers.
 on:
@@ -145,9 +144,9 @@ jobs:
   deploy-modal:
     name: Deploy Modal Endpoint
     runs-on: ubuntu-latest
-    # Manual only until Phase 6.8 (AsyncLLM + auth). Flip to `if: github.event_name == 'push'`
-    # after 6.8 is deployed; Phase 9 adds the "if promoted" condition on top.
-    if: github.event_name == 'workflow_dispatch'
+    # Deploy on merge to main and on manual dispatch (skip PRs).
+    # Phase 9 adds the "if champion promoted" condition on top.
+    if: github.event_name != 'pull_request'
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}

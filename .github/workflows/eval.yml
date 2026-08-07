@@ -1,4 +1,4 @@
-name: Eval Gate
+name: Model Eval Gate (SWE-bench Smoke Test)
 
 # Phase 7 (7.4/7.5): run the smoke evaluation on PRs that touch model/eval
 # code, GATE the merge on the champion's F2P (absolute floor + regression vs
@@ -45,7 +45,7 @@ env:
 
 jobs:
   init-wandb:
-    name: Init W&B Project
+    name: Init Weights & Biases Project
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -74,7 +74,7 @@ jobs:
         run: uv run python scripts/init_wandb.py --entity 2571642-university-of-dundee
 
   eval-gate:
-    name: Eval Smoke Gate
+    name: Smoke-Test Model vs Baseline
     needs: init-wandb
     runs-on: ubuntu-latest
     timeout-minutes: 240  # Modal fn cap is 300 min; keep headroom for eval jobs

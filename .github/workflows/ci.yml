@@ -1,4 +1,4 @@
-name: CI
+name: "CI: Lint, Type-Check & Test"
 
 on:
   push:
@@ -63,21 +63,14 @@ jobs:
       - name: Run MyPy
         run: uv run mypy data_engineering/ training/ evaluation/ inference/
 
-      - name: Run pytest (fast — no slow tests)
+      - name: Run pytest (all tests — coverage gate)
         run: |
-          uv run pytest tests/ -q --tb=short -x -n auto \
-            -m "not requires_credentials and not slow" \
-            --cov
-
-      - name: Run pytest (slow tests — coverage gate + upload)
-        if: always()
-        run: |
-          # --cov builds on the fast step's .coverage; --cov-fail-under enforces
-          # the 7.3 coverage gate over the combined run. Threshold calibrated on
-          # first CI run; adjust here if the repo's true coverage differs.
+          # One run for the whole suite (fast + slow); --cov-fail-under enforces
+          # the 7.3 coverage gate. Threshold calibrated on first CI run; adjust
+          # here if the repo's true coverage differs.
           uv run pytest tests/ -q --tb=short -n auto \
-            -m "slow and not requires_credentials" \
-            --cov --cov-report=xml --cov-append --cov-fail-under=75
+            -m "not requires_credentials" \
+            --cov --cov-report=xml --cov-fail-under=75
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -123,7 +116,7 @@ jobs:
   # `production` environment) — kept out of CI to match repo conventions.
 
   notify:
-    name: Notify
+    name: Notify on Failure
     needs: [lint-and-test, terraform-validate]
     runs-on: ubuntu-latest
     if: always()
