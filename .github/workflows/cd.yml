@@ -72,15 +72,19 @@ jobs:
 
       # ponytail: -lock=false safe for read-only plan; the cd-terraform-${{ github.ref }}
       # concurrency group prevents parallel applies. Exit code 2 = changes detected.
+      # github.event.repository.name is the BARE name; github.repository is
+      # "owner/name". The IAM provider condition and SA binding member both
+      # prepend the owner, so passing "owner/name" here re-breaks WIF auth
+      # (assertion.repository == 'owner/owner/name'). Guard below enforces it.
       - name: Terraform Plan
         id: plan
         run: |
+          test "${{ github.repository_owner }}/${{ github.event.repository.name }}" = "${{ github.repository }}" \
+            || { echo "::error::repository_name must be the bare repo name"; exit 1; }
           terraform plan -lock=false -no-color -out=tfplan \
             -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" \
             -var="gcp_region=${{ secrets.GCP_REGION }}" \
             -var="environment=dev" \
-            # github.event.repository.name is the bare name (github.repository
-            # is "owner/name"); the IAM condition prepends owner itself.
             -var="repository_name=${{ github.event.repository.name }}" \
             -var="repository_owner=${{ github.repository_owner }}" \
             || { rc=$?; [ $rc -eq 2 ] && true || exit $rc; }
