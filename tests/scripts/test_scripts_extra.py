@@ -54,7 +54,7 @@ class TestF2PProxyGaps:
             r = mocker.MagicMock()
             r.state = "finished"
             r.created_at = "2024-01-01"
-            r.summary = {"train_loss": 5.0}
+            r.summary = {"train/loss": 5.0}
             return [r]
 
         wandb_fake.Api.return_value.runs.side_effect = _runs
@@ -63,9 +63,9 @@ class TestF2PProxyGaps:
         out = mod.compute_proxy_f2p_scores(golden, {"a": "p1", "b": "p2"})
         assert out["a"]["mean_f2p"] == 1.0
         assert out["b"]["mean_f2p"] == 1.0
-        assert "train_loss" in out["a"]
+        assert "loss" in out["a"]
 
-    def test_compute_no_train_loss(self, mocker, tmp_path):
+    def test_compute_missing_loss_key(self, mocker, tmp_path):
         golden = tmp_path / "golden.jsonl"
         golden.write_text('{"id": 1}\n')
         wandb_fake = mocker.MagicMock()
@@ -83,7 +83,7 @@ class TestF2PProxyGaps:
         mod = self._load()
         out = mod.compute_proxy_f2p_scores(golden, {"a": "p1"})
         assert out["a"]["mean_f2p"] == 0.0
-        assert out["a"]["warning"] == "no train_loss in summary"
+        assert out["a"]["warning"] == "no train/loss in summary"
 
 
 # ── scripts/init_wandb.py ───────────────────────────────────────────────────
@@ -432,11 +432,11 @@ class Test3ConfigGaps:
         assert "v1" not in out["variants"]
 
     def test_reconcile_running_loss_already_completed(self, fake_wandb, mocker):
-        # running with train_loss but variant already recorded as completed
+        # running with train/loss already logged, variant recorded as completed
         mod = self._load()
         fake_wandb.Api.return_value.default_entity = "e"
         run = self._run(
-            mocker, name="dup", state="running", rid="rd", variant="v1", summary={"train_loss": 0.5}
+            mocker, name="dup", state="running", rid="rd", variant="v1", summary={"train/loss": 0.5}
         )
         fake_wandb.Api.return_value.runs.return_value = [run]
         state = mod._new_state("r")
@@ -694,13 +694,13 @@ class Test3ConfigGaps:
         golden = tmp_path / "golden.jsonl"
         golden.write_text('{"id": 1}\n')
         finished = self._run(
-            mocker, name="n", state="finished", rid="W", variant="v", summary={"train_loss": 0.3}
+            mocker, name="n", state="finished", rid="W", variant="v", summary={"train/loss": 0.3}
         )
         fake_wandb.Api.return_value.default_entity = "entity"
         fake_wandb.Api.return_value.runs.return_value = [finished]
         result = mod.evaluate_proxy_f2p("v", golden, "/tmp/adapter", dry_run=False)
         assert result["mean_f2p"] == 1.0
-        assert result["train_loss"] == 0.3
+        assert result["loss"] == 0.3
 
     def test_evaluate_proxy_f2p_missing_script(self, mocker, tmp_path):
         mod = self._load()
@@ -768,7 +768,7 @@ class Test3ConfigGaps:
             r.id = "id-1"
             r.state = "finished"
             r.created_at = "2024-01-01"
-            r.summary = {"train_loss": 1.0}
+            r.summary = {"train/loss": 1.0}
             return [r]
 
         fake.Api.return_value.runs.side_effect = _runs

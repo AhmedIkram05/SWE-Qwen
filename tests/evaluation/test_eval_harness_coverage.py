@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import sys
 import types
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -524,6 +524,9 @@ class _FakeWandb:
         self.artifacts: list[_FakeArtifact] = []
         self.event_log: list[str] = []
         self.raise_on_artifact: str | None = None
+        # the "active run" the real wandb module exposes; cost logging
+        # (log_run_cost) is duck-typed against it
+        self.run: Any = self
 
     def init(self, **kwargs: Any) -> None:
         self.init_calls.append(kwargs)
@@ -618,22 +621,33 @@ def test_link_model_lineage_skips_when_wandb_disabled(
 
 
 def test_log_eval_run_all_scalars(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.delenv("OBSERVABILITY_RATE_PER_HOUR", raising=False)  # yaml rate is the oracle
     config = _cfg(tmp_path)
     fake = _FakeWandb()
     logger = _wandb_logger(monkeypatch, fake, config)
     results = [_result("a", latency=120.0), _result("b", latency=240.0)]
     run = _make_run("run-1", results, config)
     run.aggregate = [_metrics()]
+    run.completed_at = run.started_at + timedelta(seconds=3600)
 
     logger.log_eval_run(run, config)
 
     # cost scalar
-    cost = next(c for c in fake.log_calls if "eval/cost_usd" in c)
-    assert cost["eval/cost_usd"] == pytest.approx(run.cost_usd)
+    cost = next(c for c in fake.log_calls if "eval/total_cost_usd" in c)
+    assert cost["eval/total_cost_usd"] == pytest.approx(run.cost_usd)
     # latency p50/p95 scalars under the aggregate prefix
     latency_scalar = next(c for c in fake.log_calls if any("latency_p50" in k for k in c))
     assert latency_scalar["eval/qwen3-14b/baseline_14b/chat/latency_p50"] == pytest.approx(180.0)
     assert latency_scalar["eval/qwen3-14b/baseline_14b/chat/latency_p95"] == pytest.approx(240.0)
+    # registry-normalized finish scalars (plan §5.7, decisions 3/4)
+    num = next(c for c in fake.log_calls if "eval/num_examples" in c)
+    assert num["eval/num_examples"] == 2
+    fix = next(c for c in fake.log_calls if "eval/cost_per_fix" in c)
+    assert fix["eval/cost_per_fix"] == pytest.approx(run.cost_usd / 2)  # both examples F2P-pass
+    run_cost = next(c for c in fake.log_calls if "cost/gpu_seconds" in c)
+    assert run_cost["cost/gpu_seconds"] == pytest.approx(3600.0)
+    assert run_cost["cost/rate_per_hour"] == pytest.approx(2.5)  # a100-80gb via inference_gpu
+    assert run_cost["cost/cost_usd"] == pytest.approx(2.5)  # 1h × $2.50/hr
     # three artifact types logged
     names = [a.name for a in fake.artifacts]
     assert "eval-results-run-1" in names
