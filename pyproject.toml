@@ -91,7 +91,6 @@ dashboards = [
 ]
 
 [project.scripts]
-swe-qwen = "swe_qwen.cli:app"
 data-pipeline = "data_engineering.run_pipeline:app"
 train = "training.qlora_train:app"
 eval = "evaluation.cli:app"
@@ -102,8 +101,8 @@ requires = ["setuptools>=70.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
-include = ["swe_qwen*", "data_engineering*", "training*", "evaluation*", "inference*", "scripts*", "observability*"]
+where = ["."]
+include = ["data_engineering*", "training*", "evaluation*", "inference*", "scripts*", "observability*"]
 
 [tool.ruff]
 line-length = 100
@@ -167,7 +166,6 @@ skip-magic-trailing-comma = false
 line-ending = "lf"
 
 [tool.ruff.lint.isort]
-known-first-party = ["swe_qwen"]
 known-third-party = ["modal", "wandb"]
 
 [tool.mypy]
@@ -181,7 +179,6 @@ no_implicit_optional = true
 strict_optional = true
 ignore_missing_imports = true
 files = [
-    "src",
     "data_engineering",
     "training",
     "scripts",
@@ -221,7 +218,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["src/swe_qwen", "training", "data_engineering", "scripts", "inference", "evaluation", "observability"]
+source = ["training", "data_engineering", "scripts", "inference", "evaluation", "observability"]
 omit = ["tests/*", "*/__pycache__/*", "*/conftest.py"]
 branch = true
 

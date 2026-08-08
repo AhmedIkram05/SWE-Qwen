@@ -1,6 +1,6 @@
 """Modal training entrypoint for SWE-Qwen QLoRA fine-tuning.
 
-Supersedes ``src/swe_qwen/modal_app.py::train_swe_qwen``.
+Usage:
 
 Usage:
     # Production training (A100-80GB):

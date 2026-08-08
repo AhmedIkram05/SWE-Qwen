@@ -294,7 +294,7 @@ The GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
 1. Fork the repository
 2. Create a feature branch
 3. Make changes with tests
-4. Run CI locally: `ruff check . && mypy src/ && pytest tests/`
+4. Run CI locally: `ruff check . && mypy . && pytest tests/`
 5. Submit PR
 
 ## Support
