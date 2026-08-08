@@ -1148,48 +1148,89 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 
 ---
 
-## Phase 9: Champion/Challenger Promotion Pipeline — YYYY-MM-DD
+## Phase 9: Champion/Challenger Promotion Pipeline — 2026-08-08 ✅ COMPLETED
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 | ------ | --------- | -------- | -------- | -------- |
-| 9.1 | Comparison engine | | | |
-| 9.2 | Promotion rules | | | |
-| 9.3 | W&B model registry | | | |
-| 9.4 | Deployment trigger | | | |
-| 9.5 | Audit trail | | | |
-| 9.6 | Unit tests | | | |
-| 9.7 | E2E promotion test | | | |
+| 9.1 | Comparison engine (gate) | Completed | `promotion/gate.py` — `PairEval` frozen dataclass + `evaluate_pair`; **composes `evaluation/` exactly as planned (zero code moved out of comparison.py)**: per-instance 0/1 vectors from `run.results` (variant-filtered, instance-id-intersected, sorted for determinism), significance via `stats.paired_bootstrap_ci(candidate, champion)` directly (NOT `paired_significance` — it cross-runs same-variant only) + `stats.mcnamar_p`; pairing asserts equal `dataset_run_id` + `tier_seed` from embedded `EvalRun.config`; `revalidate_champion` thin passthrough | Low |
+| 9.2 | Promotion rules | Completed | `promotion/rules.py` — pure `decide()` (no I/O), env-overridable `PROMOTE_MIN_F2P_GAIN=0.05` / `PROMOTE_MAX_P2P_REGRESSION=0.02`, floors 0.15/0.90; four gates in order: floors → margin (strict `<`; `==` passes) → P2P ceiling (strict `<`) → significance (`ci_lower <= 0` kills) → promote; reject reasons `fatal-flaw` / `regression` / `micro-gain`, first-fail-wins single reason | Low |
+| 9.3 | W&B model registry | Completed | `promotion/registry.py` (self-referential `ChampionRecord` + read/write `champion.json` + `sync_alias` wrapping `comparison.promote_champion_to_registry`) + one-shot `scripts/seed_champion.py` (2026-08-06 champion: higher_lr_14b, F2P 0.169, P2P 0.912, `expanded-repos`, tier=full, seed=42). Deviation: `"promotion*"` added to `packages.find` during this task (was scheduled for §4.11 wiring) — `seed_champion.py` fails standalone without it; seeding itself deferred to first cycle (requires GCP creds, ci/ bucket was empty) | Low |
+| 9.4 | Deployment trigger | Completed with 6 deviations | `promotion/deploy.py` (variant pin via `SERVING_DEFAULT_VARIANT` in subprocess env — pydantic-settings auto-override confirmed from `SettingsConfigDict(env_prefix="SERVING_")`; `assert_variant_known` guard; `uv run modal deploy -m inference.modal_serve`; POST-probe `health_check` with Bearer token + TTFB ceiling 5 s; `sync_alias_or_abort`; `rollback` re-promoting `previous` record) + `promote.yml` deploy job: **(1)** run ids are self-generated (`eval-YYYYMMDD-HHMMSS` is second-granularity → collision) and passed via `--resume`; **(2)** `tier="dev"` hardcoded in deploy-path `ChampionRecord` (matches default `--mode dev`); **(3)** `MODAL_WEB_URL` + `MODAL_SERVE_TOKEN` secrets required for the probe; **(4)** GCS `champion.json` upload gated on `steps.deploy.outcome == 'success'` (not `if: always()` — a rolled-back champion must never upload); **(5)** kill-switch guards on decide + champion-download steps (`RUN_MODAL_EVAL != 'false'`) so the $0 path works even with an empty GCS bucket (first cycle); **(6)** F2P/P2P rates wired end-to-end: run.py emits `champion_f2p/candidate_f2p/champion_p2p/candidate_p2p` (4 dp) to `$GITHUB_OUTPUT`, workflow passes `--f2p-rate/--p2p-rate` to `--deploy`, approver summary shows before/after — without this the new champion record carried forward stale incumbent rates | Medium (audit-data correctness) |
+| 9.5 | Audit trail | Completed with 2 deviations | `promotion/audit.py` — `build_decision_record` (frozen 11-key shape), `render_markdown`, `write_decision_record` (W&B artifact `promotion-decision-{id}`, type `decision`, JSON + markdown), `log_decision_metrics` (six **literal** `promote/*` keys — templated dict would fail the AST contract walker), `note_gating_off`. Deviations: **(1)** `decision_id` added to `$GITHUB_OUTPUT` (workflow needs it for artifact link + deploy step); **(2)** `scripts/seed_dashboards.py` `build_step` now also emits the six `promote/*` keys — registering them in METRIC_REGISTRY broke the pre-existing seed-coverage invariant (`test_seed_success`: seed must emit every registered key); PANELS untouched | Low |
+| 9.6 | Unit tests | Completed | `tests/test_promotion.py` 76 tests (TestDecide 10, TestEvaluatePair 14, TestRegistry 14, TestSeedChampion 3, TestAudit 8, TestDeploy 17, TestLaunchEvictions 10) + `tests/test_champion_auth.py` 5 tests (401/200/fail-closed/health-public). Deviations: `google.cloud` import needs house `# type: ignore[attr-defined]`; **mypy `promotion/` must run `--no-incremental`** (stale incremental cache hid 5 real errors once) | Low |
+| 9.7 | E2E promotion test | Completed with deviation | `tests/test_promotion_e2e.py` (34 tests, offline in-memory EvalRun/EvalResult fixtures, deterministic 0/1 vectors, no LLM/Ollama — CI-safe). Deviation: 6 test-side bugs fixed during development (list.append stub used as `write_decision_record` fake → TypeError; `model_name` mutation broke vector pairing; string drift `promote=True` vs `promote=True` — run.py prints Python bool repr, lowercase `promote=false gating-off (...)` only on gating path; capsys double-read; champion-chain assertion). **Production code was correct throughout; tests had drifted** | Low |
+| 9.5 (F1 completion audit) | §4.10 L179 decision summary + upload artifact | Completed with 1 deviation | `promotion/run.py` `_finalize` now appends the full decision markdown to `$GITHUB_STEP_SUMMARY` (new `_write_step_summary`, env-file pattern, no-op when unset) and persists `data/promotion_decisions/decision.{md,json}`; `promote.yml` decide job gains `actions/upload-artifact@v4` (`promotion-decision-<id>`, retention 7, `if: always()`). Implements §4.10 L179 + §8 approver-clarity AC (terraform-plan parity). Deviation: files are written unconditionally (not gated on W&B upload success) so the Actions artifact is the durable copy even when W&B degrades — matches the `if: always()` upload | Low (approver clarity) |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| promotion/ composes evaluation/, no code moved | Spec: "does not rewrite" | Forking/replicating promote + significance logic | `gate.py` wraps `revalidate_champion` + calls `stats.paired_bootstrap_ci` directly (candidate as arg `a` ⇒ `ci_lower > 0` ⇔ candidate beats); `paired_significance` is display-only and cross-run-same-variant (returns "no shared variant" for two different variants) |
+| Four-gate promote predicate | Promote iff floors ∧ margin ∧ significance ∧ P2P ceiling | Single threshold, human review | `(f2p≥0.15 ∧ p2p≥0.90)` ∧ `cand_f2p ≥ champ_f2p+0.05` ∧ `CI-lower>0` ∧ `cand_p2p ≥ champ_p2p−0.02`; boundaries: `==` passes margin/ceiling, `ci_lower == 0.0` rejects (micro-gain); env-overridable constants |
+| Auto challenger entry; only human act = `environment: production` approval | ADR-007 self-driving loop | Manual promote button | `scripts/tag_challenger.py` (idempotent) + hook in `run_3config_comparison.py` + `gh workflow run promote.yml`; deploy job name embeds the variant for the Review screen |
+| Fresh paired eval of BOTH models every cycle | Champion re-evaluated in same run window | Reuse stored champion metrics | Same `dataset_run_id` + `tier_seed` asserted from embedded `EvalRun.config`; dev tier (100, seed 42); ~$1-4/cycle |
+| Source of truth = `gs://swe-qwen-datasets/ci/champion.json` | Mirror of smoke_baseline.json pattern | W&B alias as source of truth | W&B alias is a human-facing pointer synced from the record; single writer = deploy job, **after** probe green (probe-before-record AC) |
+| Deploy pins variant via `SERVING_DEFAULT_VARIANT` env | `ServeConfig.default_variant` field + pydantic-settings | Config file, CLI flag | BaseSettings auto-overrides the field from env (verified `SettingsConfigDict(env_prefix="SERVING_")`); pin passed last-wins in subprocess env; `assert_variant_known` aborts with `config-gap` before any Modal spend |
+| Rollback in scope | Deploy failure must not strand the fleet | Skip rollback, manual revert | `previous` record persisted inside `champion.json` (self-referential) ⇒ re-promote through the same deploy→probe→alias path; rollback outcome recorded via `promote/deploy_status` |
+| Step 0: Bearer auth on `/v1/chat/completions` | Endpoint was public | None (spec-mandated) | `serve-token` Modal Secret (added to `_secrets`); `_is_authorized` with `hmac.compare_digest`, lazy env read, **fail-closed when unset**; `/health` stays public; 401 before payload validation gates stream + non-stream |
+| Audit = W&B artifact + `promote/*` scalars | Every decision auditable (ADR-007) | Log-only | Immutable `promotion-decision-{id}` artifact (JSON + markdown); deploy outcome appended via artifact metadata update + `promote/deploy_status` scalar; six keys emitted as literal `log_metrics` dict to satisfy the AST contract test |
+| Unconditional kill switch | `workflow_dispatch` ref is always `main` | eval.yml-style ref check (would never trip) | `RUN_MODAL_EVAL=false` → `--no-eval` gating-off W&B note + `modal token info` + exit 0 = $0 cycle; decide/champion-download steps also guarded so no GPU/GCS work happens on the free path |
+| ci.yml promotion coverage step isolated & BEFORE repo-wide pytest | pytest-cov erases `.coverage` without `--cov-append` | `--cov-append` coupling | Own step: `pytest tests/test_promotion.py tests/test_promotion_e2e.py --cov=promotion --cov-branch --cov-fail-under=95`; measured 97.93% line / 96/4 branch |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
+| 6 failing e2e tests after chunk 10 | Test run | Yes | All 6 were test-side bugs (list.append stub TypeError, model_name mutation breaking vector pairing, bool-repr string drift, capsys double-read, champion-chain assertion); production code verified correct | ~30 min |
+| Registering `promote/*` broke `test_seed_success` | Full suite after metrics.py change | Yes | `scripts/seed_dashboards.py` `build_step` emits the six promote keys (seed-coverage invariant requires every registered key emitted); verified empirically with stash/restore | ~15 min |
+| mypy "clean" while 5 real errors existed | Second mypy run | Yes | Stale incremental cache — `promotion/` not in mypy `files` then; rule: always `mypy --no-incremental promotion/` | ~10 min |
+| fastapi + sse-starlette missing from sandbox venv → 5 collection errors | pytest | Yes | Declared in pyproject but not installed; `uv pip install` (no lock/pyproject change needed) | ~5 min |
+| Ruff "370 errors" | First ruff run over chunk 9 | Yes | My command error: ruff pointed at `.github/workflows/promote.yml` (YAML parsed as Python); never ruff non-`.py` files | ~5 min |
+| `ServeConfig.default_variant` env-override ambiguity | Chunk 6 (deploy.py) | Yes | Verified pydantic-settings auto-overrides field from `SERVING_DEFAULT_VARIANT` (file evidence L85-90); deploy pins via subprocess env; `assert_variant_known` is the pre-exec guard | ~10 min |
+| First real cycle blocked: ci/ bucket empty | Pre-req check | Yes (operational) | One-shot `scripts/seed_champion.py` writes the 2026-08-06 champion record; requires GCP creds (WIF or gcloud application-default) — runs at cycle kickoff, not locally | 0 (planned) |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| Four-gate boundary semantics | Margin/P2P ceiling use strict `<` (`==` passes); significance `ci_lower <= 0` rejects (so a candidate at exactly +0.05 with CI touching 0 is rejected as micro-gain) | "== is not a pass anywhere" is only true at the significance gate — tests pin this |
+| Pairing vectors | `{instance_id: 1.0 if r.f2p > 0 else 0.0}` per variant, instance-id **intersection**, sorted; candidate = bootstrap arg `a` (seed 42, 10k boots); McNemar b01/b10 via `zip(strict=True)` | Deterministic, offline-reproducible significance; CI width shrinks with intersection size |
+| `champion.json` self-referential schema | `previous: ChampionRecord \| None` chain | Rollback needs zero extra state; full lineage in one file |
+| `$GITHUB_OUTPUT` contract | `_write_github_output` appends `key=value` lines to the env path; job outputs map `steps.decide.outputs.*`; rejects/aborts write nothing → `== 'true'` false → deploy skipped | Plain stdout prints leave `needs.decide.outputs.*` empty and the deploy job silently no-ops |
+| Literal `log_metrics` dict | Six keys emitted as a literal dict (values computed) | The AST contract walker resolves literal dict keys; templated/Name-arg dicts trip "unresolvable emission keys" |
+| Deploy env pinning | `SERVING_DEFAULT_VARIANT=variant` appended last to `dict(os.environ)` + secrets | `ServeConfig` resolves `default_variant` at app start from env; last-wins ordering beats any ambient env |
+| Probe semantics | `GET /health` = cheap liveness pre-check only; `POST /v1/chat/completions` with Bearer + 8-token request, TTFB ceiling 500 ms × 10 | Static liveness proves nothing about the served LoRA; probe-before-record AC depends on the POST |
+| Kill-switch $0 path | `RUN_MODAL_EVAL=false` → `--no-eval` → gating-off W&B note + `modal token info`, exit 0 | Unconditional (no ref check — dispatch ref is always `main`); decide + download steps also guarded so the free path touches neither GPU nor GCS |
+| Run-id uniqueness | `harness.make_run_id()` = `eval-YYYYMMDD-HHMMSS` (second granularity) | run.py generates ids itself and passes `--resume` — two evals in the same second would otherwise collide |
+| e2e fixture shape | EvalRun is **pydantic** (not dataclass); `models_evaluated` is `list[str]` of `"model:variant"`; `google.cloud` import shape monkeypatched via `sys.modules` (must never change) | Test fixtures + auth fakes depend on these shapes |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| `promotion/` package (__init__, rules, gate, registry, audit, deploy, run) | Added | Phase 9 deliverable (§4.1-4.6); ~1200 lines |
+| `scripts/{seed_champion,tag_challenger}.py` | Added | One-shot champion seed (§4.7); idempotent challenger tagging + workflow dispatch hook |
+| `.github/workflows/promote.yml` | Added | init-wandb → decide → deploy (252 lines; deploy job = only human gate, `environment: production`) |
+| `inference/{modal_serve,serve}.py` | Modified | Step 0 Bearer auth (§4.8): serve-token secret wired, `_is_authorized` fail-closed, 401 on chat completions; `/health` public |
+| `observability/metrics.py` | Modified | `promote/*` domain registered (outcome, f2p_gain, p2p_delta, ci_lower, mcnemar_p, deploy_status) |
+| `scripts/seed_dashboards.py` | Modified | `build_step` emits the six promote keys (seed-coverage invariant) — PANELS untouched |
+| `scripts/run_3config_comparison.py` | Modified | Step 3b challenge-entry hook after `promote_champion` (respects `args.dry_run`) |
+| `tests/{test_promotion,test_promotion_e2e,test_champion_auth}.py` | Added | 76 + 34 + 5 tests; offline/CI-safe |
+| `tests/inference/{test_serve,test_serve_extra}.py`, `tests/observability/test_telemetry_contract.py` | Modified | Auth headers on existing POST tests; `_WALK_DIRS += "promotion"` + `test_promote_keys_registered` |
+| `pyproject.toml`, `.github/workflows/ci.yml` | Modified | packages.find/mypy/coverage + ruff/format/mypy path lists += promotion. A dedicated `--cov-fail-under=95` promotion CI step was added then REMOVED per user decision: the existing repo-wide `uv run pytest tests/` runner covers `tests/promotion/` with the global 90% floor; the 95% per-module gate is run locally by the orchestrator |
 
 ### Metrics / Observations
 
--
--
+- **Promotion suite: 110 tests** (tests/promotion/test_promotion.py 76 unit: TestDecide 10, TestEvaluatePair 14, TestRegistry 14, TestSeedChampion 3, TestAudit 8, TestDeploy 17, TestLaunchEvictions 10 + tests/promotion/test_promotion_e2e.py 34 e2e), plus tests/promotion/test_champion_auth.py 5; telemetry contract 9 (incl. `test_promote_keys_registered`). Test files live under `tests/promotion/` mirroring `tests/inference/`, `tests/observability/`.
+- **Coverage gate: promotion 97.91% line (485 stmts), branch ~96/4** — locally enforced `--cov=promotion --cov-branch --cov-fail-under=95`, PASS (after round-1 fixes; CI enforces the repo-wide 90% floor).
+- **Full suite: 1457 passed, 15 deselected (requires_credentials), 1 skipped** (fast 1443 + slow 14); ruff + ruff-format + mypy (48 files, `--no-incremental`) clean; all 4 workflow YAMLs parse.
+- **Step 0 auth proven in tests:** 401 without/wrong token, 200 with `MODAL_SERVE_TOKEN`, fail-closed when env unset, `/health` public; real Modal Secret `serve-token` + one-time redeploy happen at first cycle (CI-time).
+- **First-cycle expectation (DoD):** challenger `higher_rank_14b` (F2P 14.6% < 0.15 floor) → REJECT `fatal-flaw`, decision artifact + exit 0 — correct outcome vs champion 16.9%/91.2%.
+- **$0 gating-off:** `RUN_MODAL_EVAL=false` → gating-off W&B note + `modal token info` only.
+- **Code-review verdict (round 1): REQUEST-CHANGES → all 4 findings fixed** — (1) `$GITHUB_OUTPUT` emitted the incumbent as `champion`, so the deploy job would have re-deployed it (self-referential record); now emits the gate-winning `candidate`; (2) rollback targeted `old.previous` (two generations back) instead of the displaced incumbent, and never restored champion.json — now rolls back `old` and rewrites champion.json; (3) kill-switch step ran `--no-eval` without the required `--candidate-variant`, failing the $0 path — workflow now passes the input; (4) rollback probe read `MODAL_WEB_TOKEN` (never set) instead of `MODAL_SERVE_TOKEN`, so rollback always 401'd — corrected with docstrings. **Code-review verdict (round 2): APPROVE** — final subagent check on the diff; all 8 `$GITHUB_OUTPUT` keys ↔ workflow outputs consistent, probe-before-record AC holds, kill-switch $0 path + rollback state reconciliation verified; no findings ≥80 confidence (2 sub-80 cosmetic observations, no action).
+- Pre-existing invariant surfaced: seed-coverage requires every registered key emitted by `seed_dashboards.seed()` — promotion keys now synthesized there (no dashboard change needed).
 
 ---
 

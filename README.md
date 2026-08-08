@@ -273,6 +273,7 @@ The GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
 4. **Terraform Plan** - PR preview (on PRs)
 5. **Modal Deploy** - Deploy app on main branch
 6. **Docker Build** - Build & push to Artifact Registry
+7. **Champion Promotion** - `.github/workflows/promote.yml`: paired dev eval of challenger vs champion → statistical gate (floors, ≥5% F2P gain, CI lower bound > 0, ≤2% P2P regression) → auditable W&B decision record → deploy behind the `production` approval environment. Trigger with `gh workflow run promote.yml -f candidate_variant=<variant>`; set the `RUN_MODAL_EVAL` repo var to `false` for a $0 gating-off run.
 
 ## Monitoring & Observability
 
