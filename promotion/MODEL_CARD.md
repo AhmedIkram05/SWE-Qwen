@@ -30,8 +30,10 @@ library_name: peft
 
 Execution-based evaluation inside official SWE-bench Docker images on a **100-instance sample of the 2,313-instance golden set** (statistics: Wilson 95% CI, McNemar + paired bootstrap for champion selection):
 
+![Execution-based evaluation — F2P / P2P per variant](eval-f2p-p2p.png)
+
 | Variant | F2P (95% Wilson CI) | P2P | Latency | Flaky | Note |
-|---|---:|---:|---:|---:|---|
+| --- | ---: | ---: | ---: | ---: | --- |
 | Qwen3-14B (base) | 2.46% (0.8–7.7%) | 28.54% | 10.04 s | 0.06% | rejected: p2p<90%, f2p<15% |
 | baseline_14b (r16) | 12.30% (7.2–20.2%) | 85.90% | 9.47 s | 0.03% | rejected: p2p<90% |
 | **higher_rank_14b** | **17.20% (11.1–25.8%)** | **90.10%** | **8.92 s** | **0.01%** | **champion** |
