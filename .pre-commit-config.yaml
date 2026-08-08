@@ -12,7 +12,7 @@ repos:
     hooks:
       - id: mypy
         language: system
-        entry: uv run mypy data_engineering training evaluation inference observability scripts
+        entry: uv run mypy data_engineering training evaluation inference observability scripts promotion
         args: [--ignore-missing-imports]
         pass_filenames: false
 

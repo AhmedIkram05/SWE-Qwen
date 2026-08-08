@@ -102,7 +102,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["data_engineering*", "training*", "evaluation*", "inference*", "scripts*", "observability*"]
+include = ["data_engineering*", "training*", "evaluation*", "inference*", "scripts*", "observability*", "promotion*"]
 
 [tool.ruff]
 line-length = 100
@@ -185,6 +185,7 @@ files = [
     "evaluation",
     "inference",
     "observability",
+    "promotion",
 ]
 exclude = [
     "models/checkpoints",
@@ -218,7 +219,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["training", "data_engineering", "scripts", "inference", "evaluation", "observability"]
+source = ["training", "data_engineering", "scripts", "inference", "evaluation", "observability", "promotion"]
 omit = ["tests/*", "*/__pycache__/*", "*/conftest.py"]
 branch = true
 
