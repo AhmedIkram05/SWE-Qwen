@@ -859,6 +859,45 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — 63 stmts for sequential orches
     if champion and champion_artifact_name:
         promote_champion(champion, champion_artifact_name, args.dry_run)
 
+        # ── Step 3b: Challenge entry (Phase 9) ──────────────────────────────
+        # Auto-tag the winner as `challenger` and dispatch the promotion
+        # workflow. Warnings only — the comparison run itself already succeeded.
+        if args.dry_run:
+            print(f"[DRY-RUN] Would tag challenger {champion} and dispatch promote.yml")
+        else:
+            tag = subprocess.run(
+                [sys.executable, "scripts/tag_challenger.py", "--variant", champion],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if tag.returncode != 0:
+                print(
+                    f"  ⚠ warning: tag_challenger.py failed ({tag.returncode}): "
+                    f"{tag.stdout.strip()} {tag.stderr.strip()}"
+                )
+
+            gh_var = subprocess.run(
+                ["gh", "repo", "variable", "get", "RUN_MODAL_EVAL"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if gh_var.returncode != 0:
+                print("  ⚠ warning: could not read RUN_MODAL_EVAL, skipping promote dispatch")
+            elif gh_var.stdout.strip() != "false":
+                dispatch = subprocess.run(
+                    ["gh", "workflow", "run", "promote.yml", "-f", f"candidate_variant={champion}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if dispatch.returncode != 0:
+                    print(
+                        f"  ⚠ warning: promote.yml dispatch failed ({dispatch.returncode}): "
+                        f"{dispatch.stdout.strip()} {dispatch.stderr.strip()}"
+                    )
+
     # ── Step 4: Output summary ─────────────────────────────────────────────
     summary = {
         "run_id": args.run_id,
