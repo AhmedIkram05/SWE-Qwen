@@ -65,6 +65,14 @@ METRIC_REGISTRY: dict[str, dict[str, str]] = {
         "status": "Deploy outcome: 1 success, 0 failure.",
         "duration_s": "Deploy duration, seconds.",
     },
+    "promote": {
+        "outcome": "Promotion decision: 1 promote, 0 reject.",
+        "f2p_gain": "Candidate F2P gain over the champion (0.0-1.0).",
+        "p2p_delta": "Candidate P2P delta vs the champion (0.0-1.0).",
+        "ci_lower": "Paired-bootstrap CI lower bound of the F2P gain.",
+        "mcnemar_p": "McNemar two-sided p-value of the paired comparison.",
+        "deploy_status": "Deploy outcome after promotion: 1 success, 0 failure.",
+    },
 }
 
 _EVAL_HIERARCHICAL_SUFFIXES = ("latency_p50", "latency_p95")
