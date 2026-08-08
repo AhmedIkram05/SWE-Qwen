@@ -32,6 +32,9 @@ _RNG_SEED = 42  # deterministic seed run: same curves on every invocation.
 _SEGMENT = "qwen3-14b/baseline_14b/template_v1"  # eval/{model}/{variant}/{template}
 _EVAL_OFFSET = 7  # eval checkpoints fire at step % 15 == this
 _DEPLOY_FAIL_STEP = 30  # one deploy failure per 45-step cycle (red dot)
+# promotion gate thresholds, mirroring promotion.rules (spec §4.4)
+_PROMOTE_MIN_F2P_GAIN = 0.05
+_PROMOTE_MAX_P2P_REGRESSION = -0.02
 
 
 def expected_keys() -> set[str]:
@@ -141,6 +144,23 @@ def build_step(step: int, total: int, rng: random.Random) -> dict[str, float | i
                 "eval/cost_per_fix": round(total_cost_usd / max(f2p_rate * num_examples, 1), 3),
                 f"eval/{_SEGMENT}/latency_p50": round(seg_p50, 1),
                 f"eval/{_SEGMENT}/latency_p95": round(seg_p50 * rng.uniform(1.4, 1.8), 1),
+            }
+        )
+
+        # promotion decisions (spec §4.4) ride the eval cadence: the paired
+        # eval is what triggers a decide run.  Deltas vs the 2026-08-06
+        # documented champion (F2P 0.169 / P2P 0.912).
+        f2p_gain = round(f2p_rate - 0.169, 4)
+        p2p_delta = round(p2p_rate - 0.912, 4)
+        promote = f2p_gain >= _PROMOTE_MIN_F2P_GAIN and p2p_delta >= _PROMOTE_MAX_P2P_REGRESSION
+        metrics.update(
+            {
+                "promote/outcome": 1 if promote else 0,
+                "promote/f2p_gain": f2p_gain,
+                "promote/p2p_delta": p2p_delta,
+                "promote/ci_lower": round(f2p_gain - 0.03, 4),
+                "promote/mcnemar_p": 0.031,
+                "promote/deploy_status": 1 if promote else 0,
             }
         )
 

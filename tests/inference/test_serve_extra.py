@@ -195,11 +195,19 @@ def _stream_payload():
 
 
 class TestStreamingErrors:
+    @pytest.fixture(autouse=True)
+    def _serve_token(self, monkeypatch):
+        monkeypatch.setenv("MODAL_SERVE_TOKEN", "test-token-123")
+
     def test_runtime_error_swallowed_as_cancelled(self, fake_adapter):
         client = TestClient(
             serve.create_app(_ThrowingEngine(RuntimeError("cancelled")), ServeConfig())
         )
-        response = client.post("/v1/chat/completions", json=_stream_payload())
+        response = client.post(
+            "/v1/chat/completions",
+            json=_stream_payload(),
+            headers={"Authorization": "Bearer test-token-123"},
+        )
         assert response.status_code == 200
         assert "[DONE]" not in response.text
 
@@ -207,7 +215,11 @@ class TestStreamingErrors:
         client = TestClient(
             serve.create_app(_ThrowingEngine(ValueError("gen failed")), ServeConfig())
         )
-        response = client.post("/v1/chat/completions", json=_stream_payload())
+        response = client.post(
+            "/v1/chat/completions",
+            json=_stream_payload(),
+            headers={"Authorization": "Bearer test-token-123"},
+        )
         assert response.status_code == 200
         assert "internal generation failure" in response.text
         assert "[DONE]" in response.text

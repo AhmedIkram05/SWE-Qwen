@@ -11,10 +11,9 @@ repos:
     rev: 41e691678310dfd3833f7ab4e180ddb014310356  # frozen: v2.3.0
     hooks:
       - id: mypy
-        additional_dependencies:
-          - "types-requests"
-          - "types-pyyaml"
-        args: [--ignore-missing-imports, src]
+        language: system
+        entry: uv run mypy data_engineering training evaluation inference observability scripts promotion
+        args: [--ignore-missing-imports]
         pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -33,9 +32,9 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: pytest
+        entry: uv run pytest tests/
         language: system
         types: [python]
-        args: ["-m", "not integration", "--no-header"]
+        args: ["-m", "not requires_credentials and not slow", "--no-header", "-q"]
         pass_filenames: false
         stages: [pre-push]

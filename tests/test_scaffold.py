@@ -26,12 +26,6 @@ class TestProjectStructure:
     def test_readme_exists(self):
         assert (PROJECT_ROOT / "README.md").exists()
 
-    def test_modal_app_exists(self):
-        assert (PROJECT_ROOT / "src" / "swe_qwen" / "modal_app.py").exists()
-
-    def test_swe_qwen_package_exists(self):
-        assert (PROJECT_ROOT / "src" / "swe_qwen" / "__init__.py").exists()
-
     def test_scripts_directory_exists(self):
         assert (PROJECT_ROOT / "scripts").is_dir()
 
@@ -130,12 +124,6 @@ class TestPyProjectToml:
         assert "mypy" in tools
         assert "pytest" in tools
 
-    def test_package_version(self):
-        """Verify swe_qwen package version can be imported."""
-        from swe_qwen import __version__
-
-        assert __version__ == "0.1.0"
-
 
 class TestGitIgnore:
     """Test .gitignore contains required patterns."""
@@ -156,28 +144,6 @@ class TestGitIgnore:
         ]
         for pattern in required_patterns:
             assert pattern in content, f"Missing pattern in .gitignore: {pattern}"
-
-
-class TestModalApp:
-    """Test modal_app.py structure."""
-
-    def test_modal_app_imports(self):
-        """Test that modal_app.py can be parsed."""
-        content = (PROJECT_ROOT / "src" / "swe_qwen" / "modal_app.py").read_text()
-        assert "import modal" in content
-        assert "app = modal.App" in content or "modal.App(" in content
-
-    def test_modal_app_has_functions(self):
-        content = (PROJECT_ROOT / "src" / "swe_qwen" / "modal_app.py").read_text()
-        required_functions = [
-            "hello_modal",
-            "train_swe_qwen",
-            "serve_swe_qwen",
-        ]
-        for func in required_functions:
-            assert f"def {func}" in content or "@app.function" in content, (
-                f"Missing function: {func}"
-            )
 
 
 class TestInitWandbScript:

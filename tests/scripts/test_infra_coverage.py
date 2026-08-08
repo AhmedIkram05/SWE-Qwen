@@ -61,13 +61,6 @@ def _import_training(name: str) -> Any:
         return __import__(f"training.{name}", fromlist=["_"])
 
 
-def _import_modal_app(name: str) -> Any:
-    """Import from src.swe_qwen.modal_app with modal/wandb mocked."""
-    with mock.patch.dict("sys.modules", {"modal": _MOCK_MODAL, "wandb": _MOCK_WANDB}):
-        mod = __import__("src.swe_qwen.modal_app", fromlist=[name])
-        return getattr(mod, name) if name != "modal_app" else mod
-
-
 # ── training/unsloth_factory.py ────────────────────────────────────────────────
 
 
@@ -1401,94 +1394,6 @@ class TestModalTrainDownload:
         result = mod._download_gcs_public(prefix, str(tmp_path))
         assert (tmp_path / "train" / "data-00000.arrow").exists()
         assert result == str(tmp_path)
-
-
-# ── src/swe_qwen/modal_app.py ──────────────────────────────────────────────────
-
-
-class TestModalApp:
-    """Test modal_app.py constants and pure components."""
-
-    def _get_app(self, name: str) -> Any:
-        mod = _import_modal_app("modal_app")
-        return getattr(mod, name)
-
-    def test_data_pipeline_config_defaults(self):
-        dp_cls = self._get_app("DataPipelineConfig")
-
-        cfg = dp_cls()
-        assert cfg.swe_bench_dir == "/data/swe_bench"
-        assert cfg.output_dir == "/data/pipeline_output"
-        assert cfg.stages == "all"
-        assert cfg.wandb_project == "swe-qwen-data"
-        assert cfg.parallel == 4
-        assert cfg.bigquery is True
-
-    def test_data_pipeline_config_custom(self):
-        dp_cls = self._get_app("DataPipelineConfig")
-
-        cfg = dp_cls(
-            swe_bench_dir="/custom",
-            output_dir="/out",
-            run_id="test-run",
-            stages="split",
-            wandb_project="custom-proj",
-            parallel=8,
-        )
-        assert cfg.swe_bench_dir == "/custom"
-        assert cfg.run_id == "test-run"
-        assert cfg.stages == "split"
-        assert cfg.parallel == 8
-
-    def test_run_data_pipeline_subprocess(self, tmp_path, mocker):
-        import subprocess
-
-        dp_cls = self._get_app("DataPipelineConfig")
-        run_data_pipeline = self._get_app("run_data_pipeline")
-
-        mock_proc = mocker.MagicMock()
-        mock_proc.returncode = 0
-        mock_proc.stdout = "pipeline complete"
-        mock_proc.stderr = ""
-        mocker.patch.object(subprocess, "run", return_value=mock_proc)
-        mocker.patch("sys.executable", "/usr/bin/python")
-
-        cfg = dp_cls(
-            swe_bench_dir=str(tmp_path / "swe_bench"),
-            output_dir=str(tmp_path / "out"),
-            run_id=None,
-            stages="all",
-            wandb_project="test-proj",
-            parallel=2,
-        )
-        result = run_data_pipeline(
-            augment_codecontests=False,
-            augment_codealpaca=False,
-            max_train_examples=10,
-            cfg=cfg,
-        )
-        assert result["status"] == "completed"
-        assert result["max_train_examples"] == 10
-
-    def test_run_data_pipeline_failure(self, tmp_path, mocker):
-        import subprocess
-
-        dp_cls = self._get_app("DataPipelineConfig")
-        run_data_pipeline = self._get_app("run_data_pipeline")
-
-        mock_proc = mocker.MagicMock()
-        mock_proc.returncode = 1
-        mock_proc.stdout = "error"
-        mock_proc.stderr = "something broke"
-        mocker.patch.object(subprocess, "run", return_value=mock_proc)
-        mocker.patch("sys.executable", "/usr/bin/python")
-
-        cfg = dp_cls(
-            swe_bench_dir=str(tmp_path / "swe_bench"),
-            output_dir=str(tmp_path / "out"),
-        )
-        with pytest.raises(RuntimeError, match="Pipeline failed"):
-            run_data_pipeline(max_train_examples=10, cfg=cfg)
 
 
 # ── training/__init__.py ───────────────────────────────────────────────────────
