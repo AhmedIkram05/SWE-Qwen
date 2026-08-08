@@ -30,6 +30,7 @@ def _stub_tokenizer(monkeypatch):
 
 @pytest.fixture
 def config(monkeypatch):
+    monkeypatch.setenv("MODAL_SERVE_TOKEN", "test-token-123")
     monkeypatch.setattr(
         prompt_builder,
         "resolve_adapter_path",
@@ -64,7 +65,11 @@ class TestChatCompletions:
         return payload
 
     def test_non_stream_base_model(self, client):
-        response = client.post("/v1/chat/completions", json=self._payload())
+        response = client.post(
+            "/v1/chat/completions",
+            json=self._payload(),
+            headers={"Authorization": "Bearer test-token-123"},
+        )
         assert response.status_code == 200
         body = response.json()
         assert body["id"].startswith("chatcmpl-")
@@ -79,14 +84,22 @@ class TestChatCompletions:
             assert isinstance(body["usage"][key], int)
 
     def test_non_stream_variant(self, client):
-        response = client.post("/v1/chat/completions", json=self._payload(model="baseline_14b"))
+        response = client.post(
+            "/v1/chat/completions",
+            json=self._payload(model="baseline_14b"),
+            headers={"Authorization": "Bearer test-token-123"},
+        )
         assert response.status_code == 200
         body = response.json()
         assert body["model"] == "baseline_14b"
         assert body["choices"][0]["message"]["content"].startswith("stub[qwen3-14b-baseline_14b]:")
 
     def test_stream(self, client):
-        response = client.post("/v1/chat/completions", json=self._payload(stream=True))
+        response = client.post(
+            "/v1/chat/completions",
+            json=self._payload(stream=True),
+            headers={"Authorization": "Bearer test-token-123"},
+        )
         assert response.status_code == 200
         text = response.text
         assert "data: [DONE]" in text
@@ -104,7 +117,11 @@ class TestChatCompletions:
         assert frames[-1]["choices"][0]["finish_reason"] == "stop"
 
     def test_unknown_model_404(self, client):
-        response = client.post("/v1/chat/completions", json=self._payload(model="gpt-4"))
+        response = client.post(
+            "/v1/chat/completions",
+            json=self._payload(model="gpt-4"),
+            headers={"Authorization": "Bearer test-token-123"},
+        )
         assert response.status_code == 404
         body = response.json()
         assert "error" in body
@@ -115,6 +132,7 @@ class TestChatCompletions:
         response = client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": "Bearer test-token-123"},
         )
         assert response.status_code == 422
         body = response.json()
@@ -138,7 +156,11 @@ class TestChatCompletions:
                 raise RuntimeError("boom")
 
         client = TestClient(create_app(FailingEngine(), config))
-        response = client.post("/v1/chat/completions", json=self._payload())
+        response = client.post(
+            "/v1/chat/completions",
+            json=self._payload(),
+            headers={"Authorization": "Bearer test-token-123"},
+        )
         assert response.status_code == 500
         body = response.json()
         assert "error" in body

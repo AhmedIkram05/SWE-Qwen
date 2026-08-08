@@ -59,6 +59,7 @@ _WALK_DIRS = (
     "data_engineering",
     "observability",
     "scripts",
+    "promotion",
 )
 
 # Documented wandb-alias receivers: (relative path, receiver name) -> the
@@ -545,6 +546,20 @@ def test_deploy_payload(mocker):
         assert_registered(build_payload(1, None, "abc123"))
     finally:
         METRIC_REGISTRY["deploy"] = original_deploy
+
+
+def test_promote_keys_registered():
+    """The six ``promote/*`` decision scalars are registered (spec 4.9)."""
+    assert "promote" in METRIC_REGISTRY
+    for key in (
+        "promote/outcome",
+        "promote/f2p_gain",
+        "promote/p2p_delta",
+        "promote/ci_lower",
+        "promote/mcnemar_p",
+        "promote/deploy_status",
+    ):
+        assert _is_registered(key)
 
 
 def test_panels_spec_subset_of_registry(mocker):
