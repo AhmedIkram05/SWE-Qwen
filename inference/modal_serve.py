@@ -56,7 +56,12 @@ serve_volume = modal.Volume.from_name("serve-model-cache", create_if_missing=Tru
 # Kept private on purpose (a from-import would trip PLC2701); benchmark.py
 # reuses these via ``modal_serve.image`` / ``modal_serve.serve_volume`` /
 # ``modal_serve._secrets``.  hf-secret: Qwen3-14B is gated on the Hub.
-_secrets = [modal.Secret.from_name("wandb-secret"), modal.Secret.from_name("hf-secret")]
+# serve-token: MODAL_SERVE_TOKEN bearer auth for the chat endpoint (Phase 9).
+_secrets = [
+    modal.Secret.from_name("wandb-secret"),
+    modal.Secret.from_name("hf-secret"),
+    modal.Secret.from_name("serve-token"),
+]
 
 image = (
     modal.Image.debian_slim(python_version="3.11")

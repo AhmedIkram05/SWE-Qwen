@@ -14,6 +14,7 @@ batches internally.
 from __future__ import annotations
 
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import time
 from collections.abc import Iterator
 from typing import Any, Protocol
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sse_starlette import EventSourceResponse
@@ -254,6 +255,19 @@ def _default_engine() -> Engine:
     return StubEngine()
 
 
+def _is_authorized(authorization: str | None) -> bool:
+    """Exact ``Bearer <MODAL_SERVE_TOKEN>`` check; fail-closed when unset.
+
+    Token is read lazily per request (no module-level caching) so tests can
+    set/unset the env per test; comparison is constant-time.
+    """
+    expected = os.environ.get("MODAL_SERVE_TOKEN")
+    if expected is None or authorization is None:
+        return False
+    scheme, _, token = authorization.partition(" ")
+    return scheme == "Bearer" and hmac.compare_digest(token, expected)
+
+
 def _stream_gen(  # noqa: PLR0913, PLR0917
     engine: Engine,
     request: ChatCompletionRequest,
@@ -378,8 +392,16 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
     @app.post("/v1/chat/completions", response_model=None)
     def chat_completions(
         payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
     ) -> ChatCompletionResponse | EventSourceResponse | JSONResponse:
         """OpenAI-compatible chat completions (stream + non-stream)."""
+        # Phase 9: bearer auth on this route only; /health stays open (static
+        # liveness for infra probes). Check runs before payload validation so
+        # the stream and non-stream paths are both gated.
+        if not _is_authorized(authorization):
+            return JSONResponse(
+                status_code=401, content={"detail": "invalid or missing bearer token"}
+            )
         t0 = time.perf_counter()
         try:
             request = ChatCompletionRequest.model_validate(payload)
