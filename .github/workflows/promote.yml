@@ -1,0 +1,280 @@
+name: Champion Promotion Pipeline
+
+# Phase 9 (4.10, decision 11): manual dispatch evaluates a challenger variant
+# against the current champion (paired dev-tier eval, statistical gate) and —
+# only when the decision says PROMOTE — deploys the champion through the
+# `production` environment gate. The ONLY human act is approving that deploy.
+# Rejections exit 0: rejection is a successful outcome, not a failure.
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_variant:
+        description: "Variant name to evaluate as challenger (e.g. higher_rank_14b)"
+        required: true
+        type: string
+
+concurrency:
+  # decision 11: never cancel a run mid-promotion (mid-decision or mid-deploy).
+  group: promote-decision-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+  # Same run id consumed by tokenize, training, and eval. EvalConfig reads
+  # EVAL_DATASET_RUN_ID via env_prefix="EVAL_" -> drives golden_data_path.
+  DATASET_RUN_ID: "expanded-repos"
+  EVAL_DATASET_RUN_ID: "expanded-repos"
+
+jobs:
+  init-wandb:
+    name: Init Weights & Biases Project
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      # Pin/recreate the W&B project BEFORE any job resolves artifacts from it
+      # (the swe-qwen project auto-deleted once — same reasoning as eval.yml).
+      - name: Pin / recreate W&B project
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: uv run python scripts/init_wandb.py --entity 2571642-university-of-dundee
+
+  decide:
+    name: Decide Champion vs Challenger
+    needs: init-wandb
+    runs-on: ubuntu-latest
+    timeout-minutes: 240  # paired dev-tier eval ceiling is ~180 min in run.py; keep headroom
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    # run.py writes these eight keys to $GITHUB_OUTPUT ONLY on PROMOTE (spec
+    # 4.6 step 6); rejection/abort write nothing, so outputs stay empty and
+    # the deploy job's `== 'true'` condition skips it. The four F2P/P2P rates
+    # feed the deploy job's champion.json record + approver summary (spec 4.10).
+    outputs:
+      promote: ${{ steps.decide.outputs.promote }}
+      champion: ${{ steps.decide.outputs.champion }}
+      candidate: ${{ steps.decide.outputs.candidate }}
+      decision_id: ${{ steps.decide.outputs.decision_id }}
+      champion_f2p: ${{ steps.decide.outputs.champion_f2p }}
+      candidate_f2p: ${{ steps.decide.outputs.candidate_f2p }}
+      champion_p2p: ${{ steps.decide.outputs.champion_p2p }}
+      candidate_p2p: ${{ steps.decide.outputs.candidate_p2p }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      # REQUIRED here (unlike eval.yml's warn-and-continue baseline): the
+      # paired eval cannot run without the champion record. Skipped when the
+      # kill switch is on — the gating-off path is free AND must work with an
+      # empty bucket (first cycle; seed_champion.py bootstraps ci/).
+      - name: Download champion record
+        if: ${{ vars.RUN_MODAL_EVAL != 'false' }}
+        run: |
+          set +e
+          gcloud storage cp gs://swe-qwen-datasets/ci/champion.json data/eval_results/champion.json \
+            2> /tmp/gcs_champion_err.txt
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "::error::no champion record in GCS (rc=$rc); seed ci/champion.json (scripts/seed_champion.py) before promoting."
+            exit 1
+          fi
+
+      # decision 11: UNCONDITIONAL kill switch — no ref check (workflow_dispatch
+      # refs are always refs/heads/main). RUN_MODAL_EVAL=false runs ONLY free
+      # steps: the gating-off decision note + a Modal creds validation, then
+      # exits 0. Zero Modal spend, works with an empty bucket.
+      - name: Modal kill switch
+        id: gating
+        run: |
+          if [ "${{ vars.RUN_MODAL_EVAL }}" = "false" ]; then
+            # candidate_variant is a required workflow_dispatch input, so it is
+            # always present; run.py's parser requires it on the gating path.
+            uv run python -m promotion.run --no-eval --candidate-variant ${{ inputs.candidate_variant }} 2>&1 | tee gating-off.log
+            uv run modal token info
+            exit 0
+          fi
+
+      - name: Run paired eval and decide
+        id: decide
+        if: ${{ vars.RUN_MODAL_EVAL != 'false' }}
+        run: |
+          uv run python -m promotion.run --candidate-variant ${{ inputs.candidate_variant }} 2>&1 | tee promotion.log
+
+      # Decision record itself lives in the W&B `promotion-decision-*` artifact
+      # (audit.py writes no local files); the log carries the promote= line.
+      - name: Publish decision summary
+        if: always()
+        run: |
+          if [ -f promotion.log ]; then
+            echo '## Promotion decision' >> "$GITHUB_STEP_SUMMARY"
+            cat promotion.log >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Spec §4.10 L179 / approver-clarity AC: run.py persists
+      # data/promotion_decisions/decision.{md,json} in the decide job; ship them
+      # as a downloadable artifact (name promotion-decision-<id>, retention 7) so
+      # the human approving the deploy gate reads exactly what they approve —
+      # same affordance cd.yml's terraform-plan artifact. `if: always()`: a
+      # failing upload must never fail the decision. Empty on the gating path
+      # warns (if-no-files-found default), so the $0 run stays green.
+      - name: Upload decision artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: promotion-decision-${{ needs.decide.outputs.decision_id }}
+          path: data/promotion_decisions/
+          retention-days: 7
+
+  deploy:
+    # Job name embeds the champion so the human approving the `production`
+    # environment sees WHAT they are approving (spec 4.10 / AC approver clarity).
+    name: Deploy Champion ${{ needs.decide.outputs.champion }}
+    needs: decide
+    if: needs.decide.outputs.promote == 'true'
+    runs-on: ubuntu-latest
+    environment: production # requires manual approval in Settings → Environments
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # Probe credentials read by run.py's health_check (spec 4.10 step 1);
+      # without them every deploy fails the probe and rolls back.
+      MODAL_WEB_URL: ${{ secrets.MODAL_WEB_URL }}
+      MODAL_SERVE_TOKEN: ${{ secrets.MODAL_SERVE_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      # Required: run.py's --deploy reads champion.json directly (no GCS
+      # fallback in the deploy path) and aborts without it.
+      - name: Download champion record
+        run: |
+          set +e
+          gcloud storage cp gs://swe-qwen-datasets/ci/champion.json data/eval_results/champion.json \
+            2> /tmp/gcs_champion_err.txt
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "::error::no champion record in GCS (rc=$rc); cannot deploy without the incumbent record."
+            exit 1
+          fi
+
+      # Human-approver summary BEFORE any deploy work (terraform-plan parity,
+      # spec 4.10): decision id, champion→candidate, outcome, F2P/P2P
+      # before-after, artifact link. The rates are the decide job's
+      # $GITHUB_OUTPUT values (same numbers the deploy writes to champion.json).
+      - name: Write deployment summary
+        run: |
+          {
+            echo "## Deploying champion: ${{ needs.decide.outputs.champion }}"
+            echo "- **Decision**: ${{ needs.decide.outputs.decision_id }}"
+            echo "- **Champion → candidate**: ${{ needs.decide.outputs.champion }} → ${{ needs.decide.outputs.candidate }}"
+            echo "- **Outcome**: promote=true (accepted by the statistical gate)"
+            echo "- **F2P**: ${{ needs.decide.outputs.champion_f2p }} → ${{ needs.decide.outputs.candidate_f2p }} — **P2P**: ${{ needs.decide.outputs.champion_p2p }} → ${{ needs.decide.outputs.candidate_p2p }}"
+            echo "- **Decision artifact**: https://wandb.ai/2571642-university-of-dundee/swe-qwen/artifacts/decision/promotion-decision-${{ needs.decide.outputs.decision_id }}"
+            echo "- Metrics and reasons: see the decision artifact (F2P/P2P before-after, CI, reasons)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # run.py --deploy: pin variant → modal deploy → probe POST /v1/chat/completions →
+      # only after probe green write champion.json + sync W&B alias; on failure
+      # rollback the previous champion and exit 1. Appends deploy_status to the
+      # decision artifact + logs promote/deploy_status itself — no extra steps.
+      # --f2p-rate/--p2p-rate: the decide job's candidate rates, so the new
+      # champion.json carries the fresh audit numbers, not the incumbent's
+      # (spec 4.10 before-after).
+      - name: Deploy champion
+        id: deploy
+        run: |
+          uv run python -m promotion.run --deploy \
+            --variant ${{ needs.decide.outputs.champion }} \
+            --decision-id ${{ needs.decide.outputs.decision_id }} \
+            --f2p-rate ${{ needs.decide.outputs.candidate_f2p }} \
+            --p2p-rate ${{ needs.decide.outputs.candidate_p2p }}
+
+      # run.py does NOT upload champion.json to GCS — this step is the only
+      # writer of the ci/ source of truth. Gated on deploy outcome, NOT
+      # `if: always()`: on an alias-sync failure run.py has already rewritten
+      # champion.json on disk before rolling back, and uploading that file
+      # would corrupt GCS with a champion that is deployed-and-rolled-back.
+      # File + JSON guards enforce probe-before-record (spec AC).
+      - name: Upload champion record to GCS
+        if: steps.deploy.outcome == 'success'
+        run: |
+          if [ ! -f data/eval_results/champion.json ]; then
+            echo "::error::deploy succeeded but champion.json was not written (probe-before-record AC broken)"
+            exit 1
+          fi
+          uv run python -c "import json; json.load(open('data/eval_results/champion.json'))" \
+            || { echo "::error::champion.json is not valid JSON"; exit 1; }
+          gcloud storage cp data/eval_results/champion.json gs://swe-qwen-datasets/ci/champion.json

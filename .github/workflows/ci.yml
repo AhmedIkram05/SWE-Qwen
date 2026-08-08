@@ -55,39 +55,30 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .mypy_cache
-          key: mypy-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('data_engineering/**', 'training/**', 'evaluation/**', 'inference/**') }}
+          key: mypy-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('data_engineering/**', 'training/**', 'evaluation/**', 'inference/**', 'observability/**', 'scripts/**', 'promotion/**') }}
 
       - name: Install dependencies
         run: uv sync --extra dev --frozen
 
       - name: Run Ruff (lint)
-        run: uv run ruff check data_engineering/ training/ tests/ evaluation/ inference/ observability/ scripts/
+        run: uv run ruff check data_engineering/ training/ tests/ evaluation/ inference/ observability/ scripts/ promotion/
 
       - name: Run Ruff (format check)
-        run: uv run ruff format --check data_engineering/ training/ tests/ evaluation/ inference/ observability/ scripts/
+        run: uv run ruff format --check data_engineering/ training/ tests/ evaluation/ inference/ observability/ scripts/ promotion/
 
       - name: Run MyPy
-        run: uv run mypy data_engineering/ training/ evaluation/ inference/ observability/ scripts/
+        run: uv run mypy data_engineering/ training/ evaluation/ inference/ observability/ scripts/ promotion/
 
       - name: Run pytest (all tests — coverage gate)
         run: |
-          # Two invocations: the "slow"-marked tests (e.g. trainer smoke) install
-          # a global tracing dispatcher and panic when sharing a worker with
-          # other tests, so they must run in isolation. Both always run; any
-          # failure fails the step. --cov-fail-under: measured total coverage
-          # 2026-08-07 was 54.08% — threshold 50 leaves regression headroom.
-          set +e
+          # Single invocation: `-n auto` parallelizes across workers and lets
+          # the full pool serve every test (slow-marked data-pipeline tests
+          # simply occupy a subset of workers). One run -> one .coverage.
+          # --cov-fail-under: measured total coverage 2026-08-07 was 54.08% —
+          # threshold 90 leaves regression headroom.
           uv run pytest tests/ -q --tb=short -n auto \
-            -m "not requires_credentials and not slow" \
-            --cov --cov-append || fast_rc=$?
-          uv run pytest tests/ -q --tb=short -n auto \
-            -m "slow and not requires_credentials" \
-            --cov --cov-append --cov-report=xml --cov-fail-under=90 || slow_rc=$?
-          set -e
-          if [ "${fast_rc:-0}" -ne 0 ] || [ "${slow_rc:-0}" -ne 0 ]; then
-            echo "::error::pytest failed (fast=${fast_rc:-0}, slow=${slow_rc:-0})"
-            exit 1
-          fi
+            -m "not requires_credentials" \
+            --cov --cov-report=xml --cov-fail-under=90
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
