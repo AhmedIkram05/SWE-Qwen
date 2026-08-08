@@ -102,7 +102,7 @@ jobs:
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@v3
 
       # Baseline lives in GCS (gitignored locally). Split download so a first
       # run without a baseline doesn't fail: bootstrap happens on push to main.
