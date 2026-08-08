@@ -1040,7 +1040,7 @@ swe-qwen/
 
 ---
 
-### Phase 11: Hardening & Resilience
+### Phase 11: Hardening & Resilience (NOT DOING, WASTE OF TIME)
 
 **Objective:** Strengthen error handling, edge case coverage, retry logic, input validation, model fallback behavior, and operational resilience across all components.
 
@@ -1096,7 +1096,7 @@ swe-qwen/
 
 ---
 
-### Phase 12: End-to-End Validation
+### Phase 12: End-to-End Validation (NOT DOING, WASTE OF TIME)
 
 **Objective:** Run the complete pipeline from data ingestion through trained model to serving API to promotion, validating that every component works together as a system.
 
