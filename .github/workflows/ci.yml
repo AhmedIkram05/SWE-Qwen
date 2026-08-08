@@ -44,7 +44,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Cache virtualenv
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -52,7 +52,7 @@ jobs:
             venv-${{ runner.os }}-
 
       - name: Cache mypy
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .mypy_cache
           key: mypy-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('data_engineering/**', 'training/**', 'evaluation/**', 'inference/**', 'observability/**', 'scripts/**', 'promotion/**') }}
@@ -106,7 +106,7 @@ jobs:
           terraform_version: 1.9.0
 
       - name: Cache Terraform plugins
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: infra/terraform/.terraform
           key: terraform-${{ hashFiles('infra/terraform/**/*.tf', 'infra/terraform/**/*.tfvars') }}
