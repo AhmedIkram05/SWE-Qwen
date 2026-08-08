@@ -15,16 +15,11 @@
   <img src="https://img.shields.io/badge/Google_Cloud-GCS-4285F4?style=for-the-badge&labelColor=000000&logo=googlecloud" />
   <img src="https://img.shields.io/badge/Weights_%26_Biases-Experiments-FFBE00?style=for-the-badge&labelColor=000000&logo=weightsandbiases" />
   <img src="https://img.shields.io/badge/GitHub_Actions-CI%2FCD-2088FF?style=for-the-badge&labelColor=000000&logo=githubactions" />
-</p>
-
-<p align="center">
   <img src="https://img.shields.io/badge/Hugging_Face-Transformers-FFD21E?style=for-the-badge&labelColor=000000&logo=huggingface" />
   <img src="https://img.shields.io/badge/PEFT-LoRA-2D9CDB?style=for-the-badge&labelColor=000000" />
   <img src="https://img.shields.io/badge/bitsandbytes-NF4_Quant-DC143C?style=for-the-badge&labelColor=000000" />
   <img src="https://img.shields.io/badge/TRL-SFT_Trainer-FF6F61?style=for-the-badge&labelColor=000000" />
   <img src="https://img.shields.io/badge/HF_Datasets-Arrow-6DA8FF?style=for-the-badge&labelColor=000000" />
-</p>
-<p align="center">
   <img src="https://img.shields.io/badge/Typer-CLI-FFA629?style=for-the-badge&labelColor=000000" />
   <img src="https://img.shields.io/badge/Pydantic-Schemas-3B82F6?style=for-the-badge&labelColor=000000" />
   <img src="https://img.shields.io/badge/Uvicorn-ASGI-4A4A55?style=for-the-badge&labelColor=000000" />
@@ -32,8 +27,6 @@
   <img src="https://img.shields.io/badge/Docker-SWE--bench-2496ED?style=for-the-badge&labelColor=000000&logo=docker" />
   <img src="https://img.shields.io/badge/Langfuse-LLM_Tracing-BB8FF7?style=for-the-badge&labelColor=000000" />
   <img src="https://img.shields.io/badge/BigQuery-Analytics-669DF6?style=for-the-badge&labelColor=000000&logo=googlebigquery" />
-  <img src="https://img.shields.io/badge/Ruff-Linter-D7FF64?style=for-the-badge&labelColor=000000&logo=ruff" />
-  <img src="https://img.shields.io/badge/MyPy-Type_Checks-2A6DB2?style=for-the-badge&labelColor=000000&logo=mypy" />
   <img src="https://img.shields.io/badge/pytest-1%2C456_Tests-0A9EDC?style=for-the-badge&labelColor=000000&logo=pytest" />
 </p>
 
@@ -62,12 +55,13 @@ SWE-Qwen is an **automated software-issue-resolution platform**: it ingests real
   - [End-to-end flow](#end-to-end-flow)
 - [Engineering Highlights](#engineering-highlights)
 - [Key Metrics at a Glance](#key-metrics-at-a-glance)
-- [Real-System Evidence (demos)](#real-system-evidence-demos)
-  - [Data pipeline run](#data-pipeline-run)
-  - [Training curves](#training-curves)
+- [Demos (the system, run)](#demos-the-system-run)
   - [Evaluation results](#evaluation-results)
+  - [Training curves](#training-curves)
   - [Inference demo](#inference-demo)
-  - [Storage & infrastructure](#storage--infrastructure)
+  - [Data pipeline run](#data-pipeline-run)
+  - [Every subsystem is one command](#every-subsystem-is-one-command)
+- [Anatomy of a Real Run (the system was up)](#anatomy-of-a-real-run-the-system-was-up)
 - [Component Deep Dives](#component-deep-dives)
   - [1. Data Engineering (`data_engineering/`)](#1-data-engineering-data_engineering)
   - [2. QLoRA Training (`training/`)](#2-qlora-training-training)
@@ -205,7 +199,7 @@ Every stage is a first-class, independently runnable step with typed schemas (`p
 | | Lint / type-check | `ruff check` clean · `mypy` strict on 42 source files |
 | | Infrastructure as code | 100% Terraform (storage + IAM + project roots) |
 
-> **Final results** On the **100-instance golden set**, the promoted **`higher_rank_14b`** champion scores **17.20% F2P (95% Wilson CI 11.1–25.8%)** with **90.10% P2P** at **8.92 s/instance** — up from the base Qwen3-14B's **2.46% F2P / 28.54% P2P** (**7.0× F2P gain**, +61.6pt P2P, McNemar p < 1e-6, paired-bootstrap 95% CI lower bound > 0). Full table verbatim in [assets/results.txt](assets/results.txt); methodology in [docs/evaluation.md](docs/evaluation.md).
+> **Final results** On the **100-instance golden set**, the promoted **`higher_rank_14b`** champion scores **17.20% F2P (95% Wilson CI 11.1–25.8%)** with **90.10% P2P** at **8.92 s/instance** — up from the base Qwen3-14B's **2.46% F2P / 28.54% P2P** (**7.0× F2P gain**, +61.6pt P2P, McNemar p < 1e-6, paired-bootstrap 95% CI lower bound > 0). Full table verbatim in [assets/results.txt](assets/results.txt); methodology in [docs/evaluation.md](docs/evaluation.md). The champion adapter ships on the Hugging Face Hub: **[`ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b`](https://huggingface.co/ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b)**.
 
 ---
 
@@ -239,6 +233,11 @@ Everything below was captured against **live systems** — the real GCS bucket, 
 <p align="center">
   <img src="assets/media/cli-data-pipeline.png" width="560" alt="python -m data_engineering.cli --help" />
   <br/><em>`python -m data_engineering.cli --help` — one command runs the whole pipeline.</em>
+</p>
+
+<p align="center">
+  <img src="assets/media/data-pipeline-run.png" width="640" alt="real pipeline run transcript" />
+  <br/><em>The actual run (run id `expanded-repos`, `assets/data-eng.txt`): 20,477 ingested → 20,470 validated (7 rejected) → 17,456 cleaned → 15,011/1,556/889 split + 2,313 golden → 14,833 tokenized — W&B artifacts, manifest hash, and the GCS round-trip in one transcript.</em>
 </p>
 
 ### Every subsystem is one command
@@ -499,8 +498,13 @@ Streaming returns SSE `data: {json}\n\n` frames — role chunk → content chunk
 5. **The wire stays OpenAI**: `chatcmpl-{12 hex}` ids, `choices`/`usage`, SSE `data: [DONE]`, word-chunk streaming with TTFB recorded at the first chunk; every request emits a `RequestRecord` (ts · model · stream · ttfb_ms · latency_ms · tokens · error) to the observability layer.
 
 <p align="center">
-  <img src="assets/media/inference-demo.gif" alt="Streaming inference demo" width="560"/>
-  <br/><em>Drop `inference-demo.gif` into `assets/media/` — streaming `/v1/chat/completions` from a terminal.</em>
+  <img src="assets/media/modal-qwen-server.png" alt="Modal serving endpoint" width="560"/>
+  <br/><em>Modal serving endpoint — the vLLM + LoRA server sits at zero/cold until a request scales it up; per-request GPU billing, no idle cost.</em>
+</p>
+
+<p align="center">
+  <img src="assets/media/inference-demo.png" alt="Streaming inference demo" width="560"/>
+  <br/><em>Live streaming — `/v1/chat/completions` with `curl -N` over SSE: role chunk → content chunks → `finish_reason:"stop"` → `data: [DONE]`.</em>
 </p>
 
 ### 6. Observability (`observability/`)
@@ -514,9 +518,13 @@ Every layer of the platform phones home, and the dashboards that visualize it ar
 - **Cost** — `observability/cost.py` folds Modal + GCS spend into each `EvalRun.cost_usd` (the `$30` figure in `assets/results.txt` is the sum of the two runs' recorded spend).
 
 <p align="center">
-  <img src="assets/media/langfuse-trace.png" alt="Langfuse trace"/>
-  <img src="assets/media/wandb-workspace.png" alt="W&B workspace"/>
-  <br/><em>Drop `langfuse-trace.png` + `wandb-workspace.png` into `assets/media/` to fill these.</em>
+  <img src="assets/media/langfuse.png" alt="Langfuse trace" width="560"/>
+  <br/><em>Langfuse — one request traced end-to-end (prompt → generated patch → latency), sampled at 10% (`telemetry_trace_sample_rate`).</em>
+</p>
+
+<p align="center">
+  <img src="assets/media/w%26b-dashboards.gif" alt="W&B dashboards-as-code" width="480"/>
+  <br/><em>W&B workspaces — dashboards as code: `scripts/build_dashboards.py` + `scripts/seed_dashboards.py` (wandb-workspaces) keep the layout in git, not in a browser tab.</em>
 </p>
 
 ---
@@ -586,8 +594,14 @@ gs://swe-qwen-datasets           <- private GCS, dedicated 3-module layout
 | `promote.yml` | champion/challenger promotion | paired eval · 4-condition statistical gate · W&B decision record · optional dry-run |
 
 <p align="center">
-  <img src="assets/media/gh-actions.png" alt="GitHub Actions runs" width="560"/>
-  <br/><em>Drop `gh-actions.png` into `assets/media/` — the four workflows green in the Actions tab.</em>
+  <img src="assets/media/ci.png" alt="ci.yml run" width="400"/>
+  <img src="assets/media/eval.png" alt="eval.yml run" width="400"/>
+  <br/><em>Left: `ci.yml` — ruff + mypy + the full pytest suite. Right: `eval.yml` — the SWE-bench smoke gate on PRs (baseline read-only for PRs, updated on main).</em>
+</p>
+<p align="center">
+  <img src="assets/media/cd-deploy.png" alt="cd.yml run" width="400"/>
+  <img src="assets/media/promote.png" alt="promote.yml run" width="400"/>
+  <br/><em>Left: `cd.yml` — Terraform plan/apply + Modal deploy, gated to production. Right: `promote.yml` — champion-vs-challenger statistical promotion with the 4-condition gate.</em>
 </p>
 
 ---
@@ -709,8 +723,11 @@ gh workflow run promote.yml -f candidate_variant=baseline_14b                   
 | [docs/experiments.md](docs/experiments.md) | Full loop: dataset → train → eval → compare → promote → serve |
 | [docs/dataset.md](docs/dataset.md) | Pipeline stages, schema, quality gates, reproducibility |
 | [docs/evaluation.md](docs/evaluation.md) | F2P/P2P methodology, statistics, golden-set protocol |
-| [docs/observability/architecture.md](docs/observability/architecture.md) | architecture |
-| [docs/observability/dashboards.md](docs/observability/dashboards.md) | dashboards |
+| [docs/benchmarks.md](docs/benchmarks.md) | **Final benchmark report** — measured F2P/P2P/latency/cost, champion selection |
+| [docs/observability/architecture.md](docs/observability/architecture.md) | System architecture, telemetry flows, dashboards layout |
+| [docs/observability/dashboards.md](docs/observability/dashboards.md) | Dashboards-as-code: `scripts/build_dashboards.py` + `scripts/seed_dashboards.py` |
+| [docs/planning/](docs/planning/) | Phase-by-phase engineering plans (ADR & vision, phases 2–9 design docs) |
+| [docs/IMPLEMENTATION-LOG.md](docs/IMPLEMENTATION-LOG.md) | Chronological record of every stage built, run and evaluated |
 
 ---
 
