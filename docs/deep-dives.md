@@ -92,13 +92,8 @@ Shared: **1 epoch**, `max_seq_length=4096` (longest in corpus), bf16, `paged_ada
 **Why these three variants** - a deliberate one-GPU ablation: `r16/α32 @ lr2e-5` (baseline), `r32/α64` (more trainable parameters), `r16/α32 @ lr5e-5` + dropout (faster adaptation). `scripts/run_3config_comparison.py` trains all three sequentially on the same corpus so the subsequent eval compares *configurations, not data*. Resume mid-run: `training/resume.py` locates the newest adapter; `--resume` continues from the last checkpoint.
 
 <p align="center">
-  <img src="assets/media/modal-volumes-gcs.png" width="560" alt="modal volume list + bucket counts" />
-  <br/><em>Live Modal volumes (6: `serve-model-cache`, `eval-repo-cache`, `eval-test-cache`, `eval-model-cache`, `swe-qwen-data`, `swe-qwen-models`) and the GCS bucket: 437 dataset run dirs, 322 tokenized run dirs.</em>
-</p>
-
-<p align="center">
-  <img src="assets/media/trained-adapters.png" width="560" alt="models/comparisons/expanded-repos adapters + checkpoints" />
-  <br/><em>Real trained artifacts on disk: 3 adapters with `adapter_model.safetensors`, `chat_template.jinja`, tokenizer, `training_args.bin` + checkpoints.</em>
+  <img src="assets/media/training.gif" width="560" alt="Modal volumes + trained adapters (carousel)" />
+  <br/><em>Live Modal volumes (6: `serve-model-cache`, `eval-repo-cache`, `eval-test-cache`, `eval-model-cache`, `swe-qwen-data`, `swe-qwen-models`) + GCS bucket (437 dataset run dirs, 322 tokenized run dirs) → real trained artifacts: 3 adapters with `adapter_model.safetensors`, `chat_template.jinja`, tokenizer, `training_args.bin` + checkpoints.</em>
 </p>
 
 **One-command trio:**
