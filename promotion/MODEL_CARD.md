@@ -56,7 +56,9 @@ from vllm import LLM, SamplingParams
 
 llm = LLM(model="Qwen/Qwen3-14B-AWQ", enable_lora=True)
 params = SamplingParams(temperature=0.2, max_tokens=2048)
-out = llm.generate(["<full prompt: system + issue>"], params, lora_request=...)  # adapter via LoRARequest
+out = llm.generate(
+    ["<full prompt: system + issue>"], params, lora_request=...
+)  # adapter via LoRARequest
 ```
 
 ## Limitations & license
