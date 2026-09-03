@@ -3,21 +3,21 @@
 > A model-agnostic LLMOps platform that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **3 QLoRA variants of Qwen3-14B on Modal A100-80GB GPU(s)**, evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (50-instance CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **4 GitHub Actions workflows**.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&labelColor=000000&logo=python" />
-  <img src="https://img.shields.io/badge/PyTorch-2.11-EE4C2C?style=for-the-badge&labelColor=000000&logo=pytorch" />
-  <img src="https://img.shields.io/badge/QLoRA-Transformers-8B5CF6?style=for-the-badge&labelColor=000000" />
-  <img src="https://img.shields.io/badge/Unsloth-Fast_Training-FF6B6B?style=for-the-badge&labelColor=000000" />
-  <img src="https://img.shields.io/badge/FastAPI-OpenAI_API-009688?style=for-the-badge&labelColor=000000&logo=fastapi" />
-  <img src="https://img.shields.io/badge/Modal-Serverless-007FFF?style=for-the-badge&labelColor=000000" />
-  <img src="https://img.shields.io/badge/vLLM-Serving-5A67D8?style=for-the-badge&labelColor=000000" />
-  <img src="https://img.shields.io/badge/Qwen3-14B-7C3AED?style=for-the-badge&labelColor=000000" />
-  <img src="https://img.shields.io/badge/Terraform-IaC-844EBA?style=for-the-badge&labelColor=000000&logo=terraform" />
-  <img src="https://img.shields.io/badge/Google_Cloud-GCS-4285F4?style=for-the-badge&labelColor=000000&logo=googlecloud" />
-  <img src="https://img.shields.io/badge/Weights_%26_Biases-Experiments-FFBE00?style=for-the-badge&labelColor=000000&logo=weightsandbiases" />
-  <img src="https://img.shields.io/badge/GitHub_Actions-CI%2FCD-2088FF?style=for-the-badge&labelColor=000000&logo=githubactions" />
-  <img src="https://img.shields.io/badge/Hugging_Face-Transformers-FFD21E?style=for-the-badge&labelColor=000000&logo=huggingface" />
-  <img src="https://img.shields.io/badge/Langfuse-LLM_Tracing-BB8FF7?style=for-the-badge&labelColor=000000" />
-  <img src="https://img.shields.io/badge/pytest-Tested-0A9EDC?style=for-the-badge&labelColor=000000&logo=pytest" />
+<a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&labelColor=000000&logo=python"></a>
+<a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&labelColor=000000&logo=pytorch"></a>
+<a href="https://github.com/artidoro/qlora"><img src="https://img.shields.io/badge/QLoRA-8B5CF6?style=for-the-badge&labelColor=000000"></a>
+<a href="https://github.com/unslothai/unsloth"><img src="https://img.shields.io/badge/Unsloth-FF6B6B?style=for-the-badge&labelColor=000000"></a>
+<a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&labelColor=000000&logo=fastapi"></a>
+<a href="https://modal.com/"><img src="https://img.shields.io/badge/Modal-007FFF?style=for-the-badge&labelColor=000000"></a>
+<a href="https://docs.vllm.ai/"><img src="https://img.shields.io/badge/vLLM-5A67D8?style=for-the-badge&labelColor=000000"></a>
+<a href="https://qwen.ai/"><img src="https://img.shields.io/badge/Qwen3-7C3AED?style=for-the-badge&labelColor=000000"></a>
+<a href="https://www.terraform.io/"><img src="https://img.shields.io/badge/Terraform-844EBA?style=for-the-badge&labelColor=000000&logo=terraform"></a>
+<a href="https://cloud.google.com/"><img src="https://img.shields.io/badge/Google_Cloud-4285F4?style=for-the-badge&labelColor=000000&logo=googlecloud"></a>
+<a href="https://wandb.ai/"><img src="https://img.shields.io/badge/Weights_%26_Biases-FFBE00?style=for-the-badge&labelColor=000000&logo=weightsandbiases"></a>
+<a href="https://github.com/features/actions"><img src="https://img.shields.io/badge/GitHub_Actions-2088FF?style=for-the-badge&labelColor=000000&logo=githubactions"></a>
+<a href="https://huggingface.co/"><img src="https://img.shields.io/badge/Hugging_Face-FFD21E?style=for-the-badge&labelColor=000000&logo=huggingface"></a>
+<a href="https://langfuse.com/"><img src="https://img.shields.io/badge/Langfuse-BB8FF7?style=for-the-badge&labelColor=000000"></a>
+<a href="https://docs.pytest.org/"><img src="https://img.shields.io/badge/pytest-0A9EDC?style=for-the-badge&labelColor=000000&logo=pytest"></a>
 </p>
 
 <p align="center">
@@ -73,6 +73,7 @@ flowchart TB
     end
     OBS["OBSERVABILITY · observability/<br/>Weights & Biases · Langfuse (10% trace) · GCP Logging"]
     DATA --> TRAIN
+    TOK --> TRAIN
     TRAIN --> SAMPLE
     TRAIN --> API
     EVAL --> PROMO1["Promotion gate<br/>F2P ≥ 15% · CI lower bound > 0<br/>champion vs challenger"]
@@ -117,7 +118,7 @@ Every stage is a first-class, independently runnable step with typed schemas (`p
 
 | What | Why a reviewer should care |
 | ---- | -------------------------- |
-| **7.0× with receipts** | The champion scores **17.20% F2P vs the base model's 2.46%** on the same 100-instance golden set - and the claim is statistically defended: 95% Wilson CI 11.1-25.8%, McNemar p < 1e-6, paired-bootstrap CI lower bound > 0. Promotion requires the confidence interval to clear the bar, not the point estimate. |
+| **7.0× with receipts** | The champion scores **17.20% F2P vs the base model's 2.46%** on the same 100-instance golden set - and the claim is statistically defended: 95% Wilson CI 11.1-25.8%, McNemar p ≈ 6e-05, paired-bootstrap CI lower bound > 0. Promotion requires the confidence interval to clear the bar, not the point estimate. |
 | **$0.00 idle + per-request adapters** | One scale-to-zero server hosts all 3 LoRA variants: the first request per model pulls its 1.4 GB adapter from W&B into cache with zero engine restarts. Bursty GPU workloads cost nothing between bursts. |
 | **Execution over proxies** | A patch is only "correct" if it flips the real failing tests inside the real repo: official SWE-bench Docker images, FAIL_TO_PASS + PASS_TO_PASS, 3 patch-apply strategies with the winning `method_used` recorded, flaky retries capped at 2. No unit-test proxies, no leaderboard games. |
 | **You can't self-certify** | `eval.yml` runs evaluation on PRs with read-only repo access and only `main` may write baselines; `promote.yml` re-runs the paired comparison before flipping the champion. A green personal scoreboard is impossible by construction. |
@@ -147,7 +148,7 @@ Every stage is a first-class, independently runnable step with typed schemas (`p
 | | Lint / type-check | `ruff check` clean · `mypy` strict across the typed core (data_engineering, evaluation, scripts) |
 | | Infrastructure as code | 100% Terraform (storage + IAM + project roots) |
 
-> **Final results** On the **100-instance golden set**, the promoted **`higher_rank_14b`** champion scores **17.20% F2P (95% Wilson CI 11.1-25.8%)** with **90.10% P2P** at **8.92 s/instance** - up from the base Qwen3-14B's **2.46% F2P / 28.54% P2P** (**7.0× F2P gain**, +61.6pt P2P, McNemar p < 1e-6, paired-bootstrap 95% CI lower bound > 0). Full table verbatim in [assets/results.txt](assets/results.txt); methodology in [docs/evaluation.md](docs/evaluation.md). The champion adapter ships on the Hugging Face Hub: **[`ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b`](https://huggingface.co/ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b)**.
+> **Final results** On the **100-instance golden set**, the promoted **`higher_rank_14b`** champion scores **17.20% F2P (95% Wilson CI 11.1-25.8%)** with **90.10% P2P** at **8.92 s/instance** - up from the base Qwen3-14B's **2.46% F2P / 28.54% P2P** (**7.0× F2P gain**, +61.6pt P2P, McNemar p ≈ 6e-05, paired-bootstrap 95% CI lower bound > 0). Full table verbatim in [assets/results.txt](assets/results.txt); methodology in [docs/evaluation.md](docs/evaluation.md). The champion adapter ships on the Hugging Face Hub: **[`ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b`](https://huggingface.co/ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b)**.
 
 ## Demos (the system, run)
 
