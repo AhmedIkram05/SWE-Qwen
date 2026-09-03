@@ -1,6 +1,6 @@
 # SWE-Qwen
 
-> A production-grade, model-agnostic LLMOps platform that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **3 QLoRA variants of Qwen3-14B on Modal A100-80GB GPU(s)**, evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (50-instance CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **4 GitHub Actions workflows**.
+> A model-agnostic LLMOps platform that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **3 QLoRA variants of Qwen3-14B on Modal A100-80GB GPU(s)**, evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (50-instance CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **4 GitHub Actions workflows**.
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&labelColor=000000&logo=python" />
@@ -313,7 +313,7 @@ ruff check . && mypy data_engineering/ evaluation/ scripts/
 pytest -m "not requires_modal and not requires_gcp and not requires_wandb and not requires_credentials"
 ```
 
-### Production deployment
+### Deployment
 
 ```bash
 terraform -chdir=infra/terraform apply   # GCS buckets + WIF pool
