@@ -40,7 +40,7 @@ Models (QLoRA 4-bit NF4, 1 epoch, ~4,214 s on Modal A100-80GB each):
 | **`higher_rank_14b`** | **17.20% (11.1–25.8%)** | **90.10%** | **8.92 s** | **0.01%** | **✅ champion** |
 | `higher_lr_14b` | 14.80% (9.1–23.1%) | 87.60% | 9.12 s | 0.02% | rejected: p2p<90% |
 
-**Champion vs base:** F2P **7.0×** (2.46% → 17.20%), P2P **+61.6pt** (28.54% → 90.10%); McNemar p < 1e-6, paired-bootstrap 95% CI lower bound > 0 on the paired 100 instances.
+**Champion vs base:** F2P **7.0×** (2.46% → 17.20%), P2P **+61.6pt** (28.54% → 90.10%); McNemar p ≈ 6e-05, paired-bootstrap 95% CI lower bound > 0 on the paired 100 instances.
 
 **Every number above is the raw measured rate** — the promotion gate confirmed the champion *after* the fact: `higher_rank_14b` is the only variant clearing **both** floors (F2P ≥ 15% **and** P2P ≥ 90%) plus the paired-significance and no-P2P-regression checks.
 

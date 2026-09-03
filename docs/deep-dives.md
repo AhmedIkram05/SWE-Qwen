@@ -179,7 +179,7 @@ Promotion is a **decision with a paper trail**, never a merge. `promotion/` spli
 **The four conditions, checked on the same paired sample as the compare:**
 
 1. **Absolute floors** - challenger F2P ≥ 15% *and* P2P ≥ 90% (`min_f2p_threshold`, `min_p2p_threshold`): a model below the floor is not deployable even if it "beat" a weaker champion.
-2. **The gain is real, not noise** - paired-bootstrap 95% CI lower bound on the F2P delta must be *strictly > 0* (the released `higher_rank_14b` vs base run reports McNemar `p < 1e-6`).
+2. **The gain is real, not noise** - paired-bootstrap 95% CI lower bound on the F2P delta must be *strictly > 0* (the released `higher_rank_14b` vs base run reports McNemar `p ≈ 6e-05`).
 3. **No regression** - P2P may not drop more than 2 points across the paired set; an offensive win that breaks other tests is not a win.
 4. **Silent promotions are rejected** - if a challenger can't clear its own confidence interval, `gate.py` keeps the incumbent and writes the rejection for the audit trail.
 
