@@ -43,7 +43,7 @@ Per-model aggregation is `F2PMetrics`: counts + rates for F2P and P2P, `avg_late
 | Qwen3-14B | `higher_rank_14b` | **17.20% (11.1–25.8%)** | **90.10%** | **8.92s** | **0.01%** | **champion** |
 | Qwen3-14B | `higher_lr_14b` | 14.80% (9.1–23.1%) | 87.60% | 9.12s | 0.02% | rejected: p2p<90% |
 
-**Reading the numbers:** the released run is a 100-instance sample of the 2,313-example golden set — a real comparison, not a smoke test. `higher_rank_14b` clears every gate (F2P 17.20% ≥ 15%, P2P 90.10% ≥ 90%, significant gain over the base model) and is marked **champion**; the other three variants are rejected for failing the P2P floor. `McNemar p < 1e-6` and paired-bootstrap 95% CI lower bound > 0 confirm the F2P gain over the base Qwen3-14B (2.46% → 17.20%, 7.0×) is not chance, and `P2P Δ +61.6pt` (28.54% → 90.10%) quantifies the regression-safety win.
+**Reading the numbers:** the released run is a 100-instance sample of the 2,313-example golden set — a real comparison, not a smoke test. `higher_rank_14b` clears every gate (F2P 17.20% ≥ 15%, P2P 90.10% ≥ 90%, significant gain over the base model) and is marked **champion**; the other three variants are rejected for failing the P2P floor. `McNemar p ≈ 6e-05` and paired-bootstrap 95% CI lower bound > 0 confirm the F2P gain over the base Qwen3-14B (2.46% → 17.20%, 7.0×) is not chance, and `P2P Δ +61.6pt` (28.54% → 90.10%) quantifies the regression-safety win.
 
 ---
 

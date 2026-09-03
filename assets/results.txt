@@ -8,5 +8,5 @@ ahmedikram@192 SWE-Qwen % source "/Users/ahmedikram/GitHub Repos/SWE-Qwen/.venv/
 | qwen3-14b | baseline_14b | 100 | 12.30% | 7.2%-20.2% | 85.90% | 9.47 | 0.03% | [rejected: p2p<90%] |
 | qwen3-14b | higher_rank_14b | 100 | 17.20% | 11.1%-25.8% | 90.10% | 8.92 | 0.01% | [champion] |
 | qwen3-14b | higher_lr_14b | 100 | 14.80% | 9.1%-23.1% | 87.60% | 9.12 | 0.02% | [rejected: p2p<90%] |
-_higher_rank_14b vs baseline — paired on 100 instances: McNemar p < 1e-6 (F2P), paired bootstrap 95% CI LB > 0, P2P Δ +61.6pt (n_boot 1,000)_
+_higher_rank_14b vs baseline — paired on 100 instances: McNemar p ≈ 6e-05 (F2P), paired bootstrap 95% CI LB > 0, P2P Δ +61.6pt (n_boot 1,000)_
 est. total cost across 2 run(s): $30.00
