@@ -13,6 +13,7 @@
 <a href="https://qwen.ai/"><img src="https://img.shields.io/badge/Qwen3-7C3AED?style=for-the-badge&labelColor=000000"></a>
 <a href="https://www.terraform.io/"><img src="https://img.shields.io/badge/Terraform-844EBA?style=for-the-badge&labelColor=000000&logo=terraform"></a>
 <a href="https://cloud.google.com/"><img src="https://img.shields.io/badge/Google_Cloud-4285F4?style=for-the-badge&labelColor=000000&logo=googlecloud"></a>
+<a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&labelColor=000000&logo=docker"></a>
 <a href="https://wandb.ai/"><img src="https://img.shields.io/badge/Weights_%26_Biases-FFBE00?style=for-the-badge&labelColor=000000&logo=weightsandbiases"></a>
 <a href="https://github.com/features/actions"><img src="https://img.shields.io/badge/GitHub_Actions-2088FF?style=for-the-badge&labelColor=000000&logo=githubactions"></a>
 <a href="https://huggingface.co/"><img src="https://img.shields.io/badge/Hugging_Face-FFD21E?style=for-the-badge&labelColor=000000&logo=huggingface"></a>
