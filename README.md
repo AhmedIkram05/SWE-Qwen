@@ -4,6 +4,7 @@
 
 <p align="center">
 <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&labelColor=000000&logo=python"></a>
+<a href="https://docs.python.org/3/library/asyncio.html"><img src="https://img.shields.io/badge/asyncio-3776AB?style=for-the-badge&labelColor=000000&logo=python"></a>
 <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&labelColor=000000&logo=pytorch"></a>
 <a href="https://github.com/artidoro/qlora"><img src="https://img.shields.io/badge/QLoRA-8B5CF6?style=for-the-badge&labelColor=000000"></a>
 <a href="https://github.com/unslothai/unsloth"><img src="https://img.shields.io/badge/Unsloth-FF6B6B?style=for-the-badge&labelColor=000000"></a>
