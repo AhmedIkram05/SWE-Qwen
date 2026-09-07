@@ -9,6 +9,7 @@
 <a href="https://github.com/artidoro/qlora"><img src="https://img.shields.io/badge/QLoRA-8B5CF6?style=for-the-badge&labelColor=000000"></a>
 <a href="https://github.com/unslothai/unsloth"><img src="https://img.shields.io/badge/Unsloth-FF6B6B?style=for-the-badge&labelColor=000000"></a>
 <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&labelColor=000000&logo=fastapi"></a>
+<a href="https://jinja.palletsprojects.com/"><img src="https://img.shields.io/badge/Jinja2-B41717?style=for-the-badge&labelColor=000000"></a>
 <a href="https://modal.com/"><img src="https://img.shields.io/badge/Modal-007FFF?style=for-the-badge&labelColor=000000"></a>
 <a href="https://docs.vllm.ai/"><img src="https://img.shields.io/badge/vLLM-5A67D8?style=for-the-badge&labelColor=000000"></a>
 <a href="https://qwen.ai/"><img src="https://img.shields.io/badge/Qwen3-7C3AED?style=for-the-badge&labelColor=000000"></a>
@@ -177,6 +178,11 @@ Everything below was captured against **live systems** - the real GCS bucket, th
   <br/><em>Live server: `/health` → `StubEngine`, real `chatcmpl-998dfe608954` completion, 401 without bearer token, `model_not_found` envelope. The first request per model pulled the 1.4 GB LoRA adapter from W&B into cache.</em>
 </p>
 
+<p align="center">
+  <img src="assets/media/inference-demo.png" width="680" alt="SSE streaming demo · data: chunks → [DONE]" />
+  <br/><em>Same server, streaming path (port 8753): <code>stream: true</code> chunks arrive as SSE <code>data:</code> events and terminate with <code>[DONE]</code>, one request from Python-function prompt to stop.</em>
+</p>
+
 ### Data pipeline run
 
 <p align="center">
@@ -192,9 +198,34 @@ Everything below was captured against **live systems** - the real GCS bucket, th
 ### Every subsystem is one command
 
 <p align="center">
-  <img src="assets/media/cli-eval.png" width="440" alt="python -m evaluation.cli --help" />
-  <img src="assets/media/cli-train.png" width="440" alt="python -m training.qlora_train --help" />
+  <img src="assets/media/cli-suite.gif" width="560" alt="cli-suite · evaluation.cli --help → training.qlora_train --help" />
   <br/><em>Evaluation and training each expose a single Typer CLI - the pipeline, the training and the eval all run off the same repo, same configs.</em>
+</p>
+
+### CI/CD gates (4 workflows)
+
+<p align="center">
+  <img src="assets/media/cicd-tour.gif" width="680" alt="CI/CD tour · ci.yml → cd.yml → eval.yml → promote.yml" />
+  <br/><em>CI runs tests on every PR, CD bakes + pushes the trained artifact, <code>eval.yml</code> gates every change against the golden set with read-only access, and <code>promote.yml</code> re-runs the paired champion/challenger comparison before flipping the registry - you can't self-certify.</em>
+</p>
+
+### Infra proof (Modal + GCS)
+
+<p align="center">
+  <img src="assets/media/infra-proof.gif" width="680" alt="Infra proof · Modal server → volumes → GCS artifacts → trained adapters" />
+  <br/><em>The live Modal vLLM server, the mounted GCS-backed volumes, the W&B artifact round-trip, and the 3 trained LoRA adapters ready to ship.</em>
+</p>
+
+### Quality & observability receipts
+
+<p align="center">
+  <img src="assets/media/pytest-summary.png" width="640" alt="pytest summary · 1,456 passed" />
+  <br/><em>Offline test suite: 1,456 passed · 1 skipped · 5 deselected in ~3 min.</em>
+</p>
+
+<p align="center">
+  <img src="assets/media/langfuse.png" width="640" alt="Langfuse trace dashboard" />
+  <br/><em>Langfuse: 10% trace sampling of every train / eval / serve event.</em>
 </p>
 
 ## Anatomy of a Real Run (the system was up)
