@@ -178,6 +178,11 @@ Everything below was captured against **live systems** - the real GCS bucket, th
   <br/><em>Live server: `/health` → `StubEngine`, real `chatcmpl-998dfe608954` completion, 401 without bearer token, `model_not_found` envelope. The first request per model pulled the 1.4 GB LoRA adapter from W&B into cache.</em>
 </p>
 
+<p align="center">
+  <img src="assets/media/inference-demo.png" width="680" alt="SSE streaming demo · data: chunks → [DONE]" />
+  <br/><em>Same server, streaming path (port 8753): <code>stream: true</code> chunks arrive as SSE <code>data:</code> events and terminate with <code>[DONE]</code>, one request from Python-function prompt to stop.</em>
+</p>
+
 ### Data pipeline run
 
 <p align="center">
