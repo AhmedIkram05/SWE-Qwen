@@ -10,10 +10,10 @@ truth.
 Schema (spec §4.3, exact field order — stable, not alphabetized):
 
     {
-      "variant": "higher_lr_14b",
-      "model_ref": "qwen3-14b:higher_lr_14b",
-      "f2p_rate": 0.169,
-      "p2p_rate": 0.912,
+      "variant": "higher_rank_14b",
+      "model_ref": "qwen3-14b:higher_rank_14b",
+      "f2p_rate": 0.172,
+      "p2p_rate": 0.901,
       "dataset_run_id": "expanded-repos",
       "tier": "full",
       "seed": 42,
@@ -150,7 +150,7 @@ def sync_alias(champion_key: str, config: EvalConfig) -> str | None:
     second source of truth (spec §4.3, decision 5).
 
     Args:
-        champion_key: ``"model:variant"`` key, e.g. ``"qwen3-14b:higher_lr_14b"``.
+        champion_key: ``"model:variant"`` key, e.g. ``"qwen3-14b:higher_rank_14b"``.
         config: Eval config (wandb entity/project + artifact pattern).
 
     Returns:

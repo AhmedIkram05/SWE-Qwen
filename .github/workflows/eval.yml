@@ -120,10 +120,14 @@ jobs:
 
       # PR:  read-only gate. Main push:  --update-baseline writes it (CD-owned,
       # write-once-per-dataset semantics). develop only arrives via PR trigger.
-      # Debug mode: while GitHub repo/org var RUN_MODAL_EVAL=="false", PRs run a
-      # free `modal token info` (validates the Modal secret pair) instead of
-      # spending GPU. Delete the variable -> real gate resumes. Main is always
-      # real: the CD-owned baseline bootstraps there.
+      # RUN_MODAL_EVAL is the introspected org/repo variable: when set to
+      # "false", PRs run a free `modal token info` (validates the Modal secret
+      # pair) instead of spending GPU. That is the intended fork/credentialless
+      # fallback — forks and external contributors have no Modal org secrets,
+      # so the GPU gate degrades to a credential sanity check rather than
+      # blocking them. It is NOT an eval bypass: main is always real (the
+      # CD-owned baseline bootstraps there), and removing the variable
+      # re-arms GPU gating repo-wide.
       - name: Run smoke eval gate
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
@@ -138,7 +142,7 @@ jobs:
             echo "::notice::RUN_MODAL_EVAL=false — validating Modal creds instead of running GPU eval"
             uv run modal token info
           else
-            uv run eval run --mode smoke --models qwen3-14b:higher_lr_14b $FLAGS
+            uv run eval run --mode smoke --models qwen3-14b:higher_rank_14b $FLAGS
           fi
 
       # CD-owned baseline: write it back to the ci/ path the download step reads.

@@ -1,6 +1,6 @@
 # SWE-Qwen
 
-> A model-agnostic LLMOps platform that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **3 QLoRA variants of Qwen3-14B on Modal A100-80GB GPU(s)**, evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (50-instance CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **4 GitHub Actions workflows**.
+> A registry-driven and config-swappable LLMOps platform (Qwen3-14B run end-to-end; 30B reserved) that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **3 QLoRA variants of Qwen3-14B on Modal A100-80GB GPU(s)**, evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (50-instance CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **4 GitHub Actions workflows**.
 
 <p align="center">
 <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&labelColor=000000&logo=python"></a>
@@ -147,7 +147,7 @@ Every stage is a first-class, independently runnable step with typed schemas (`p
 | **Serving** | OpenAI-compatible endpoint | `POST /v1/chat/completions` |
 | | Adapter switching | Per-request LoRA, zero engine restarts |
 | | Idle cost | $0.00 (scale-to-zero) |
-| **Quality** | Test suite (offline) | **1,456 passed · 1 skipped · 5 deselected** in ~3 min |
+| **Quality** | Test suite (offline) | **1,456 tests passed (1,462 collected: 1 skipped, 5 deselected)** in ~3 min |
 | | Lint / type-check | `ruff check` clean · `mypy` strict across the typed core (data_engineering, evaluation, scripts) |
 | | Infrastructure as code | 100% Terraform (storage + IAM + project roots) |
 
@@ -219,8 +219,8 @@ Everything below was captured against **live systems** - the real GCS bucket, th
 ### Quality & observability receipts
 
 <p align="center">
-  <img src="assets/media/pytest-summary.png" width="640" alt="pytest summary · 1,456 passed" />
-  <br/><em>Offline test suite: 1,456 passed · 1 skipped · 5 deselected in ~3 min.</em>
+  <img src="assets/media/pytest-summary.png" width="640" alt="pytest summary · 1,456 tests passed (1,462 collected)" />
+  <br/><em>Offline test suite: 1,456 tests passed (1,462 collected: 1 skipped, 5 deselected) in ~3 min.</em>
 </p>
 
 <p align="center">

@@ -254,14 +254,14 @@ Every layer of the platform phones home, and the dashboards that visualize it ar
 
 | Layer | Tooling | Coverage of |
 | ----- | ------- | ----------- |
-| Unit + integration | pytest (**1,456 passed**, 1 skipped, 5 deselected, ~3 min) | every package: data_engineering, evaluation, inference, training, promotion, observability, scripts |
+| Unit + integration | pytest (**1,456 tests passed** (1,462 collected: 1 skipped, 5 deselected), ~3 min) | every package: data_engineering, evaluation, inference, training, promotion, observability, scripts |
 | Lint / format | ruff (line-length 100, strict rule set) | `All checks passed` |
 | Type checking | mypy (strict-ish) | 42 source files, `Success: no issues found` |
 | Coverage | pytest-cov (`--cov`, branch=true) + Codecov | 8 packages |
 | Model regression | `eval.yml` smoke gate (20-instance F2P vs baseline, `_SMOKE_TOLERANCE=0.05`, PRs read / main writes) | catches real model-quality regressions per PR |
 
 <p align="center">
-  <img src="assets/media/pytest-summary.png" width="480" alt="pytest summary - 1,456 passed" />
+  <img src="assets/media/pytest-summary.png" width="480" alt="pytest summary - 1,456 tests passed (1,462 collected)" />
 </p>
 
 > The full offline suite runs green in ~3 minutes (`pytest`, 5 deselected = Modal/GCP/W&B integration tests).

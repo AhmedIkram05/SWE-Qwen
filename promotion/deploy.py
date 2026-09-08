@@ -3,7 +3,7 @@
 The champion variant is pinned **before** deploy: ``SERVING_DEFAULT_VARIANT``
 is the env var ``inference.config.ServeConfig`` resolves ``default_variant``
 from at app start (pydantic-settings ``env_prefix="SERVING_"`` auto-override,
-fallback hardcoded ``higher_lr_14b``).  A variant absent from
+fallback hardcoded ``higher_rank_14b``).  A variant absent from
 ``ServeConfig.variants`` aborts with a ``config-gap`` reason before anything
 executes (spec decision 6: v1 promotes only among trained variants).  The
 probe is ``POST /v1/chat/completions`` with a bearer token —

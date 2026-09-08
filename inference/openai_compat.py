@@ -8,8 +8,9 @@ clients and map to engine knobs / shared prompt building server-side.
 
 Model resolution follows the Phase 6 decision: a request ``model`` accepts
 ``qwen3-14b``, ``qwen3-14b:{variant}``, bare ``{variant}``, or the W&B
-artifact name ``model-qwen3-14b-{variant}``; no variant means the base model
-without a LoRA adapter.
+artifact name ``model-qwen3-14b-{variant}``; a bare model key with no
+explicit variant suffix resolves to the configured ``default_variant``
+(Phase 9: the champion, pinned via ``SERVING_DEFAULT_VARIANT``).
 """
 
 from __future__ import annotations
@@ -124,7 +125,9 @@ def resolve_engine_model(
 
     Accepted forms (see module docstring): the base model key, a variant
     suffix after ``:``, a bare variant, or the ``model-{base}-{variant}`` W&B
-    artifact name.  An unknown model (or an unknown variant) raises
+    artifact name.  A bare model key with no variant suffix resolves to the
+    configured ``default_variant`` (the champion) instead of the raw base.
+    An unknown model (or an unknown variant) raises
     ``ModelNotFoundError``; a known variant whose adapter cannot be resolved
     falls back to the base model with a warning.
 
@@ -138,7 +141,9 @@ def resolve_engine_model(
     base = config.base_model
     variant: str | None = None
     if request_model == base:
-        pass
+        # No explicit variant: the API serves the champion by default
+        # (default_variant is re-validated against config.variants below).
+        variant = config.default_variant
     elif request_model.startswith(f"{base}:"):
         variant = request_model[len(base) + 1 :]
     elif request_model.startswith(f"model-{base}-"):
