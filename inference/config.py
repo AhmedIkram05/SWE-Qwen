@@ -27,8 +27,9 @@ class ServeConfig(BaseSettings):
     quantization: str = "awq"  # "fp8" | "awq"
     variants: tuple[str, ...] = ("baseline_14b", "higher_rank_14b", "higher_lr_14b")
     lora_artifact_pattern: str = "model-qwen3-14b-{variant}"
-    # champion per Phase 5 golden eval (F2P 16.9% / P2P 91.2%)
-    default_variant: str = "higher_lr_14b"
+    # champion per final results (assets/results.txt + promotion/MODEL_CARD.md):
+    # F2P 17.20% / P2P 90.10% on the 100-instance golden set
+    default_variant: str = "higher_rank_14b"
 
     # Engine knobs (6.1 sweep parameters)
     gpu_memory_utilization: float = 0.85

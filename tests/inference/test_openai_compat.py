@@ -36,9 +36,13 @@ def _patch_adapter(monkeypatch: pytest.MonkeyPatch, path: str | None = _FAKE_ADA
 
 
 class TestResolveEngineModel:
-    def test_base_model(self, monkeypatch):
+    def test_base_model_resolves_to_default_variant(self, monkeypatch):
         _patch_adapter(monkeypatch)
-        assert resolve_engine_model("qwen3-14b", ServeConfig()) == (_BASE_HF_ID, None, None)
+        assert resolve_engine_model("qwen3-14b", ServeConfig()) == (
+            _BASE_HF_ID,
+            "qwen3-14b-higher_rank_14b",  # bare model key -> default_variant (champion)
+            _FAKE_ADAPTER,
+        )
 
     def test_variant_suffix(self, monkeypatch):
         _patch_adapter(monkeypatch)

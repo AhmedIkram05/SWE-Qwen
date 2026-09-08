@@ -12,7 +12,7 @@ class TestServeConfigDefaults:
         assert cfg.serving_hf_id == "Qwen/Qwen3-14B-AWQ"
         assert cfg.quantization == "awq"
         assert cfg.variants == ("baseline_14b", "higher_rank_14b", "higher_lr_14b")
-        assert cfg.default_variant == "higher_lr_14b"
+        assert cfg.default_variant == "higher_rank_14b"
         assert cfg.max_model_len == 4096
         assert cfg.gpu_memory_utilization == 0.85
         assert cfg.max_num_seqs == 16

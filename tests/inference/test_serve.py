@@ -64,7 +64,7 @@ class TestChatCompletions:
         payload.update(overrides)
         return payload
 
-    def test_non_stream_base_model(self, client):
+    def test_non_stream_bare_model_serves_default_variant(self, client):
         response = client.post(
             "/v1/chat/completions",
             json=self._payload(),
@@ -78,7 +78,8 @@ class TestChatCompletions:
         assert body["model"] == "qwen3-14b"
         choice = body["choices"][0]
         assert choice["message"]["role"] == "assistant"
-        assert choice["message"]["content"].startswith("stub[base]:")
+        # Bare model key resolves to default_variant (champion), not raw base.
+        assert choice["message"]["content"].startswith("stub[qwen3-14b-higher_rank_14b]:")
         assert choice["finish_reason"] == "stop"
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             assert isinstance(body["usage"][key], int)
