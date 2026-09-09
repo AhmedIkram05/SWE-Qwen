@@ -12,6 +12,7 @@ Usage::
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import time
@@ -24,9 +25,25 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_MODEL_BASE = "qwen3-14b"
+
+def _default_model_key() -> str:
+    """Default model key from the registry; incumbent literal only when absent."""
+    try:
+        from registry.loader import default_model_key
+
+        return default_model_key()
+    except Exception:
+        # ponytail: unreadable registry (incl. pydantic ValidationError on
+        # malformed YAML) → incumbent literal; this runs at import time.
+        return "qwen3-14b"
+
+
+_DEFAULT_MODEL = _default_model_key()
+_MODEL_BASE = _DEFAULT_MODEL
 # Rank-32 LoRA adapter — proves max_lora_rank=64 serving config.
-_MODEL_LORA = "qwen3-14b:higher_rank_14b"
+# ponytail: the registry has no default-variant concept yet (Phase 10 Step 7);
+# keep the incumbent adapter literal until variants are registry data too.
+_MODEL_LORA = f"{_DEFAULT_MODEL}:higher_rank_14b"
 _PROMPT = "Write a one-line Python function."
 
 
@@ -71,10 +88,10 @@ def _non_stream(client: Any, model: str) -> bool:
         return ok
 
 
-def _stream(client: Any) -> bool:
+def _stream(client: Any, model: str | None = None) -> bool:
     try:
         stream = client.chat.completions.create(
-            model=_MODEL_BASE,
+            model=model or _MODEL_BASE,
             messages=[{"role": "user", "content": _PROMPT}],
             max_tokens=64,
             stream=True,
@@ -97,7 +114,13 @@ def _stream(client: Any) -> bool:
         return ok
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Preflight a running serving endpoint.")
+    parser.add_argument("--model", default=_MODEL_BASE, help="Base model key (registry default).")
+    parser.add_argument(
+        "--model-lora", default=_MODEL_LORA, help="LoRA adapter, 'model:variant' form."
+    )
+    args = parser.parse_args(argv)
     url, token = _env()
     import httpx
     import openai
@@ -119,15 +142,17 @@ def main() -> int:
         return 1
 
     # 2. Non-stream chat, base model (no LoRA).
-    if not _check(f"2. non-stream chat, model={_MODEL_BASE}", _non_stream(client, _MODEL_BASE)):
+    if not _check(f"2. non-stream chat, model={args.model}", _non_stream(client, args.model)):
         return 1
 
     # 3. Non-stream chat, rank-32 LoRA adapter (adapter resolves server-side).
-    if not _check(f"3. non-stream chat, model={_MODEL_LORA}", _non_stream(client, _MODEL_LORA)):
+    if not _check(
+        f"3. non-stream chat, model={args.model_lora}", _non_stream(client, args.model_lora)
+    ):
         return 1
 
     # 4. Streaming chat: >=1 content delta, final finish_reason, [DONE] termination.
-    if not _check(f"4. stream chat, model={_MODEL_BASE}", _stream(client)):
+    if not _check(f"4. stream chat, model={args.model}", _stream(client, args.model)):
         return 1
 
     print(f"preflight passed in {time.perf_counter() - t0:.1f}s")

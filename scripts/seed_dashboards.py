@@ -26,10 +26,25 @@ import math
 import random
 import sys
 
+import yaml
+
 from observability.metrics import METRIC_REGISTRY
 
+
+def _default_model_key() -> str:
+    """Default model key from the registry; incumbent literal only when absent."""
+    try:
+        from registry.loader import default_model_key
+
+        return default_model_key()
+    except (KeyError, OSError, yaml.YAMLError):
+        return "qwen3-14b"
+
+
 _RNG_SEED = 42  # deterministic seed run: same curves on every invocation.
-_SEGMENT = "qwen3-14b/baseline_14b/template_v1"  # eval/{model}/{variant}/{template}
+_DEFAULT_MODEL = _default_model_key()
+_DEFAULT_VARIANT = "baseline_14b"  # ponytail: seeded dashboards predate registry variants
+_SEGMENT = f"{_DEFAULT_MODEL}/{_DEFAULT_VARIANT}/template_v1"  # eval/{model}/{variant}/{template}
 _EVAL_OFFSET = 7  # eval checkpoints fire at step % 15 == this
 _DEPLOY_FAIL_STEP = 30  # one deploy failure per 45-step cycle (red dot)
 # promotion gate thresholds, mirroring promotion.rules (spec §4.4)
@@ -37,20 +52,27 @@ _PROMOTE_MIN_F2P_GAIN = 0.05
 _PROMOTE_MAX_P2P_REGRESSION = -0.02
 
 
-def expected_keys() -> set[str]:
+def expected_keys(segment: str | None = None) -> set[str]:
     """Every concrete key METRIC_REGISTRY allows, incl. resolved eval segments."""
     expected: set[str] = set()
+    seg = segment or _SEGMENT
     for domain, metrics in METRIC_REGISTRY.items():
         for metric in metrics:
             if metric.startswith("{key}/"):  # eval hierarchical pattern
                 suffix = metric.rsplit("/", 1)[-1]
-                expected.add(f"eval/{_SEGMENT}/{suffix}")
+                expected.add(f"eval/{seg}/{suffix}")
             else:
                 expected.add(f"{domain}/{metric}")
     return expected
 
 
-def build_step(step: int, total: int, rng: random.Random) -> dict[str, float | int | str]:
+def build_step(
+    step: int,
+    total: int,
+    rng: random.Random,
+    *,
+    segment: str | None = None,
+) -> dict[str, float | int | str]:
     """One synthetic step: continuous telemetry plus cadence-driven events.
 
     Continuous keys (serve/*, train/*, cost/*) are logged every step; data/*,
@@ -59,6 +81,7 @@ def build_step(step: int, total: int, rng: random.Random) -> dict[str, float | i
     """
     progress = step / max(total - 1, 1)
     final = step == total - 1
+    seg = segment or _SEGMENT
 
     ttfb_p50 = min(max(300 + 120 * math.sin(step / 8) + rng.uniform(-30, 30), 150), 450)
     latency_p50 = ttfb_p50 + rng.uniform(80, 200)
@@ -142,8 +165,8 @@ def build_step(step: int, total: int, rng: random.Random) -> dict[str, float | i
                 "eval/num_examples": num_examples,
                 "eval/total_cost_usd": round(total_cost_usd, 2),
                 "eval/cost_per_fix": round(total_cost_usd / max(f2p_rate * num_examples, 1), 3),
-                f"eval/{_SEGMENT}/latency_p50": round(seg_p50, 1),
-                f"eval/{_SEGMENT}/latency_p95": round(seg_p50 * rng.uniform(1.4, 1.8), 1),
+                f"eval/{seg}/latency_p50": round(seg_p50, 1),
+                f"eval/{seg}/latency_p95": round(seg_p50 * rng.uniform(1.4, 1.8), 1),
             }
         )
 
@@ -167,7 +190,7 @@ def build_step(step: int, total: int, rng: random.Random) -> dict[str, float | i
     return metrics
 
 
-def seed(project: str, entity: str | None, steps: int) -> int:
+def seed(project: str, entity: str | None, steps: int, *, segment: str | None = None) -> int:
     """Log one synthetic run covering the whole registry. Returns exit code."""
     try:
         import wandb
@@ -197,13 +220,13 @@ def seed(project: str, entity: str | None, steps: int) -> int:
     emitted: set[str] = set()
     try:
         for step in range(steps):
-            metrics = build_step(step, steps, rng)
+            metrics = build_step(step, steps, rng, segment=segment)
             emitted.update(metrics)
             run.log(metrics)
     finally:
         run.finish()
 
-    missing = expected_keys() - emitted
+    missing = expected_keys(segment) - emitted
     if missing:
         print(
             f"WARNING: seed run did not emit {len(missing)} registered keys: {sorted(missing)}",
@@ -223,8 +246,21 @@ def main() -> int:
     parser.add_argument("--project", default="swe-qwen", help="W&B project name")
     parser.add_argument("--entity", help="W&B entity (username or team; defaults to your account)")
     parser.add_argument("--steps", type=int, default=60, help="Synthetic steps")
+    parser.add_argument(
+        "--model", default=_DEFAULT_MODEL, help="Model key of the eval segment (registry default)"
+    )
+    parser.add_argument(
+        "--variant",
+        default=_DEFAULT_VARIANT,
+        help="Variant of the eval segment (default: baseline)",  # noqa: E501
+    )
     args = parser.parse_args()
-    return seed(args.project, args.entity, args.steps)
+    return seed(
+        args.project,
+        args.entity,
+        args.steps,
+        segment=f"{args.model}/{args.variant}/template_v1",
+    )
 
 
 if __name__ == "__main__":

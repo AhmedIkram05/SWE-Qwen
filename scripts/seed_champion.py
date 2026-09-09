@@ -25,15 +25,24 @@ DEFAULT_OUTPUT = Path("data/eval_results/champion.json")
 PROD_BUCKET_PATH = "gs://swe-qwen-datasets/ci/champion.json"
 
 
-def build_record(promoted_at: str) -> ChampionRecord:
+def build_record(
+    promoted_at: str,
+    model_ref: str | None = None,
+    variant: str | None = None,
+) -> ChampionRecord:
     """The 2026-08-06 Champion (spec §4.7): seeded, no previous.
+
+    Defaults reproduce the historical seeded record verbatim;
+    ``--model-ref``/``--variant`` override model/variant for future cycles.
 
     ``tier="full"`` because n=50 matches ``EvalConfig.tier_sizes["full"]`` —
     ``EvalConfig`` itself has no ``tier`` field (spec §4.6).
     """
+    model_ref = model_ref or "qwen3-14b"
+    variant = variant or "higher_lr_14b"
     return ChampionRecord(
-        variant="higher_lr_14b",
-        model_ref="qwen3-14b:higher_lr_14b",
+        variant=variant,
+        model_ref=f"{model_ref}:{variant}",
         f2p_rate=0.169,
         p2p_rate=0.912,
         dataset_run_id="expanded-repos",
@@ -53,9 +62,23 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_OUTPUT,
         help=f"local destination for champion.json (default: {DEFAULT_OUTPUT})",
     )
+    parser.add_argument(
+        "--model-ref",
+        default=None,
+        help="model half of model_ref for future cycles (default: seeded 'qwen3-14b')",
+    )
+    parser.add_argument(
+        "--variant",
+        default=None,
+        help="champion variant for future cycles (default: seeded 'higher_lr_14b')",
+    )
     args = parser.parse_args(argv)
 
-    record = build_record(datetime.now(UTC).isoformat())
+    record = build_record(
+        datetime.now(UTC).isoformat(),
+        model_ref=args.model_ref,
+        variant=args.variant,
+    )
     write_champion(args.output, record)
 
     print(f"champion.json written to {args.output}")
