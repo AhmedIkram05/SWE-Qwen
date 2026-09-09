@@ -119,7 +119,7 @@ def _patch_decide(monkeypatch: pytest.MonkeyPatch, champion_run: EvalRun, candid
     """Stub every exec/network edge of the decide path; record audit calls."""
     calls: dict[str, list[Any]] = {"decisions": []}
     monkeypatch.setattr(run_mod, "_has_challenger_alias", lambda _variant, _serve: True)
-    monkeypatch.setattr(run_mod, "_launch_evals", lambda _pairs, _mode, _base: [])
+    monkeypatch.setattr(run_mod, "_launch_evals", lambda _pairs, _mode: [])
     monkeypatch.setattr(
         run_mod, "_wait_for_pair", lambda *args, **kwargs: ((champion_run, candidate_run), "ok")
     )
@@ -338,7 +338,7 @@ class TestDecideAbortPaths:
     def test_eval_failed_abort_exits_one(self, tmp_path, monkeypatch, capsys):
         path = _seed_champion(tmp_path)
         monkeypatch.setattr(run_mod, "_has_challenger_alias", lambda _variant, _serve: True)
-        monkeypatch.setattr(run_mod, "_launch_evals", lambda _pairs, _mode, _base: [])
+        monkeypatch.setattr(run_mod, "_launch_evals", lambda _pairs, _mode: [])
         monkeypatch.setattr(run_mod, "_wait_for_pair", lambda *a, **k: (None, "eval-failed"))
         self._patch_audit(monkeypatch)
         monkeypatch.chdir(tmp_path)  # F1: keep data/promotion_decisions out of the repo
@@ -486,7 +486,7 @@ class TestDeployJobE2E:
                 args=[], returncode=deploy_rc, stdout="deployed", stderr=""
             )
 
-        def _probe(base_url, _token):
+        def _probe(base_url, _token, *, model):
             calls["order"].append("health_check")
             if probe is None:
                 raise ProbeError(f"chat probe failed: {base_url}")
