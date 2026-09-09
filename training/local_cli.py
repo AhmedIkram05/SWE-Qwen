@@ -11,11 +11,12 @@ Usage:
 from __future__ import annotations
 
 from training.modal_train import app  # noqa: PLC0414 — re-export for local entrypoint
+from training.qlora_config import default_model_name
 
 
 @app.local_entrypoint()
 def main(  # noqa: PLR0913, PLR0917
-    model_name: str = "qwen3-14b",
+    model_name: str | None = None,
     variant: str = "baseline_14b",
     data_dir: str = "/data/tokenized",
     output_dir: str = "/models/qlora-output",
@@ -26,6 +27,7 @@ def main(  # noqa: PLR0913, PLR0917
     max_train_samples: int | None = None,
 ) -> None:
     """Launch QLoRA training locally (for testing with small models)."""
+    model_name = model_name or default_model_name()
     print(f"Starting training: model={model_name}, variant={variant}")
     print(f"Data: {data_dir}, Output: {output_dir}")
 

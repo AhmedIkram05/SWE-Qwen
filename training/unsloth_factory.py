@@ -14,6 +14,8 @@ from typing import Any
 
 import torch
 
+from training.qlora_config import resolve_device_memory
+
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -155,9 +157,9 @@ def _build_with_unsloth(
         attn_impl,
     )
 
-    # A10G has 24GB VRAM but only ~22GB usable. Reserve 4GB for training + activations.
-    # Use explicit device_map to force GPU memory limit - Unsloth may not pass max_memory through.
-    max_memory = {0: "18GiB", "cpu": "32GiB"}
+    # Device budget derived from the registry GPU tier (VRAM cap + CPU spill).
+    # A10G has 24GB VRAM but only ~22GB usable; reserve 4GB for training.
+    max_memory = resolve_device_memory(model_cfg)
     device_map = "auto"
 
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -239,28 +241,36 @@ def _build_fallback(
     compute_dtype = model_cfg.get("compute_dtype", "bfloat16")
     torch_dtype = torch.bfloat16 if compute_dtype == "bfloat16" else torch.float16
 
-    # Quantization config (4-bit FP4 — NF4 causes CUDA illegal memory access
-    # on A10G with Qwen3-14B, a known bitsandbytes issue with MoE-like
-    # architectures. FP4 trades ~1% perplexity for full stability.)
-    # FORCE FP4 in fallback — ignore model config's nf4 setting
-    load_in_4bit = True
-    quant_type = "fp4"
+    # Quantization target: per-model `fallback_quantization` wins (registry-level
+    # workaround — e.g. fp4 on qwen3-14b, whose NF4 causes CUDA illegal memory
+    # access on A10G with MoE-like architectures), then the general `quantization`.
+    # nf4/fp4 → 4-bit with that quant type; int8 → 8-bit; none → plain bf16 load.
+    quant_target = model_cfg.get("fallback_quantization", model_cfg.get("quantization", "nf4"))
+    if quant_target in ("nf4", "fp4"):
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=quant_target,
+            bnb_4bit_compute_dtype=torch_dtype,
+            bnb_4bit_use_double_quant=False,
+            llm_int8_enable_fp32_cpu_offload=True,  # Allow CPU offload for A10G 24GB
+        )
+    elif quant_target in ("int8", "8bit"):
+        bnb_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_enable_fp32_cpu_offload=True,
+        )
+    else:  # "none"/absent → plain bf16, no quantization
+        bnb_config = None
 
-    # A10G has 24GB VRAM but only ~22GB usable. Reserve 4GB for training.
-    max_memory = {0: "18GiB", "cpu": "32GiB"}
-
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type=quant_type,
-        bnb_4bit_compute_dtype=torch_dtype,
-        bnb_4bit_use_double_quant=False,
-        llm_int8_enable_fp32_cpu_offload=True,  # Allow CPU offload for A10G 24GB
-    )
+    # Device budget derived from the registry GPU tier (VRAM cap + CPU spill).
+    max_memory = resolve_device_memory(model_cfg)
 
     logger.info(
-        "Loading %s with standard bitsandbytes (4bit=%s, cpu_offload=True, max_memory=20GiB)",
+        "Loading %s with standard bitsandbytes (quant=%s, cpu_offload=%s, max_memory=%s)",
         hf_id,
-        load_in_4bit,
+        quant_target if bnb_config is not None else "none",
+        bnb_config is not None,
+        max_memory,
     )
 
     model = AutoModelForCausalLM.from_pretrained(

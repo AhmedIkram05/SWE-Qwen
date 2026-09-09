@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from training.qlora_config import default_model_name
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -21,7 +23,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-name",
-        default="qwen3-14b",
+        default=default_model_name(),
         help="Model key from models.yaml",
     )
     parser.add_argument(
