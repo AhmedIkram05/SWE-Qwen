@@ -143,7 +143,9 @@ def resolve_engine_model(
     if request_model == base:
         # No explicit variant: the API serves the champion by default
         # (default_variant is re-validated against config.variants below).
-        variant = config.default_variant
+        # Fresh registered models have no champion yet (empty default_variant)
+        # → serve the base model with no LoRA adapter.
+        variant = config.default_variant or None
     elif request_model.startswith(f"{base}:"):
         variant = request_model[len(base) + 1 :]
     elif request_model.startswith(f"model-{base}-"):

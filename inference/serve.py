@@ -44,6 +44,7 @@ from inference.openai_compat import (
 )
 from inference.telemetry import MetricsCollector, RequestRecord, add_trace_record
 from observability.logging import configure_logging
+from registry.loader import load_models
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +75,10 @@ class Engine(Protocol):
 
 
 # ── vLLM engine ────────────────────────────────────────────────────────────
-# ponytail: process-level singleton keyed by serving_hf_id only (NOT variant).
-# vLLM LLM() is expensive to construct (model load + CUDA graph capture); ONE
-# engine serves all variants via per-request LoRARequest.  Same shape as
-# evaluation/inference.py's _get_llm (the proven Phase 5 pattern).
+# ponytail: process-level singleton keyed by the engine model id only (NOT
+# variant).  vLLM LLM() is expensive to construct (model load + CUDA graph
+# capture); ONE engine serves all variants via per-request LoRARequest.  Same
+# shape as evaluation/inference.py's _get_llm (the proven Phase 5 pattern).
 _LLM_CACHE: dict[str, Any] = {}
 _LLM_LOCK = threading.Lock()
 
@@ -88,24 +89,44 @@ class VLLMEngine:
     def __init__(self, config: ServeConfig) -> None:
         self.config = config
 
+    def _engine_spec(self) -> tuple[str, str | None]:
+        """Resolve ``(engine model id, quantization)`` for this config.
+
+        Resolution is env > registry > fallback via the resolved
+        ``ServeConfig`` fields (never the raw registry — env precedence must
+        survive into the engine + singleton cache key).  ``serving_hf_id``
+        non-empty → the pre-quantized base (AWQ/FP8 path).  Empty → the plain
+        base model (registry ``hf_id``) with no quantization kwarg — LoRA
+        adapters serve on top of the unquantized base (native bf16/fp16).
+        Unknown ``base_model`` → KeyError (fail loud, no silent fallback).
+        """
+        spec = load_models()[self.config.base_model]
+        if self.config.serving_hf_id:
+            return self.config.serving_hf_id, self.config.quantization
+        return spec.hf_id, None
+
     def _ensure_engine(self) -> Any:
         """Return the process-singleton vLLM LLM for this config's model."""
         from vllm import LLM
 
-        key = self.config.registry_serving_hf_id()
+        key, quantization = self._engine_spec()
         with _LLM_LOCK:
             if key in _LLM_CACHE:
                 return _LLM_CACHE[key]
-            llm = LLM(
-                model=key,
-                quantization=self.config.quantization,  # type: ignore[arg-type]  # validated against vLLM at load time
-                enable_lora=True,  # allow both LoRA and non-LoRA generations
-                max_lora_rank=self.config.max_lora_rank,
-                gpu_memory_utilization=self.config.gpu_memory_utilization,
-                max_num_seqs=self.config.max_num_seqs,
-                max_model_len=self.config.max_model_len,
-                enforce_eager=self.config.enforce_eager,
-            )
+            llm_kwargs: dict[str, Any] = {
+                "model": key,
+                "enable_lora": True,  # allow both LoRA and non-LoRA generations
+                "max_lora_rank": self.config.max_lora_rank,
+                "gpu_memory_utilization": self.config.gpu_memory_utilization,
+                "max_num_seqs": self.config.max_num_seqs,
+                "max_model_len": self.config.max_model_len,
+                "enforce_eager": self.config.enforce_eager,
+            }
+            if quantization:
+                # Only the pre-quantized base path (validated against vLLM at
+                # load time); the plain base gets vLLM's native dtype.
+                llm_kwargs["quantization"] = quantization
+            llm = LLM(**llm_kwargs)
             _LLM_CACHE[key] = llm
             return llm
 
@@ -184,38 +205,20 @@ def _build_prompt(
 ) -> str:
     """Assemble the engine prompt.
 
-    LoRA adapters were trained on raw "### Response -> patch" continuation;
-    chat-wrapping breaks that contract (repetition loops — eval lesson), so
-    only the Qwen3 ``/no_think`` soft switch is inserted before
-    "### Response".  The base model gets the chat template with thinking
-    disabled via the cached tokenizer (same shape as
-    ``prompt_builder.no_think_wrap`` but with a system message).
+    LoRA adapters were trained on the raw "### Response -> patch"
+    continuation; chat-wrapping breaks that contract (repetition loops — eval
+    lesson).  The Qwen3 no-think gates (``/no_think`` insertion and
+    ``enable_thinking=False``) key off the registry's
+    ``prompt_behavior.no_think`` flag inside ``prompt_builder``, shared with
+    the eval harness.
     """
     if lora is not None:
         parts: list[str] = []
         if system_prompt:
             parts.append(system_prompt)
-        parts.append(user_text.replace("### Response", "/no_think\n### Response", 1))
+        parts.append(prompt_builder.apply_no_think_raw(hf_id, user_text))
         return "\n\n".join(parts)
-    tokenizer = prompt_builder._TOKENIZER_CACHE.get(hf_id)
-    if tokenizer is None:
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(hf_id)
-        prompt_builder._TOKENIZER_CACHE[hf_id] = tokenizer
-    messages: list[dict[str, str]] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": user_text})
-    # tokenize=False always yields str; str() also satisfies warn_return_any.
-    return str(
-        tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-    )
+    return prompt_builder.chat_wrap(hf_id, system_prompt, user_text)
 
 
 # ── App factory ────────────────────────────────────────────────────────────
