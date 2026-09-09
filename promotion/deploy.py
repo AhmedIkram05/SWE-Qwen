@@ -6,7 +6,8 @@ from at app start (pydantic-settings ``env_prefix="SERVING_"`` auto-override,
 fallback hardcoded ``higher_rank_14b``).  A variant absent from
 ``ServeConfig.variants`` aborts with a ``config-gap`` reason before anything
 executes (spec decision 6: v1 promotes only among trained variants).  The
-probe is ``POST /v1/chat/completions`` with a bearer token —
+probe is ``POST /v1/chat/completions`` with a bearer token, naming the
+champion record's model base as ``model`` (Step 6 — data is truth) —
 ``GET /health`` is a cheap liveness pre-check only (spec decision 6).
 Alias-sync failure aborts the deploy, and ``rollback`` re-promotes the
 previous champion through the same pipeline (spec decision 7).
@@ -101,7 +102,13 @@ def deploy(
     )
 
 
-def health_check(base_url: str, token: str, *, ttfpb_target_ms: int = 500) -> float:
+def health_check(
+    base_url: str,
+    token: str,
+    *,
+    model: str,
+    ttfpb_target_ms: int = 500,
+) -> float:
     """Probe a deployed app and return time-to-first-byte in seconds.
 
     ``GET {base_url}/health`` is a cheap liveness pre-check (static, no auth —
@@ -113,6 +120,9 @@ def health_check(base_url: str, token: str, *, ttfpb_target_ms: int = 500) -> fl
     Args:
         base_url: App root (bare — no ``/v1`` suffix), e.g. ``https://x.modal.run``.
         token: Bearer credential for the chat endpoint (``MODAL_SERVE_TOKEN``).
+        model: Model the chat probe names — the champion record's model base
+            (callers derive it from ``ChampionRecord.model_ref``), never a
+            hardcoded model.
         ttfpb_target_ms: documented TTFB ceiling; enforced loosely at 10x — a
             grossly stuck container fails fast, normal jitter does not.
 
@@ -132,7 +142,7 @@ def health_check(base_url: str, token: str, *, ttfpb_target_ms: int = 500) -> fl
         raise ProbeError(f"liveness pre-check returned HTTP {response.status_code}")
 
     payload = {
-        "model": "qwen3-14b",
+        "model": model,
         "messages": [{"role": "user", "content": "ping"}],
         "max_tokens": 8,
         "stream": False,
@@ -201,6 +211,7 @@ def rollback(
         health_check(  # pragma: no cover — real probe
             merged.get("MODAL_WEB_URL", ""),
             merged.get("MODAL_SERVE_TOKEN", ""),
+            model=previous.model_ref.partition(":")[0],
         )
         sync_alias_or_abort(  # pragma: no cover — real alias sync
             champion_key,

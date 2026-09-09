@@ -3,7 +3,8 @@ the ``decide`` job and the ``deploy`` job.
 
 Two mutually exclusive entrypoints behind one module:
 
-- ``python -m promotion.run --candidate-variant <v> [--no-eval]`` — the
+- ``python -m promotion.run --candidate-variant <v> [--candidate-model <m>]
+  [--no-eval]`` — the
   ``decide`` job: read champion.json (GCS fallback), validate the challenger
   (trained variant + W&B ``challenger`` tag), launch a paired dev-tier eval of
   incumbent vs candidate as two parallel ``uv run eval run`` subprocesses,
@@ -252,17 +253,17 @@ def _finalize(record: dict, config: EvalConfig) -> None:
     print(f"promote={record['outcome'] == OUTCOME_PROMOTE}" + (f" {reasons}" if reasons else ""))
 
 
-def _launch_evals(
-    pairs: list[tuple[str, str]], mode: str, base_model: str
-) -> list[subprocess.Popen[str]]:
-    """Spawn one ``eval run`` subprocess per ``(variant, run_id)`` pair, in parallel.
+def _launch_evals(pairs: list[tuple[str, str, str]], mode: str) -> list[subprocess.Popen[str]]:
+    """Spawn one ``eval run`` subprocess per ``(variant, run_id, model_base)`` triple, in parallel.
 
-    Each subprocess evaluates a single ``model:variant`` on the deterministic
-    seed-42 subset of the ``--mode`` tier (spec §4.6 step 3); ``--resume``
-    pins the run id so the poll loop knows what to load.
+    Each subprocess evaluates a single ``model_base:variant`` on the
+    deterministic seed-42 subset of the ``--mode`` tier (spec §4.6 step 3);
+    ``--resume`` pins the run id so the poll loop knows what to load.  The
+    model base is carried per pair: the champion pair evaluates the *champion
+    record's* model, which may differ from the candidate-resolved base.
     """
     procs: list[subprocess.Popen[str]] = []
-    for variant, run_id in pairs:
+    for variant, run_id, base_model in pairs:
         cmd = [
             "uv",
             "run",
@@ -346,19 +347,41 @@ def _write_step_summary(text: str) -> bool:
     return True
 
 
+def resolve_candidate_model_base(
+    candidate_model: str | None,
+    champion: ChampionRecord | None,
+    serve_fallback: str,
+) -> str:
+    """Model base for the decide/deploy ``model:variant`` refs (Step 6).
+
+    Resolution order — data is truth:
+
+    1. explicit ``--candidate-model`` (the promotion's model base);
+    2. the champion record's ``model_ref`` base — champion.json is
+       downloaded before the decide job runs, so the record already
+       carries the deployed model;
+    3. ``ServeConfig.base_model`` — registry-derived last resort.
+    """
+    if candidate_model:
+        return candidate_model
+    if champion is not None and champion.model_ref:
+        return champion.model_ref.partition(":")[0]
+    return serve_fallback
+
+
 def _decide_main(args: argparse.Namespace) -> int:
     """The decide job (spec §4.6): validate challenger, paired eval, rules, record."""
     serve = ServeConfig()
     config = EvalConfig()
     candidate = args.candidate_variant
     assert candidate is not None  # enforced by _parse_args
-    base_model = serve.base_model
 
     # Config gap (spec decision 6: v1 promotes only among trained variants)
     # aborts before the champion read: the variant error is the actionable one
     # even when the registry is empty (first cycle).
     if candidate not in serve.variants:
         champion = _load_champion(args.champion_path)  # best-effort for the record
+        base_model = resolve_candidate_model_base(args.candidate_model, champion, serve.base_model)
         _finalize(
             _abort_record(
                 decision_id=_decision_id(),
@@ -389,6 +412,7 @@ def _decide_main(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    base_model = resolve_candidate_model_base(args.candidate_model, champion, serve.base_model)
 
     if not _has_challenger_alias(candidate, serve):
         _finalize(
@@ -405,10 +429,13 @@ def _decide_main(args: argparse.Namespace) -> int:
         return 1
 
     champion_run_id, candidate_run_id = _unique_run_ids()
+    champion_base = champion.model_ref.partition(":")[0]
     procs = _launch_evals(
-        [(champion.variant, champion_run_id), (candidate, candidate_run_id)],
+        [
+            (champion.variant, champion_run_id, champion_base),
+            (candidate, candidate_run_id, base_model),
+        ],
         args.mode,
-        base_model,
     )
     try:
         pair_runs, wait_reason = _wait_for_pair(champion_run_id, candidate_run_id, config)
@@ -548,14 +575,17 @@ def _deploy_main(args: argparse.Namespace) -> int:
         )
         return 1
 
-    champion_key = f"{serve.base_model}:{variant}"
+    base_model = resolve_candidate_model_base(args.candidate_model, old, serve.base_model)
+    champion_key = f"{base_model}:{variant}"
     result = deploy_mod.deploy(champion_key, serve, env=dict(os.environ))
     failed = result.returncode != 0
     if not failed:
         # Probe credentials are provided by the workflow runner (spec §4.10).
         try:
             deploy_mod.health_check(
-                os.environ.get("MODAL_WEB_URL", ""), os.environ.get("MODAL_SERVE_TOKEN", "")
+                os.environ.get("MODAL_WEB_URL", ""),
+                os.environ.get("MODAL_SERVE_TOKEN", ""),
+                model=base_model,
             )
         except ProbeError as exc:
             print(f"deploy probe failed: {exc}", file=sys.stderr)
@@ -608,6 +638,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=str,
         default=None,
         help=("challenger variant to evaluate against the champion (decide path)"),
+    )
+    parser.add_argument(
+        "--candidate-model",
+        type=str,
+        default=None,
+        help=(
+            "model base for the champion/challenger refs (decide/deploy); empty/"
+            "absent falls back to the champion record's model_ref base, then "
+            "ServeConfig.base_model"
+        ),
     )
     parser.add_argument(
         "--no-eval",
