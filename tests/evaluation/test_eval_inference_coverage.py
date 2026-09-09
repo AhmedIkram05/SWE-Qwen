@@ -19,7 +19,6 @@ import pytest
 
 from evaluation.config import EvalConfig
 from evaluation.inference import (
-    _DEFAULT_HF_ID,
     _files_from_diff,
     _get_llm,
     extract_patch,
@@ -364,35 +363,45 @@ class TestResolveHfId:
     def test_registry_key(self):
         assert resolve_hf_id("qwen3-14b") == "Qwen/Qwen3-14B"
 
-    def test_unknown_registry_key_falls_back(self):
-        assert resolve_hf_id("not-a-model") == _DEFAULT_HF_ID
+    def test_unknown_registry_key_raises(self):
+        with pytest.raises(KeyError, match="unknown registry key"):
+            resolve_hf_id("not-a-model")
 
-    def test_missing_registry_file(self, monkeypatch):
+    def test_missing_registry_file_raises(self, monkeypatch):
         import evaluation.inference as inf
 
         monkeypatch.setattr(inf, "_REPO_ROOT", pytest.importorskip("pathlib").Path("/nonexistent"))
-        assert resolve_hf_id("qwen3-14b") == _DEFAULT_HF_ID
+        with pytest.raises(OSError):
+            resolve_hf_id("qwen3-14b")
 
-    def test_empty_registry(self, tmp_path, monkeypatch):
+    def test_empty_registry_raises(self, tmp_path, monkeypatch):
         import evaluation.inference as inf
 
         (tmp_path / "config").mkdir()
         (tmp_path / "config" / "models.yaml").write_text("models: {}\n")
         monkeypatch.setattr(inf, "_REPO_ROOT", tmp_path)
-        assert resolve_hf_id("qwen3-14b") == _DEFAULT_HF_ID
+        with pytest.raises(KeyError, match="unknown registry key"):
+            resolve_hf_id("qwen3-14b")
 
-    def test_null_registry(self, tmp_path, monkeypatch):
+    def test_null_registry_raises(self, tmp_path, monkeypatch):
         import evaluation.inference as inf
 
         (tmp_path / "config").mkdir()
         (tmp_path / "config" / "models.yaml").write_text("models: null\n")
         monkeypatch.setattr(inf, "_REPO_ROOT", tmp_path)
-        assert resolve_hf_id("qwen3-14b") == _DEFAULT_HF_ID
+        with pytest.raises(KeyError, match="unknown registry key"):
+            resolve_hf_id("qwen3-14b")
 
-    def test_missing_pyyaml(self, monkeypatch):
+    def test_registry_entry_without_hf_id_raises(self, tmp_path, monkeypatch):
+        import evaluation.inference as inf
 
-        monkeypatch.setitem(sys.modules, "yaml", None)
-        assert resolve_hf_id("qwen3-14b") == _DEFAULT_HF_ID
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "models.yaml").write_text(
+            'models:\n  qwen3-14b:\n    context_window: 32768\n    target_modules: ["q_proj"]\n'
+        )
+        monkeypatch.setattr(inf, "_REPO_ROOT", tmp_path)
+        with pytest.raises(KeyError, match="unknown registry key"):
+            resolve_hf_id("qwen3-14b")
 
 
 # ── resolve_adapter_path ───────────────────────────────────────────────────
@@ -501,30 +510,30 @@ class TestGetLLM:
         assert llm is not None
 
     def test_eager_requested(self, fake_vllm):
-        _get_llm("m1", eager=True)
+        _get_llm("Qwen/Qwen3-14B", eager=True)
         assert fake_vllm["llm"]["enforce_eager"] is True
 
     def test_cache_ignores_later_eager_flag(self, fake_vllm):
         # First load wins: a compiled engine is reused even if a later call
         # asks for eager, so one container never holds two LLMs (27.5 GiB each).
-        _get_llm("m1", eager=False)
-        _get_llm("m1", eager=True)
+        _get_llm("Qwen/Qwen3-14B", eager=False)
+        _get_llm("Qwen/Qwen3-14B", eager=True)
         assert fake_vllm["llm_instances"] == 1
         assert fake_vllm["llm"]["enforce_eager"] is False
 
     def test_cache_hit(self, fake_vllm):
-        first = _get_llm("m1")
-        second = _get_llm("m1")
+        first = _get_llm("Qwen/Qwen3-14B")
+        second = _get_llm("Qwen/Qwen3-14B")
         assert first is second
         assert fake_vllm["llm_instances"] == 1
 
     def test_cache_keyed_by_model_only(self, fake_vllm):
-        _get_llm("m1")
-        _get_llm("m2")
+        _get_llm("Qwen/Qwen3-14B")
+        _get_llm("Qwen/Qwen3-30B-A3B")
         assert fake_vllm["llm_instances"] == 2  # C1: same model = same LLM regardless of variant
 
     def test_lora_enabled_with_adapter(self, fake_vllm):
-        _get_llm("m1")
+        _get_llm("Qwen/Qwen3-14B")
         assert fake_vllm["llm"]["enable_lora"] is True  # C1: always True
 
 
@@ -590,7 +599,9 @@ class TestGeneratePatchesBatch:
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
         monkeypatch.setattr(inf, "_get_llm", fake_get_llm)
-        monkeypatch.setattr(inf, "_no_think_wrap", lambda hf_id, prompt: prompt)
+        # LoRA branch routes through the raw no-think gate (prompt_builder
+        # helper); identity keeps the test hermetic from the registry.
+        monkeypatch.setattr(inf, "_apply_no_think_raw", lambda hf_id, prompt: prompt)
 
         out = generate_patches_batch.local("qwen3-14b", "baseline_14b", "chat", [_example()])
         assert len(out) == 1
@@ -601,6 +612,41 @@ class TestGeneratePatchesBatch:
             "lora_int_id": 1,
             "lora_path": "/tmp/lora-adapter",
         }
+
+    def test_lora_prompt_skips_no_think_insert_when_not_flagged(
+        self, fake_vllm, monkeypatch, tmp_path
+    ):
+        import evaluation.inference as inf
+
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "models.yaml").write_text(
+            "models:\n"
+            "  thinky-1b:\n"
+            '    hf_id: "Thinky/Thinky-1B"\n'
+            "    context_window: 2048\n"
+            '    target_modules: ["q_proj"]\n'
+            "    prompt_behavior:\n"
+            "      no_think: false\n"
+        )
+        llm = _FakeLLM()
+
+        def fake_resolve(variant, config):
+            return "/tmp/lora-adapter"
+
+        def fake_get_llm(model_name, adapter_path=None, eager=False):
+            return llm
+
+        monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
+        monkeypatch.setattr(inf, "_get_llm", fake_get_llm)
+        monkeypatch.setattr(inf, "resolve_hf_id", lambda _: "Thinky/Thinky-1B")
+        monkeypatch.setattr(inf, "_REPO_ROOT", tmp_path)
+
+        out = generate_patches_batch.local("thinky-1b", "baseline_14b", "chat", [_example()])
+        assert len(out) == 1
+        prompts, params, lora_req = llm.calls[0]
+        assert lora_req is not None
+        assert "### Response" in prompts[0]
+        assert "/no_think" not in prompts[0]
 
     def test_extract_applied_to_raw_generation(self, fake_vllm, monkeypatch):
         import evaluation.inference as inf
@@ -628,7 +674,7 @@ class TestGeneratePatchesBatch:
 
 
 class TestNoThinkWrap:
-    def test_wraps_prompt_with_thinking_off(self, monkeypatch):
+    def test_wraps_prompt_with_thinking_off_when_flagged(self, monkeypatch):
         import evaluation.inference as inf
 
         calls: dict = {}
@@ -639,12 +685,42 @@ class TestNoThinkWrap:
                 calls["kwargs"] = kwargs
                 return "<wrapped>" + messages[0]["content"]
 
+        # qwen3-14b's registry entry flags prompt_behavior.no_think: true
         monkeypatch.setattr(inf, "_TOKENIZER_CACHE", {"Qwen/Qwen3-14B": FakeTokenizer()})
         out = inf._no_think_wrap("Qwen/Qwen3-14B", "### Input\nbody")
         assert out == "<wrapped>### Input\nbody"
         assert calls["messages"] == [{"role": "user", "content": "### Input\nbody"}]
         assert calls["kwargs"]["enable_thinking"] is False
         assert calls["kwargs"]["add_generation_prompt"] is True
+        assert calls["kwargs"]["tokenize"] is False
+
+    def test_wraps_prompt_without_thinking_kwarg_when_not_flagged(self, monkeypatch, tmp_path):
+        import evaluation.inference as inf
+
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "models.yaml").write_text(
+            "models:\n"
+            "  thinky-1b:\n"
+            '    hf_id: "Thinky/Thinky-1B"\n'
+            "    context_window: 2048\n"
+            '    target_modules: ["q_proj"]\n'
+            "    prompt_behavior:\n"
+            "      no_think: false\n"
+        )
+        calls: dict = {}
+
+        class FakeTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                calls["messages"] = messages
+                calls["kwargs"] = kwargs
+                return "<wrapped>" + messages[0]["content"]
+
+        monkeypatch.setattr(inf, "_REPO_ROOT", tmp_path)
+        monkeypatch.setattr(inf, "_TOKENIZER_CACHE", {"Thinky/Thinky-1B": FakeTokenizer()})
+        out = inf._no_think_wrap("Thinky/Thinky-1B", "### Input\nbody")
+        assert out == "<wrapped>### Input\nbody"
+        assert calls["messages"] == [{"role": "user", "content": "### Input\nbody"}]
+        assert "enable_thinking" not in calls["kwargs"]
         assert calls["kwargs"]["tokenize"] is False
 
     def test_tokenizer_cached_per_model(self, monkeypatch):
