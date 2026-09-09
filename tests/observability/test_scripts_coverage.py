@@ -202,7 +202,7 @@ def test_seed_init_failure(monkeypatch, capsys):
 def test_seed_main(monkeypatch):
     calls: list[tuple[str, str | None, int]] = []
 
-    def _fake_seed(project: str, entity: str | None, steps: int) -> int:
+    def _fake_seed(project: str, entity: str | None, steps: int, *, segment=None) -> int:
         calls.append((project, entity, steps))
         return 7
 
