@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import NoReturn
 
 import typer
+import yaml
+from pydantic import ValidationError
 
 from evaluation.comparison import (
     compare_and_report,
@@ -36,10 +38,56 @@ from evaluation.comparison import (
 from evaluation.config import EvalConfig
 from evaluation.schema import EvalRun
 from observability.logging import configure_logging
+from registry.loader import default_model_key, load_models
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODELS = "qwen3-14b:baseline_14b,qwen3-14b:higher_rank_14b,qwen3-14b:higher_lr_14b"
+# Legacy Phase-4 literals: typer defaults, used only when the registry is
+# missing/unreadable (PHASE-10 Step 2 — no silent family fallback).
+_LEGACY_KEY = "qwen3-14b"
+_LEGACY_MODELS = "qwen3-14b:baseline_14b,qwen3-14b:higher_rank_14b,qwen3-14b:higher_lr_14b"
+_LEGACY_BASELINE_HF_ID = "Qwen/Qwen3-14B"
+
+
+def _default_model_key() -> str:
+    """Registry default key, legacy literal only when the registry is absent."""
+    try:
+        return default_model_key()
+    except (KeyError, OSError, yaml.YAMLError):
+        return _LEGACY_KEY
+
+
+def _default_models() -> str:
+    """Default ``--models``: registry default key x its ``variants``.
+
+    An entry with an explicit (possibly empty) ``variants`` list drives the
+    default; a fresh key with none yields "" (caller passes ``--models``).
+    The legacy trio applies only for the legacy key or a missing registry.
+    """
+    try:
+        key = default_model_key()
+        spec = load_models()[key]
+    except (KeyError, OSError, yaml.YAMLError, ValidationError):
+        return _LEGACY_MODELS
+    variants = (spec.model_extra or {}).get("variants")
+    if variants is None:
+        return _LEGACY_MODELS if key == _LEGACY_KEY else ""
+    if not isinstance(variants, (list, tuple)):
+        # Malformed variants on a non-legacy key must not silently fall back
+        # to the qwen trio (Step 9: no implicit family fallback).
+        return _LEGACY_MODELS if key == _LEGACY_KEY else ""
+    return ",".join(f"{key}:{variant}" for variant in variants)
+
+
+def _default_baseline_hf_id() -> str:
+    """hf_id of the registry default key; legacy literal last resort."""
+    try:
+        return load_models()[default_model_key()].hf_id
+    except (KeyError, OSError, yaml.YAMLError, ValidationError):
+        return _LEGACY_BASELINE_HF_ID
+
+
+_DEFAULT_MODELS = _default_models()
 
 # --mode presets: deterministic seed-42 subsets (see config.tier_seed).
 # smoke/dev/final evaluate the SWE-bench Verified split; full = capped golden
@@ -157,7 +205,7 @@ def run_swebench(
 
 @app.command()
 def run_prompt_ab(
-    model: str = typer.Option("qwen3-14b"),
+    model: str = typer.Option(_default_model_key()),
     variant: str = typer.Option("baseline_14b"),
     templates: str = typer.Option("", help="comma-separated templates; empty = all available"),
     sample: int = typer.Option(200, help="examples per template"),
@@ -182,7 +230,7 @@ def run_prompt_ab(
 
 @app.command()
 def run_baseline(
-    model: str = typer.Option("Qwen/Qwen3-14B", help="baseline model id"),
+    model: str = typer.Option(_default_baseline_hf_id(), help="baseline model id"),
     sample: int = typer.Option(50, help="0 = all (capped at 50)"),
 ) -> None:
     """Run baseline (untuned) model evaluation."""

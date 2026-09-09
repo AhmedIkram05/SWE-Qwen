@@ -20,6 +20,19 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _default_ollama_model() -> str:
+    """Ollama tag for dev-mode local inference.
+
+    Registry keys are NOT Ollama tags (Ollama names live in their own
+    namespace, e.g. ``qwen2.5-coder:7b``), so this stays a literal dev tag —
+    the dev-only backend has no registry equivalent.
+    """
+    return "qwen2.5-coder:7b"
+
+
+_DEFAULT_OLLAMA_MODEL = _default_ollama_model()
+
+
 # ── Local inference backend ───────────────────────────────────────────────
 
 
@@ -29,7 +42,7 @@ def generate_patches_local(  # noqa: PLR0913
     prompt_template: str,
     examples: list[Any],
     *,
-    ollama_model: str = "qwen2.5-coder:7b",
+    ollama_model: str = _DEFAULT_OLLAMA_MODEL,
     ollama_base_url: str = "http://localhost:11434",
     max_tokens: int = 2048,
     temperature: float = 0.1,

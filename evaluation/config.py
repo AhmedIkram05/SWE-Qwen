@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+import yaml
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from registry.loader import default_model_key, load_models
+
+# Legacy Phase-4 literals: last-resort defaults only when the registry is
+# missing or unreadable (PHASE-10 Step 2).
+_LEGACY_KEY = "qwen3-14b"
+_LEGACY_HF_ID = "Qwen/Qwen3-14B"
 
 
 class EvalConfig(BaseSettings):
@@ -27,9 +37,11 @@ class EvalConfig(BaseSettings):
     swebench_verified_filter: str = "metadata.is_verified==true"  # filter from golden
 
     # Models
-    baseline_model: str = "Qwen/Qwen3-14B"
+    # Registry-derived (default key's hf_id), env EVAL_BASELINE_MODEL wins.
+    baseline_model: str = _LEGACY_HF_ID
     wandb_entity: str = "2571642-university-of-dundee"  # override via EVAL_WANDB_ENTITY env var
     wandb_project: str = "swe-qwen"
+    # Registry-derived: ``model-{default key}-{variant}`` (env wins).
     lora_artifact_pattern: str = "model-qwen3-14b-{variant}"  # W&B artifact naming
 
     # Modal
@@ -96,6 +108,33 @@ class EvalConfig(BaseSettings):
     }
     # Inference GPU: A100-80GB is required for 14B bf16; a10g-24gb works for ≤7B
     inference_gpu: str = "a100-80gb"
+
+    @model_validator(mode="after")
+    def _resolve_registry(self) -> EvalConfig:
+        """Derive baseline_model/lora_artifact_pattern from the registry default.
+
+        Env/init values win (already in ``model_fields_set``). Literals apply
+        only when the registry is missing or unreadable; a registry without a
+        default entry raises (no silent family fallback).
+        """
+        try:
+            models = load_models()
+        except (OSError, yaml.YAMLError):
+            return self
+        key = default_model_key()
+        spec = models.get(key)
+        if spec is None:
+            raise ValueError(f"unknown default model {key!r}; available: {sorted(models)}")
+
+        def set_if_unset(name: str, value: Any) -> None:
+            # ponytail: frozen config; plain assignment raises, this bypasses
+            # the freeze check once during validation.
+            if name not in self.model_fields_set:
+                object.__setattr__(self, name, value)
+
+        set_if_unset("baseline_model", spec.hf_id)
+        set_if_unset("lora_artifact_pattern", f"model-{key}-{{variant}}")
+        return self
 
     model_config = SettingsConfigDict(
         env_prefix="EVAL_",

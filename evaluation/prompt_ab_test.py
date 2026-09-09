@@ -14,6 +14,8 @@ import logging
 import random
 from datetime import UTC, datetime
 
+import yaml
+
 from evaluation.config import EvalConfig
 from evaluation.harness import EvaluationHarness, _persist_run, make_run_id
 from evaluation.metrics import aggregate_metrics
@@ -22,6 +24,19 @@ from evaluation.schema import EvalResult, EvalRun, F2PMetrics
 logger = logging.getLogger(__name__)
 
 _FALLBACK_TEMPLATES = ["system", "user", "assistant", "chat"]
+
+
+def _default_model() -> str:
+    """Registry default model key; incumbent literal only when the registry is absent."""
+    try:
+        from registry.loader import default_model_key
+
+        return default_model_key()
+    except (KeyError, OSError, yaml.YAMLError):
+        return "qwen3-14b"
+
+
+_DEFAULT_MODEL = _default_model()
 
 
 def _default_templates() -> list[str]:
@@ -38,7 +53,7 @@ def _default_templates() -> list[str]:
 
 def run_prompt_ab_test(  # noqa: PLR0913, PLR0917 — spec-mandated public signature
     config: EvalConfig,
-    model: str = "qwen3-14b",
+    model: str = _DEFAULT_MODEL,
     variant: str = "baseline_14b",
     templates: list[str] | None = None,
     sample: int = 200,

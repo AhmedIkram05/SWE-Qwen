@@ -34,7 +34,6 @@ import modal
 import inference.prompt_builder as _prompt_builder
 
 DEFAULT_TEMPLATE = _prompt_builder.DEFAULT_TEMPLATE
-_DEFAULT_HF_ID = _prompt_builder._DEFAULT_HF_ID
 _DIFF_FILE_RE = _prompt_builder._DIFF_FILE_RE
 _GOLDEN_INDEX = _prompt_builder._GOLDEN_INDEX
 _GOLDEN_PATH = _prompt_builder._GOLDEN_PATH
@@ -42,6 +41,7 @@ _GOLDEN_SOURCE = _prompt_builder._GOLDEN_SOURCE
 _PATH_RE = _prompt_builder._PATH_RE
 _PROMPTS_DIR = _prompt_builder._PROMPTS_DIR
 _TOKENIZER_CACHE = _prompt_builder._TOKENIZER_CACHE
+_apply_no_think_raw = _prompt_builder.apply_no_think_raw
 _ensure_golden = _prompt_builder._ensure_golden
 _fetch_raw_file = _prompt_builder._fetch_raw_file
 _files_from_diff = _prompt_builder._files_from_diff
@@ -98,6 +98,8 @@ vllm_image = (
     # Phase 6 Wave 1: evaluation.inference now imports inference.prompt_builder
     # at module level, so the container needs the package baked in.
     .add_local_dir(str(_INFERENCE_DIR), remote_path="/root/inference", copy=True)
+    # Phase 10 Step 0: shared model registry (resolve_hf_id reads the overlay)
+    .add_local_dir(str(_REPO_ROOT / "registry"), remote_path="/root/registry", copy=True)
 )
 # Gold patch diffs for few-shot prompting (see _golden_patches). Baked only
 # when present: data/golden.jsonl is gitignored (CI has no data dir — image
@@ -337,15 +339,13 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
         for example in examples
     ]
     # Adapters were trained on raw "### Response -> patch" continuation
-    # (tokenize.format_training_prompt); chat-wrapping that breaks the contract
-    # and produced repetition loops. Only the untrained base model gets the
-    # no-think wrap, to stop it rambling "Okay, let's see..." preamble.
+    # (tokenize.format_training_prompt); chat-wrapping that breaks the
+    # contract and produced repetition loops. Only the untrained base model
+    # gets the chat-template wrap. Both no-think gates (the raw "/no_think"
+    # insertion and enable_thinking=False) key off the registry's
+    # prompt_behavior.no_think flag inside prompt_builder.
     prompts = [
-        _no_think_wrap(hf_id, p)
-        if adapter_path is None
-        # Qwen3 soft switch: "/no_think" as the last user-turn line suppresses
-        # thinking even in raw continuation, where enable_thinking can't reach.
-        else p.replace("### Response", "/no_think\n### Response", 1)
+        _no_think_wrap(hf_id, p) if adapter_path is None else _apply_no_think_raw(hf_id, p)
         for p in rendered
     ]
     # ponytail: no repetition_penalty => decoding degeneracy (the model fell
