@@ -23,11 +23,6 @@ class _FakeTokenizer:
 
 
 @pytest.fixture
-def stub_tokenizer(monkeypatch):
-    monkeypatch.setitem(prompt_builder._TOKENIZER_CACHE, "Qwen/Qwen3-14B", _FakeTokenizer())
-
-
-@pytest.fixture
 def fake_adapter(monkeypatch):
     monkeypatch.setattr(
         prompt_builder, "resolve_adapter_path", lambda variant, config=None: "/tmp/fake-adapter"
@@ -120,6 +115,56 @@ class TestVLLMEngine:
         )
         assert state["sampling_params"].stop == []
 
+    def test_engine_null_serving_hf_id_omits_quantization(self, mocker, monkeypatch):
+        from registry.loader import ModelSpec
+
+        state = _install_fake_vllm(mocker)
+        mocker.patch.object(serve, "_LLM_CACHE", {})
+        for var in (
+            "SERVING_BASE_MODEL",
+            "SERVING_SERVING_HF_ID",
+            "SERVING_QUANTIZATION",
+            "SERVING_VARIANTS",
+            "SERVING_DEFAULT_VARIANT",
+            "SERVING_MAX_MODEL_LEN",
+            "SERVING_DEFAULT_MAX_TOKENS",
+            "SERVING_MAX_TOKENS_CAP",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        spec = ModelSpec(
+            hf_id="Owner/Plain-Base",
+            context_window=32768,
+            target_modules=["q_proj"],
+            serving_hf_id=None,
+        )
+        # The engine resolves through the CONFIG fields; patch the loader the
+        # config validators read, not the engine's copy.
+        mocker.patch("inference.config.load_models", return_value={"plain-base": spec})
+        mocker.patch.object(serve, "load_models", return_value={"plain-base": spec})
+        mocker.patch("inference.config.default_model_key", return_value="plain-base")
+        engine = serve.VLLMEngine(ServeConfig())
+        engine.generate(
+            "p",
+            lora=None,
+            max_tokens=8,
+            temperature=0.0,
+            top_p=1.0,
+            stop=None,
+            repetition_penalty=1.0,
+        )
+        assert state["llm_kwargs"]["model"] == "Owner/Plain-Base"
+        assert "quantization" not in state["llm_kwargs"]
+        assert state["llm_kwargs"]["enable_lora"] is True
+        assert state["llm_kwargs"]["max_lora_rank"] == 64
+
+    def test_engine_env_override_beats_registry(self, monkeypatch):
+        # SERVING_* env wins over the registry — _engine_spec must honor the
+        # resolved config fields, not the raw registry entry.
+        monkeypatch.setenv("SERVING_SERVING_HF_ID", "Owner/Env-Base")
+        monkeypatch.setenv("SERVING_QUANTIZATION", "fp8")
+        engine = serve.VLLMEngine(ServeConfig())
+        assert engine._engine_spec() == ("Owner/Env-Base", "fp8")
+
 
 class TestDefaultEngine:
     def test_serving_stub_zero_picks_vllm(self, monkeypatch):
@@ -139,23 +184,82 @@ class TestCreateApp:
 
 
 class TestBuildPrompt:
-    def test_lora_inserts_no_think_gate(self, fake_adapter):
-        prompt = serve._build_prompt(
-            "Qwen/Qwen3-14B", "SYS", "BODY\n### Response\nREST", ("lora", "/p")
-        )
-        assert prompt == "SYS\n\nBODY\n/no_think\n### Response\nREST"
+    @pytest.fixture
+    def local_builder_state(self, monkeypatch):
+        # Pin prompt_builder's shared state to this module: the no-think gate
+        # reads the registry through _eval()'s module, which may resolve to
+        # evaluation.inference when that is imported elsewhere in the test run.
+        monkeypatch.setattr(prompt_builder, "_eval", lambda: prompt_builder)
 
-    def test_lora_without_system_prompt(self, fake_adapter):
+    @pytest.fixture
+    def no_think_registry(self, local_builder_state, monkeypatch, tmp_path):
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "models.yaml").write_text(
+            "models:\n"
+            "  qwen3-14b:\n"
+            '    hf_id: "Qwen/Qwen3-14B"\n'
+            "    context_window: 32768\n"
+            '    target_modules: ["q_proj"]\n'
+            "    prompt_behavior:\n"
+            "      no_think: true\n"
+            "  thinky-1b:\n"
+            '    hf_id: "Thinky/Thinky-1B"\n'
+            "    context_window: 2048\n"
+            '    target_modules: ["q_proj"]\n'
+            "    prompt_behavior:\n"
+            "      no_think: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(prompt_builder, "_REPO_ROOT", tmp_path)
+
+    @pytest.mark.parametrize(
+        ("hf_id", "expected"),
+        [
+            ("Qwen/Qwen3-14B", "SYS\n\nBODY\n/no_think\n### Response\nREST"),
+            ("Thinky/Thinky-1B", "SYS\n\nBODY\n### Response\nREST"),
+        ],
+    )
+    def test_lora_no_think_gate_follows_registry_flag(
+        self, no_think_registry, fake_adapter, hf_id, expected
+    ):
+        prompt = serve._build_prompt(hf_id, "SYS", "BODY\n### Response\nREST", ("lora", "/p"))
+        assert prompt == expected
+
+    def test_lora_without_system_prompt(self, no_think_registry, fake_adapter):
         prompt = serve._build_prompt(
             "Qwen/Qwen3-14B", "", "BODY\n### Response\nREST", ("lora", "/p")
         )
         assert prompt == "BODY\n/no_think\n### Response\nREST"
 
-    def test_base_with_system_prompt(self, stub_tokenizer):
+    def test_lora_skips_insert_when_no_flag_entry(self, no_think_registry, fake_adapter):
+        # An hf_id absent from the registry takes the plain path (flag False).
+        prompt = serve._build_prompt(
+            "Other/Unknown-Model", "SYS", "BODY\n### Response\nREST", ("lora", "/p")
+        )
+        assert prompt == "SYS\n\nBODY\n### Response\nREST"
+
+    def test_base_with_system_prompt(self, no_think_registry, monkeypatch):
+        monkeypatch.setitem(prompt_builder._TOKENIZER_CACHE, "Qwen/Qwen3-14B", _FakeTokenizer())
         prompt = serve._build_prompt("Qwen/Qwen3-14B", "SYS", "HI", None)
         assert prompt == "FAKE_CHAT:2"
 
-    def test_base_tokenizer_miss_imports_transformers(self, mocker):
+    def test_base_enable_thinking_gated_by_registry_flag(self, no_think_registry, monkeypatch):
+        captured: dict = {}
+
+        class _Capturing:
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return f"FAKE_CHAT:{len(messages)}"
+
+        monkeypatch.setitem(prompt_builder._TOKENIZER_CACHE, "Qwen/Qwen3-14B", _Capturing())
+        assert serve._build_prompt("Qwen/Qwen3-14B", "SYS", "HI", None) == "FAKE_CHAT:2"
+        assert captured["kwargs"]["enable_thinking"] is False
+
+        monkeypatch.setitem(prompt_builder._TOKENIZER_CACHE, "Thinky/Thinky-1B", _Capturing())
+        assert serve._build_prompt("Thinky/Thinky-1B", "SYS", "HI", None) == "FAKE_CHAT:2"
+        assert "enable_thinking" not in captured["kwargs"]
+
+    def test_base_tokenizer_miss_imports_transformers(self, local_builder_state, mocker):
         hf_id = "Other/Model"
         tok = types.SimpleNamespace()
         tok.apply_chat_template = lambda messages, **kwargs: "FROM_HF"
