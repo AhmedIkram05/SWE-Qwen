@@ -97,7 +97,7 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload plan artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tfplan-${{ github.sha }}
           path: infra/terraform/tfplan
