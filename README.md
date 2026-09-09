@@ -1,6 +1,6 @@
 # SWE-Qwen
 
-> A registry-driven and config-swappable LLMOps platform (Qwen3-14B run end-to-end; 30B reserved) that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **3 QLoRA variants of Qwen3-14B on Modal A100-80GB GPU(s)**, evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (50-instance CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **4 GitHub Actions workflows**.
+> A registry-driven and config-swappable LLMOps platform (any Hugging Face causal LM plugs in via `model add` - Qwen3-14B run end-to-end) that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **3 QLoRA variants on per-model Modal GPU(s)**, evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (20-instance smoke CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **4 GitHub Actions workflows**.
 
 <p align="center">
 <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&labelColor=000000&logo=python"></a>
@@ -50,11 +50,11 @@ flowchart TB
         CLEAN["Clean<br/>17,456 ✓ · 3,014 dropped"]
         SPLIT["Split by repo<br/>15,011 train · 1,556 val · 889 test<br/>46 repos (37/5/4)"]
         GOLD["Golden set<br/>2,313 held out<br/>never touches training"]
-        TOK["Tokenize<br/>Qwen3-14B @ 8,192 ctx<br/>14,833 train examples"]
+        TOK["Tokenize<br/>registry tokenizer · ctx window<br/>14,833 train examples"]
         ING --> VAL --> CLEAN --> SPLIT --> GOLD
         CLEAN --> TOK
     end
-    subgraph TRAIN["QLORA TRAINING · training/ · Modal A100-80GB"]
+    subgraph TRAIN["QLORA TRAINING · training/ · per-model Modal GPU"]
         direction LR
         BASE["baseline_14b<br/>r16 · α32 · lr2e-5 · 2×8"]
         RANK["higher_rank_14b<br/>r32 · α64 · lr2e-5 · 1×16"]
@@ -72,7 +72,7 @@ flowchart TB
     subgraph SERVE["INFERENCE SERVING · inference/ · Modal scale-to-zero"]
         direction LR
         API["FastAPI<br/>POST /v1/chat/completions<br/>SSE streaming"]
-        VLLM["vLLM + AWQ 4-bit<br/>per-request LoRA swap"]
+        VLLM["vLLM + per-model quant<br/>per-request LoRA swap"]
     end
     OBS["OBSERVABILITY · observability/<br/>Weights & Biases · Langfuse (10% trace) · GCP Logging"]
     DATA --> TRAIN
@@ -101,7 +101,7 @@ flowchart TB
 
 ### End-to-end flow
 
-`github issues + PR patches → schema-validated IssueRecords → quality-cleaned corpus → repo-stratified splits → QLoRA fine-tuning (3 variants, A100-80GB) → golden-set execution-based evaluation → statistical compare → champion LoRA adapter → OpenAI-compatible serverless inference → per-request adapter inference → Langfuse + W&B telemetry`
+`github issues + PR patches → schema-validated IssueRecords → quality-cleaned corpus → repo-stratified splits → QLoRA fine-tuning (3 variants, per-model GPU) → golden-set execution-based evaluation → statistical compare → champion LoRA adapter → OpenAI-compatible serverless inference → per-request adapter inference → Langfuse + W&B telemetry`
 
 Every stage is a first-class, independently runnable step with typed schemas (`pydantic`), deterministic seeds, artifact versioning (W&B + GCS), and CI gates (4 workflows).
 
@@ -110,10 +110,10 @@ Every stage is a first-class, independently runnable step with typed schemas (`p
 | Layer | What it does | Scale / evidence |
 | ----- | ------------ | ---------------- |
 | `data_engineering/` | 6-stage typed pipeline: ingest → validate → clean → split → golden → tokenize (`pydantic` `IssueRecord` schemas, GCS) | 20,477 → 17,456 → 15,011/1,556/889 + 2,313 golden + 14,833 tokenized |
-| `training/` | QLoRA 4-bit NF4 + Unsloth on Modal A100-80GB, image-as-code (no Dockerfile) | 3 variants (`baseline_14b`, `higher_rank_14b`, `higher_lr_14b`), ~3-4 h each |
+| `training/` | QLoRA (Unsloth, TRL+PEFT+bitsandbytes fallback) on per-model Modal GPU, image-as-code (no Dockerfile) | 3 variants (`baseline_14b`, `higher_rank_14b`, `higher_lr_14b`), ~3-4 h each |
 | `evaluation/` | Execution-based harness inside official SWE-bench Docker images | F2P + P2P, 30 s/test, flaky retries, 100-instance golden sample, ~$30 compare |
 | `promotion/` | Statistical champion/challenger gate | 4 conditions (F2P≥15%, P2P≥90%, bootstrap CI LB>0, P2P drop≤2pt), dry-run `RUN_MODAL_EVAL=false` |
-| `inference/` | OpenAI-compatible FastAPI + SSE, vLLM + AWQ 4-bit, per-request LoRA swap | `POST /v1/chat/completions`, $0.00 idle (scale-to-zero) |
+| `inference/` | OpenAI-compatible FastAPI + SSE, vLLM (pre-quantized AWQ/FP8 or plain bf16 per model), per-request LoRA swap | `POST /v1/chat/completions`, $0.00 idle (scale-to-zero) |
 | `observability/` | W&B (2 projects) + Langfuse (10% trace) + GCP Logging, dashboards-as-code | every train/eval/serve event attributable |
 | `infra/terraform` | GCS buckets + IAM workload-identity pool, 100% IaC | WIF OIDC, no service-account keys on the project |
 
@@ -135,10 +135,10 @@ Every stage is a first-class, independently runnable step with typed schemas (`p
 | | High-quality corpus after cleaning | **17,456** (3,014 dropped) |
 | | Train / val / test split (repo-stratified) | **15,011 / 1,556 / 889** (46 repos · 37/5/4) |
 | | Golden set (bypassed training) | **2,313** from verified + test + dev |
-| | Tokenized training examples (Qwen3-14B, max 8,192) | 14,833 |
+| | Tokenized training examples (Qwen3-14B @ 8,192; tokenizer + context now registry-driven) | 14,833 |
 | | Cleaned-out noise | 12 binary, 1,212 non-Python, 1,149 oversized patches, 726 duplicates |
 | **Training** | QLoRA variants fine-tuned (A100-80GB) | 3 (`baseline_14b`, `higher_rank_14b`, `higher_lr_14b`) |
-| | Adapter checkpoints shipped to W&B | `model-qwen3-14b-{variant}` × 3 |
+| | Adapter checkpoints shipped to W&B | `model-{key}-{variant}` × 3 (this run: `model-qwen3-14b-{variant}`) |
 | | Train loss / runtime (higher_rank_14b, 1 epoch) | 0.5843 final · 4,214 s (~1.2 h) |
 | **Evaluation** | Execution-based harness (real SWE-bench containers) | 2,313 golden pool · 100-sample released run |
 | | Final F2P - champion (`higher_rank_14b`) vs base Qwen3-14B | **17.20%** vs 2.46% (**7.0×**, 95% CI 11.1-25.8%) |
@@ -147,8 +147,8 @@ Every stage is a first-class, independently runnable step with typed schemas (`p
 | **Serving** | OpenAI-compatible endpoint | `POST /v1/chat/completions` |
 | | Adapter switching | Per-request LoRA, zero engine restarts |
 | | Idle cost | $0.00 (scale-to-zero) |
-| **Quality** | Test suite (offline) | **1,456 tests passed (1,462 collected: 1 skipped, 5 deselected)** in ~3 min |
-| | Lint / type-check | `ruff check` clean · `mypy` strict across the typed core (data_engineering, evaluation, scripts) |
+| **Quality** | Test suite (offline) | **1539 tests passed (1541 collected: 1 skipped, 1 deselected)** in ~3 min |
+| | Lint / type-check | `ruff check` clean · `mypy` clean across 8 packages incl. `registry` (75 files) |
 | | Infrastructure as code | 100% Terraform (storage + IAM + project roots) |
 
 > **Final results** On the **100-instance golden set**, the promoted **`higher_rank_14b`** champion scores **17.20% F2P (95% Wilson CI 11.1-25.8%)** with **90.10% P2P** at **8.92 s/instance** - up from the base Qwen3-14B's **2.46% F2P / 28.54% P2P** (**7.0× F2P gain**, +61.6pt P2P, McNemar p ≈ 6e-05, paired-bootstrap 95% CI lower bound > 0). Full table verbatim in [assets/results.txt](assets/results.txt); methodology in [docs/evaluation.md](docs/evaluation.md). The champion adapter ships on the Hugging Face Hub: **[`ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b`](https://huggingface.co/ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b)**.
@@ -187,7 +187,7 @@ Everything below was captured against **live systems** - the real GCS bucket, th
 
 <p align="center">
   <img src="assets/media/cli-data-pipeline.png" width="560" alt="python -m data_engineering.cli --help" />
-  <br/><em>`python -m data_engineering.cli --help` - one command runs the whole pipeline.</em>
+  <br/><em>`python -m data_engineering.cli --help` - one command runs the whole pipeline; model, tokenizer and length defaults resolve from the registry.</em>
 </p>
 
 <p align="center">
@@ -198,29 +198,29 @@ Everything below was captured against **live systems** - the real GCS bucket, th
 ### Every subsystem is one command
 
 <p align="center">
-  <img src="assets/media/cli-suite.gif" width="560" alt="cli-suite · evaluation.cli --help → training.qlora_train --help" />
-  <br/><em>Evaluation and training each expose a single Typer CLI - the pipeline, the training and the eval all run off the same repo, same configs.</em>
+  <img src="assets/media/cli-suite.gif" width="560" alt="cli-suite · evaluation.cli --help → training.qlora_train --help → model --help" />
+  <br/><em>Evaluation, training and the model registry (`model add` / `model list`) each expose a single Typer CLI - the pipeline, the training and the eval all run off the same repo, same configs.</em>
 </p>
 
 ### CI/CD gates (4 workflows)
 
 <p align="center">
   <img src="assets/media/cicd-tour.gif" width="680" alt="CI/CD tour · ci.yml → cd.yml → eval.yml → promote.yml" />
-  <br/><em>CI runs tests on every PR, CD bakes + pushes the trained artifact, <code>eval.yml</code> gates every change against the golden set with read-only access, and <code>promote.yml</code> re-runs the paired champion/challenger comparison before flipping the registry - you can't self-certify.</em>
+  <br/><em>CI runs tests on every PR, CD bakes + pushes the trained artifact, <code>eval.yml</code> derives the smoke gate models from the champion record with read-only access, and <code>promote.yml</code> (with <code>candidate_model</code> input) re-runs the paired champion/challenger comparison before flipping the registry - you can't self-certify.</em>
 </p>
 
 ### Infra proof (Modal + GCS)
 
 <p align="center">
   <img src="assets/media/infra-proof.gif" width="680" alt="Infra proof · Modal server → volumes → GCS artifacts → trained adapters" />
-  <br/><em>The live Modal vLLM server, the mounted GCS-backed volumes, the W&B artifact round-trip, and the 3 trained LoRA adapters ready to ship.</em>
+  <br/><em>The live Modal vLLM server (class <code>ModelServer</code>, per-model GPU), the mounted GCS-backed volumes, the W&B artifact round-trip, and the 3 trained LoRA adapters ready to ship.</em>
 </p>
 
 ### Quality & observability receipts
 
 <p align="center">
-  <img src="assets/media/pytest-summary.png" width="640" alt="pytest summary · 1,456 tests passed (1,462 collected)" />
-  <br/><em>Offline test suite: 1,456 tests passed (1,462 collected: 1 skipped, 5 deselected) in ~3 min.</em>
+  <img src="assets/media/pytest-summary.png" width="640" alt="pytest summary · 1539 tests passed (1541 collected)" />
+  <br/><em>Offline test suite: 1539 tests passed (1541 collected: 1 skipped, 1 deselected) in ~3 min.</em>
 </p>
 
 <p align="center">
@@ -297,30 +297,33 @@ gcloud iam workload-identity-pools create-cred-config "$GCP_WIF_PROVIDER" \
   --service-account="swe-qwen-github@$GCP_PROJECT_ID.iam.gserviceaccount.com" \
   --output-file=gha-wif.json
 
-# 4. Build the dataset (run the real pipeline)
-python -m data_engineering.cli run --run-id expanded-repos \
-  --tokenize-model qwen3-14b --tokenize-max-length 8192
+# 4. (optional) plug in any Hugging Face causal LM - everything below resolves it
+model add meta-llama/Llama-3.1-8B-Instruct --name llama-31-8b --context 8192
+model list
 
-# 5. Train 3 QLoRA variants on Modal (A100-80GB)
+# 5. Build the dataset (tokenizer + context default from the registry)
+python -m data_engineering.cli run --run-id expanded-repos
+
+# 6. Train 3 QLoRA variants on Modal (per-model GPU)
 modal run training/modal_train.py::train_qlora --model-name qwen3-14b --variant baseline_14b --run-id expanded-repos
 modal run training/modal_train.py::train_qlora --model-name qwen3-14b --variant higher_rank_14b --run-id expanded-repos
 modal run training/modal_train.py::train_qlora --model-name qwen3-14b --variant higher_lr_14b --run-id expanded-repos
 # ...or one shot:
 python scripts/run_3config_comparison.py --run-id expanded-repos --max-train-samples 3000   # --force-retrain
 
-# 6. Evaluate (baseline + variants on the same seeded sample)
+# 7. Evaluate (baseline + variants on the same seeded sample)
 export EVAL_DATASET_RUN_ID=expanded-repos
 python -m evaluation.cli run --split golden --sample 100 --models qwen3-14b:baseline --resume run_baseline
 python -m evaluation.cli run --split golden --sample 100 \
   --models qwen3-14b:baseline_14b,qwen3-14b:higher_rank_14b,qwen3-14b:higher_lr_14b --resume run_golden
 
-# 7. Compare (statistics + optional promotion)
+# 8. Compare (statistics + optional promotion)
 python -m evaluation.cli compare --run_ids run_baseline,run_golden --promote-to-registry
 
-# 8. Serve the champion (OpenAI-compatible, scale-to-zero)
+# 9. Serve the champion (OpenAI-compatible, scale-to-zero)
 modal serve inference.modal_serve
 curl -s http://127.0.0.1:8000/health
-# {"status":"ok","model":"Qwen/Qwen3-14B-AWQ","engine":"VLLMEngine"}
+# {"status":"ok","model":"Qwen/Qwen3-14B-AWQ","engine":"VLLMEngine"}  (model + quant resolve from the registry; SERVING_BASE_MODEL to switch)
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Authorization: Bearer $MODAL_SERVE_TOKEN" -H "Content-Type: application/json" \
   -d '{"model":"qwen3-14b:higher_rank_14b","messages":[{"role":"user","content":"Explain QLoRA in one sentence"}]}'
@@ -336,22 +339,25 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 | `GCP_PROJECT_ID` / `GCP_REGION` | Terraform / GCS | - |
 | `EVAL_DATASET_RUN_ID` | eval golden-set pointer | `expanded-repos` |
 | `SERVING_STUB` | `0` → vLLM, else stub engine | stub |
+| `SERVING_BASE_MODEL` | registry model key to serve | registry `default: true` key (`qwen3-14b`) |
+| `SERVING_GPU` | Modal GPU spec override | registry `gpu_mapping` / `A10G:1` |
+| `SERVING_DEFAULT_VARIANT` | default LoRA variant | registry `default_variant` |
 
-GitHub Actions secrets: `GCP_WIF_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GCP_PROJECT_ID`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `WANDB_API_KEY`, `GITHUB_TOKEN`. Training config lives in `config/qlora_variants.yaml` + `config/models.yaml`.
+GitHub Actions secrets: `GCP_WIF_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GCP_PROJECT_ID`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `WANDB_API_KEY`, `GITHUB_TOKEN`. Training config lives in `config/qlora_variants.yaml` + `config/models.yaml` (plus the gitignored `config/models.user.yaml` overlay written by `model add`); `registry/` is the single loader every stage reads through.
 
 ### Tests
 
 ```bash
 uv sync --extra dev
-ruff check . && mypy data_engineering/ evaluation/ scripts/
-pytest -m "not requires_modal and not requires_gcp and not requires_wandb and not requires_credentials"
+ruff check . && ruff format --check . && mypy
+pytest -m "not requires_credentials"
 ```
 
 ### Deployment
 
 ```bash
 terraform -chdir=infra/terraform apply   # GCS buckets + WIF pool
-modal deploy inference.modal_serve       # scale-to-zero serving endpoint
+modal deploy inference.modal_serve       # scale-to-zero serving endpoint (SERVING_BASE_MODEL / SERVING_GPU via repo vars, see cd.yml)
 gh workflow run promote.yml              # re-run the paired champion/challenger gate
 ```
 
@@ -366,7 +372,7 @@ gh workflow run promote.yml              # re-run the paired champion/challenger
 | [docs/benchmarks.md](docs/benchmarks.md) | **Final benchmark report** - measured F2P/P2P/latency/cost, champion selection |
 | [docs/observability/architecture.md](docs/observability/architecture.md) | System architecture, telemetry flows, dashboards layout |
 | [docs/observability/dashboards.md](docs/observability/dashboards.md) | Dashboards-as-code: `scripts/build_dashboards.py` + `scripts/seed_dashboards.py` |
-| [docs/planning/](docs/planning/) | Phase-by-phase engineering plans (ADR & vision, phases 2-9 design docs) |
+| [docs/planning/](docs/planning/) | Phase-by-phase engineering plans (ADR & vision, phases 2-10 design docs) |
 | [docs/IMPLEMENTATION-LOG.md](docs/IMPLEMENTATION-LOG.md) | Chronological record of every stage built, run and evaluated |
 | [docs/deep-dives.md](docs/deep-dives.md) | Component deep dives, testing strategy, Terraform infra, CI/CD, security |
 
@@ -377,4 +383,4 @@ gh workflow run promote.yml              # re-run the paired champion/challenger
 - [**W3C ETL Pipeline**](https://github.com/AhmedIkram05/w3c-etl-pipeline) - serverless Azure ETL: W3C web logs through Databricks DLT → dbt → Power BI
 - [**StockLens**](https://github.com/AhmedIkram05/StockLens) - FinTech mobile app: OCR receipt scanning, portfolio analytics, LSTM forecasting, self-built MCP server
 
-<p align="center"><b>SWE-Qwen</b> - SWE-bench → QLoRA → execution-based eval → statistical promotion → OpenAI-compatible serving.<br/>Built with Python · PyTorch · Modal · Terraform · Google Cloud · W&B · GitHub Actions.<br/>MIT © Ahmed Ikram</p>
+<p align="center"><b>SWE-Qwen</b> - model registry → SWE-bench → QLoRA → execution-based eval → statistical promotion → OpenAI-compatible serving.<br/>Built with Python · PyTorch · Modal · Terraform · Google Cloud · W&B · GitHub Actions.<br/>MIT © Ahmed Ikram</p>
