@@ -2,19 +2,20 @@
 # Each entry maps a short name → Hugging Face model ID + hardware requirements.
 # Used by training/qlora_config.py to resolve GPU type and model config.
 #
-# PHASE 4 PIVOT: Only qwen3-14b is used for Phase 4 training.
-# qwen3-30b-a3b config retained for future phases but excluded from Phase 4 execution.
-
 models:
   qwen3-14b:
+    default: true  # registry default model (registry.default_model_key())
     hf_id: "Qwen/Qwen3-14B"
     active_params: 14_000_000_000
     total_params: 14_000_000_000
     quantization: "nf4"
+    fallback_quantization: "fp4"  # nf4 causes CUDA illegal memory access on A10G via bitsandbytes; Unsloth path uses quantization nf4
     compute_dtype: "bfloat16"
     # Phase 6 serving: pre-quantized base + quantization backend (Wave 1)
     serving_hf_id: "Qwen/Qwen3-14B-AWQ"   # pre-quantized base for Phase 6 serving (AWQ fallback: Qwen/Qwen3-14B-AWQ)
     serving_quantization: "awq"           # "fp8" | "awq"
+    prompt_behavior:
+      no_think: true  # Qwen3: gate "/no_think" insertion + apply_chat_template(enable_thinking=False)
     gpu_mapping:
       primary: "a100-80gb"
       fallback: "a10g-24gb"
@@ -28,6 +29,36 @@ models:
       - "up_proj"
       - "down_proj"
 
+  smollm2-135m:
+    hf_id: "HuggingFaceTB/SmolLM2-135M"
+    context_window: 8192
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+    gpu_mapping:
+      primary: "a10g-24gb"
+      fallback: "a10g-24gb"
+
+  mistral-7b-v03:
+    hf_id: "mistralai/Mistral-7B-Instruct-v0.3"
+    context_window: 32768
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+    gpu_mapping:
+      primary: "a100-80gb"
+      fallback: "a10g-24gb"
+
   # Retained for future phases (Phase 5+ re-evaluation, Phase 6+ serving)
   # NOT used in Phase 4 training pipeline
   qwen3-30b-a3b:
@@ -36,6 +67,8 @@ models:
     total_params: 30_000_000_000
     quantization: "nf4"
     compute_dtype: "bfloat16"
+    prompt_behavior:
+      no_think: true  # Qwen3: gate "/no_think" insertion + apply_chat_template(enable_thinking=False)
     gpu_mapping:
       primary: "h100-80gb"
       fallback: "a100-80gb"
