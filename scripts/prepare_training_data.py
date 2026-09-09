@@ -30,10 +30,22 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from observability.logging import configure_logging
 
 configure_logging(level=logging.INFO)
 logger = logging.getLogger("prepare_training_data")
+
+
+def _default_model_key() -> str:
+    """Default model key from the registry; incumbent literal only when absent."""
+    try:
+        from registry.loader import default_model_key
+
+        return default_model_key()
+    except (KeyError, OSError, yaml.YAMLError):
+        return "qwen3-14b"
 
 
 RATIO_EPSILON = 1e-9
@@ -240,8 +252,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model-name",
-        default="qwen3-14b",
-        help="Model name for tokenizer selection (from models.yaml)",
+        default=_default_model_key(),
+        help="Model name for tokenizer selection (default: registry default; models.yaml)",
     )
     parser.add_argument(
         "--max-length",

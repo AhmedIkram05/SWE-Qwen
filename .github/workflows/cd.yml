@@ -181,8 +181,14 @@ jobs:
         run: echo "DEPLOY_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
       # Modal 1.5.3 requires -m for module paths (IMPLEMENTATION-LOG 6.7).
+      # Phase 10 (Step 8): serving model + GPU are vars-driven (ServeConfig
+      # reads SERVING_BASE_MODEL; modal_serve resolves SERVING_GPU when set).
+      # Defaults preserve today's qwen3-14b-on-A10G deploy.
       - name: Deploy serving endpoint
         id: deploy
+        env:
+          SERVING_BASE_MODEL: ${{ vars.SERVING_BASE_MODEL || 'qwen3-14b' }}
+          SERVING_GPU: ${{ vars.SERVING_GPU || 'A10G:1' }}
         run: uv run modal deploy -m inference.modal_serve
 
       # Phase 8 (5.6b): report deploy outcome + duration to the infra

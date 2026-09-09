@@ -1008,19 +1008,19 @@ class TestDeploy:
 
     def test_health_check_returns_elapsed_on_green(self, monkeypatch):
         monkeypatch.setattr(deploy_mod, "httpx", self._stub_httpx())
-        assert health_check("http://serve.modal.run", "t0k") == 0.42
+        assert health_check("http://serve.modal.run", "t0k", model="qwen3-14b") == 0.42
 
     def test_health_check_raises_on_liveness_non_200(self, monkeypatch):
         monkeypatch.setattr(deploy_mod, "httpx", self._stub_httpx(liveness=503))
         with pytest.raises(ProbeError, match="503"):
-            health_check("http://serve.modal.run", "t0k")
+            health_check("http://serve.modal.run", "t0k", model="qwen3-14b")
 
     def test_health_check_raises_on_chat_non_200(self, monkeypatch):
         monkeypatch.setattr(
             deploy_mod, "httpx", self._stub_httpx(chat=401, chat_text="unauthorized")
         )
         with pytest.raises(ProbeError, match="401"):
-            health_check("http://serve.modal.run", "t0k")
+            health_check("http://serve.modal.run", "t0k", model="qwen3-14b")
 
     def test_health_check_raises_on_transport_exception(self, monkeypatch):
         class _BrokenHttpx:
@@ -1029,7 +1029,7 @@ class TestDeploy:
 
         monkeypatch.setattr(deploy_mod, "httpx", _BrokenHttpx())
         with pytest.raises(ProbeError, match="conn refused"):
-            health_check("http://serve.modal.run", "t0k")
+            health_check("http://serve.modal.run", "t0k", model="qwen3-14b")
 
     # ── alias sync (spec decision 6: alias failure aborts) ─────────────────
 
@@ -1068,7 +1068,7 @@ class TestDeploy:
             ),
         )
 
-        def _fake_probe(base_url: str, token: str) -> float:
+        def _fake_probe(base_url: str, token: str, *, model: str) -> float:
             calls.append(f"probe:{base_url}:{token}")
             return 0.5
 
@@ -1100,12 +1100,14 @@ class TestLaunchEvictions:
     CMD = ["uv", "run", "eval", "run"]
 
     @staticmethod
-    def _cmd(variant: str, run_id: str, mode: str = "expanded-repos") -> list[str]:
+    def _cmd(
+        variant: str, run_id: str, base: str = "qwen3-14b", mode: str = "expanded-repos"
+    ) -> list[str]:
         return TestLaunchEvictions.CMD + [
             "--mode",
             mode,
             "--models",
-            f"qwen3-14b:{variant}",
+            f"{base}:{variant}",
             "--resume",
             run_id,
         ]
@@ -1152,14 +1154,16 @@ class TestLaunchEvictions:
 
         monkeypatch.setattr(run_mod.subprocess, "Popen", _fake_popen)
         procs = run_mod._launch_evals(
-            [("baseline_14b", "run-1"), ("higher_lr_14b", "run-2")],
+            [
+                ("baseline_14b", "run-1", "qwen3-14b"),
+                ("higher_lr_14b", "run-2", "llama-31-8b"),
+            ],
             mode="expanded-repos",
-            base_model="qwen3-14b",
         )
 
         assert [args for args, _kwargs in spawned] == [
             self._cmd("baseline_14b", "run-1"),
-            self._cmd("higher_lr_14b", "run-2"),
+            self._cmd("higher_lr_14b", "run-2", base="llama-31-8b"),
         ]
         assert len(procs) == 2
         for _args, kwargs in spawned:

@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 
+import yaml
 from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import AutoTokenizer
 
@@ -24,6 +25,17 @@ from evaluation.inference import _file_snippets
 from training.prompt_loader import PromptLoader
 
 logger = logging.getLogger(__name__)
+
+
+def _default_model_name() -> str:
+    """Registry default model key; literal last resort when the registry is absent."""
+    try:
+        from registry.loader import default_model_key
+
+        return default_model_key()
+    except (KeyError, OSError, yaml.YAMLError):
+        return "qwen3-14b"
+
 
 # Max errors to log before suppressing
 _MAX_LOG_ERRORS = 5
@@ -287,7 +299,7 @@ def tokenize_split(
 def tokenize_pipeline(  # noqa: PLR0913, PLR0917
     data_dir: str | Path,
     output_dir: str | Path,
-    model_name: str = "qwen3-30b-a3b",
+    model_name: str = _default_model_name(),
     max_length: int | None = None,
     prompt_template_dir: str | Path | None = None,
     config: DataPipelineConfig | None = None,
@@ -404,8 +416,8 @@ def load_tokenized_shards(
 
 def tokenize_dataset(
     run_id: str | None = None,
-    model_name: str = "qwen3-14b",
-    max_seq_length: int = 8192,
+    model_name: str = _default_model_name(),
+    max_seq_length: int | None = None,
     config: DataPipelineConfig | None = None,
 ) -> dict[str, Any]:
     """Tokenize a completed dataset run.
@@ -414,8 +426,9 @@ def tokenize_dataset(
 
     Args:
         run_id: The run ID of the dataset to tokenize. If None, uses the latest run.
-        model_name: Model name from models.yaml (default: qwen3-14b).
-        max_seq_length: Maximum sequence length for tokenization.
+        model_name: Model name from models.yaml (default: registry default key).
+        max_seq_length: Maximum sequence length for tokenization; None reads
+            the model's ``context_window`` from the registry.
         config: Optional pipeline config for GCS upload.
 
     Returns:
@@ -448,7 +461,7 @@ def tokenize_dataset(
         data_dir=data_dir,
         output_dir=output_dir,
         model_name=model_name,
-        max_length=8192,  # Use context window from model config in qlora_config
+        max_length=max_seq_length,  # None → context_window from the registry
         config=config,
         run_id=run_id,
     )

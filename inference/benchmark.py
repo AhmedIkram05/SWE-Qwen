@@ -218,10 +218,20 @@ def sweep(
             wandb.finish()
 
 
+def _default_model() -> str:
+    """Registry default model key; literal last resort when the registry is absent."""
+    try:
+        from registry.loader import default_model_key
+
+        return default_model_key()
+    except Exception:  # registry absent/invalid at CLI import time — benchmark still runs
+        return "qwen3-14b"
+
+
 @app.command()
 def benchmark(  # noqa: PLR0913, PLR0917
     requests: int = typer.Option(10, help="requests per worker per concurrency level"),
-    model: str = typer.Option("qwen3-14b", help="model id to benchmark"),
+    model: str = typer.Option(_default_model(), help="model id to benchmark"),
     gpu_rate: float = typer.Option(
         1.0, "--gpu-rate", help="A10G hourly rate ($) for the cost estimate"
     ),

@@ -39,7 +39,7 @@ except ImportError:
     _unsloth_patched = False
 
 from observability.logging import configure_logging
-from training.qlora_config import resolve_gpu_type
+from training.qlora_config import default_model_name, resolve_gpu_type
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,8 @@ training_image = (
     # Copy local source into the image — must be LAST
     .add_local_dir(str(_TRAINING_DIR), remote_path="/root/training", copy=True)
     .add_local_dir(str(_CONFIG_DIR), remote_path="/root/config", copy=True)
+    # merged model registry (qlora_config imports registry.loader)
+    .add_local_dir(str(_REPO_ROOT / "registry"), remote_path="/root/registry", copy=True)
     .add_local_dir(str(_REPO_ROOT / "observability"), remote_path="/root/observability", copy=True)
 )
 
@@ -194,7 +196,7 @@ models_volume = modal.Volume.from_name("swe-qwen-models", create_if_missing=True
     ),
 )
 def train_qlora(  # noqa: PLR0913, PLR0917
-    model_name: str = "qwen3-14b",
+    model_name: str | None = None,
     variant: str = "baseline_14b",
     run_id: str = "expanded-repos",
     data_dir: str = "/data/tokenized",
@@ -232,6 +234,8 @@ def train_qlora(  # noqa: PLR0913, PLR0917
     Returns:
         Dict with training results.
     """
+    model_name = model_name or default_model_name()
+
     # Validate W&B API key is available (injected via Modal secret)
     configure_logging()
     api_key = os.environ.get("WANDB_API_KEY")
@@ -329,12 +333,12 @@ def train_qlora(  # noqa: PLR0913, PLR0917
     ],
     timeout=60,
 )
-def get_gpu_for_model(model_name: str = "qwen3-14b") -> str:
+def get_gpu_for_model(model_name: str | None = None) -> str:
     """Return the Modal GPU spec for a given model.
 
     Used by orchestration scripts to determine GPU allocation before launching.
     """
-    return resolve_gpu_type(model_name)
+    return resolve_gpu_type(model_name or default_model_name())
 
 
 # ── Alias for orchestration scripts ───────────────────────────────────────────

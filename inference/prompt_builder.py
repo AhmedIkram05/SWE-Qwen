@@ -35,7 +35,6 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PROMPTS_DIR = _REPO_ROOT / "training" / "prompts"
 
 DEFAULT_TEMPLATE = "chat"
-_DEFAULT_HF_ID = "Qwen/Qwen3-14B"
 
 _DIFF_FILE_RE = re.compile(r"^diff --git a/\S+ b/(\S+)", re.MULTILINE)
 
@@ -65,32 +64,88 @@ def _eval() -> Any:
 # 9851 chars of "Okay, let's see. The problem is that when using
 # GaussianMixture..." and extract_patch got nothing).  The only reliable gate
 # is the model's OWN chat template: with ``enable_thinking=False`` it
-# pre-fills an empty ``<think>\n\n</think>`` block after
+# pre-fills an empty `` thinking\n\n response`` block after
 # ``<|im_start|>assistant``, which Qwen3 is trained to treat as "answer
 # directly".  Raw strings passed to ``llm.generate`` bypass the chat
 # template, so every rendered prompt is re-wrapped through
 # ``tokenizer.apply_chat_template`` first.  (vLLM's ``LLM.generate`` has no
 # chat_template_kwargs by design; ``LLM.chat`` does, but this keeps the
 # existing LoRA path untouched.)
+#
+# Both Qwen gates now key off the registry's per-model
+# ``prompt_behavior.no_think`` flag (Phase 10 Step 4): flagged models get the
+# ``enable_thinking=False`` kwarg and the ``/no_think`` soft-switch; other
+# models get a plain template apply — the kwarg raises on non-Qwen
+# tokenizers.  All callers (serving + eval harness) route through the helpers
+# below, so the flag is read in exactly one place.
 _TOKENIZER_CACHE: dict[str, Any] = {}
 
 
-def no_think_wrap(hf_id: str, prompt: str) -> str:
-    """Wrap a rendered prompt in the model's chat template, thinking OFF."""
+def no_think_flag(hf_id: str) -> bool:
+    """Registry ``prompt_behavior.no_think`` flag for *hf_id*'s entry.
+
+    False when the entry or the flag is absent — unknown models take the
+    plain path, since the Qwen-only gates raise on other tokenizers.
+    """
+    state = _eval()
+    from registry.loader import load_raw_models
+
+    for entry in load_raw_models(repo_root=state._REPO_ROOT).values():
+        if entry.get("hf_id") == hf_id:
+            prompt_behavior = entry.get("prompt_behavior") or {}
+            return bool(prompt_behavior.get("no_think", False))
+    return False
+
+
+def apply_no_think_raw(hf_id: str, prompt: str) -> str:
+    """Gate the raw-continuation prompt used with LoRA adapters.
+
+    Inserts the Qwen3 ``/no_think`` soft switch before the first
+    ``### Response`` when the registry flag is set; passthrough otherwise.
+    """
+    if no_think_flag(hf_id):
+        return prompt.replace("### Response", "/no_think\n### Response", 1)
+    return prompt
+
+
+def _apply_template(hf_id: str, messages: list[dict[str, str]]) -> str:
+    """Apply the cached tokenizer's chat template, gated by the registry flag."""
     state = _eval()
     if hf_id not in state._TOKENIZER_CACHE:
         from transformers import AutoTokenizer
 
         state._TOKENIZER_CACHE[hf_id] = AutoTokenizer.from_pretrained(hf_id)
+    kwargs: dict[str, Any] = {"tokenize": False, "add_generation_prompt": True}
+    if no_think_flag(hf_id):
+        kwargs["enable_thinking"] = False
     return state._TOKENIZER_CACHE[hf_id].apply_chat_template(  # type: ignore[no-any-return]
-        [{"role": "user", "content": prompt}],
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
+        messages, **kwargs
     )
 
 
+def no_think_wrap(hf_id: str, prompt: str) -> str:
+    """Wrap a rendered prompt in the model's chat template.
+
+    ``enable_thinking=False`` is applied only when the model's registry entry
+    flags ``no_think``; otherwise this is a plain template application.
+    """
+    return _apply_template(hf_id, [{"role": "user", "content": prompt}])
+
+
 _no_think_wrap = no_think_wrap  # backward-compat alias
+
+
+def chat_wrap(hf_id: str, system_prompt: str, user_text: str) -> str:
+    """Chat-template wrap for the serving message shape (system + user).
+
+    Same registry-gated template application as ``no_think_wrap``, used by
+    ``serve._build_prompt``'s base-model path.
+    """
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_text})
+    return _apply_template(hf_id, messages)
 
 
 def _files_from_diff(patch: str) -> list[str]:
@@ -362,29 +417,31 @@ def render_patch_prompt(
 def resolve_hf_id(model_name: str = "qwen3-14b") -> str:
     """Resolve a ``config/models.yaml`` registry key to a Hugging Face model ID.
 
+    Reads through ``registry.loader`` (tracked registry ← user overlay), so
+    the user overlay applies here too.  Step 9: no silent fallback — an
+    unknown key raises ``KeyError`` and a missing registry file raises
+    ``OSError``; the caller (serving or eval) fails loud.
+
     Args:
         model_name: Key from ``models.yaml``, or a full ``owner/model`` ID.
 
     Returns:
         The Hugging Face model ID; a value containing ``/`` is returned as-is.
+
+    Raises:
+        KeyError: *model_name* is not in the merged registry (or has no ``hf_id``).
+        OSError: the tracked registry file does not exist.
     """
     if "/" in model_name:
         return model_name
-    try:
-        import yaml
-    except ImportError:
-        logger.warning("pyyaml not available — cannot resolve %s from models.yaml", model_name)
-        return _DEFAULT_HF_ID
     state = _eval()
-    path = state._REPO_ROOT / "config" / "models.yaml"
-    if not path.is_file():
-        logger.warning("model registry not found at %s — using default %s", path, _DEFAULT_HF_ID)
-        return _DEFAULT_HF_ID
-    data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    models: dict[str, Any] = data.get("models", {}) or {}
-    entry: dict[str, Any] = models.get(model_name, {}) or {}
-    hf_id: str = entry.get("hf_id", _DEFAULT_HF_ID) or _DEFAULT_HF_ID
-    return hf_id
+    from registry.loader import load_raw_models
+
+    entry = load_raw_models(repo_root=state._REPO_ROOT).get(model_name)
+    hf_id = (entry or {}).get("hf_id")
+    if not hf_id:
+        raise KeyError(f"unknown registry key {model_name!r} (no hf_id in config/models.yaml)")
+    return hf_id  # type: ignore[no-any-return]
 
 
 def resolve_adapter_path(variant: str, config: EvalConfig | None = None) -> str | None:

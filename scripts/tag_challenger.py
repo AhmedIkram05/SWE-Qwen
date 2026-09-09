@@ -28,7 +28,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", default="swe-qwen")
     args = parser.parse_args(argv)
 
-    artifact_name = f"model-qwen3-14b-{args.variant}"
+    from evaluation.config import EvalConfig
+
+    # Artifact naming follows the registry-derived pattern (Phase 10 Step 7).
+    artifact_name = EvalConfig().lora_artifact_pattern.format(variant=args.variant)
 
     # Lazy import: module stays import-safe offline (house style, log_deploy.py).
     try:

@@ -24,10 +24,29 @@ import logging
 import time
 from pathlib import Path
 
+import yaml
+
 from observability.logging import configure_logging
 
 configure_logging(level=logging.INFO)
 logger = logging.getLogger("local_e2e_smoke")
+
+
+def _default_model_key(fallback: str) -> str:
+    """Registry default model key; *fallback* literal only when registry absent."""
+    try:
+        from registry.loader import default_model_key
+
+        return default_model_key()
+    except (KeyError, OSError, yaml.YAMLError):
+        return fallback
+
+
+# Ollama tags are their own namespace (registry keys are NOT pullable tags),
+# so the dev-model default stays a literal Ollama tag; the eval-model default
+# is registry-derived.
+_DEFAULT_OLLAMA_MODEL: str = "qwen2.5-coder:7b"
+_DEFAULT_EVAL_MODEL: str = _default_model_key("qwen3-14b")
 
 
 def main() -> None:  # noqa: PLR0915
@@ -39,7 +58,9 @@ def main() -> None:  # noqa: PLR0915
         ),
     )
     parser.add_argument("--sample", type=int, default=1, help="Records to test")
-    parser.add_argument("--model", default="qwen2.5-coder:7b", help="Ollama model tag")
+    parser.add_argument(
+        "--model", default=_DEFAULT_OLLAMA_MODEL, help="Ollama model tag (default: registry key)"
+    )
     parser.add_argument("--ollama-url", default="http://localhost:11434", help="Ollama base URL")
     parser.add_argument("--dry-run", action="store_true", help="Data-path validation only")
     parser.add_argument(
@@ -115,7 +136,7 @@ def main() -> None:  # noqa: PLR0915
     start = time.monotonic()
     result = harness.run_example(
         example,
-        model_name="qwen3-14b",
+        model_name=_DEFAULT_EVAL_MODEL,
         variant="baseline_14b",
         prompt_template="chat",
     )

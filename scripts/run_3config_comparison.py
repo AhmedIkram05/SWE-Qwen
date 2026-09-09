@@ -28,6 +28,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from observability.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,16 @@ _WANDB_RETRY_DELAY = 30  # seconds between W&B API retries
 # ── W&B entity resolution ────────────────────────────────────────────────────
 
 
+def _default_model_key() -> str:
+    """Default model key from the registry; incumbent literal only when absent."""
+    try:
+        from registry.loader import default_model_key
+
+        return default_model_key()
+    except (KeyError, OSError, yaml.YAMLError):
+        return "qwen3-14b"
+
+
 def _resolve_wandb_entity() -> str:
     """Resolve W&B entity from API credentials."""
     import wandb
@@ -66,7 +78,10 @@ def _wandb_project_entity() -> str:
 
 # Known artifact name pattern — deterministic from variant name
 def _artifact_name(variant: str) -> str:
-    return f"model-qwen3-14b-{variant}"
+    from evaluation.config import EvalConfig
+
+    # Registry-derived pattern (Phase 10 Step 9-4), env-overridable via EVAL_.
+    return EvalConfig().lora_artifact_pattern.format(variant=variant)
 
 
 # ── GCS buckets (same bucket/dataset as modal_train.py) ──────────────────────
@@ -750,7 +765,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 — 63 stmts for sequential orches
 
     # Common kwargs passed to every train_qlora call
     train_kwargs = {
-        "model_name": "qwen3-14b",
+        "model_name": _default_model_key(),
         "run_id": args.run_id,
         "data_dir": "/data/tokenized",
         "gpu_type": None,  # auto-resolve from models.yaml → A100-80GB

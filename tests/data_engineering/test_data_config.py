@@ -7,6 +7,7 @@ from unittest import mock
 import pytest
 
 from data_engineering.config import DataPipelineConfig
+from registry.loader import ModelSpec
 
 
 class TestDataPipelineConfig:
@@ -145,3 +146,52 @@ class TestDataPipelineConfig:
         cfg = DataPipelineConfig()
         missing = cfg.validate_auth()
         assert isinstance(missing, list)
+
+
+class TestTokenizeRegistryResolution:
+    """PHASE-10 Steps 2/9-3: registry-first, env above, literals last resort."""
+
+    def test_defaults_follow_registry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DATA_PIPELINE_TOKENIZE_MODEL", raising=False)
+        monkeypatch.delenv("DATA_PIPELINE_TOKENIZE_MAX_LENGTH", raising=False)
+        cfg = DataPipelineConfig()
+        assert cfg.tokenize_model == "qwen3-14b"  # registry default: true
+        assert cfg.tokenize_max_length == 32768  # registry context_window
+
+    def test_env_wins_over_registry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DATA_PIPELINE_TOKENIZE_MODEL", "qwen3-30b-a3b")
+        monkeypatch.setenv("DATA_PIPELINE_TOKENIZE_MAX_LENGTH", "1024")
+        cfg = DataPipelineConfig()
+        assert cfg.tokenize_model == "qwen3-30b-a3b"
+        assert cfg.tokenize_max_length == 1024
+
+    def test_fresh_model_context_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        spec = ModelSpec.model_validate(
+            {
+                "hf_id": "meta-llama/Fresh-8B",
+                "context_window": 8192,
+                "target_modules": ["q_proj"],
+            }
+        )
+        monkeypatch.setattr("data_engineering.config.load_models", lambda: {"fresh": spec})
+        monkeypatch.setattr("data_engineering.config.default_model_key", lambda: "fresh")
+        cfg = DataPipelineConfig()
+        assert cfg.tokenize_model == "fresh"
+        assert cfg.tokenize_max_length == 8192
+
+    def test_unknown_model_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DATA_PIPELINE_TOKENIZE_MODEL", "does-not-exist")
+        with pytest.raises(ValueError, match="unknown model 'does-not-exist'"):
+            DataPipelineConfig()
+
+    def test_registry_missing_uses_literals(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fail(*_args, **_kwargs):
+            raise OSError("no registry")
+
+        monkeypatch.setattr("data_engineering.config.load_models", fail)
+        monkeypatch.setattr("data_engineering.config.default_model_key", fail)
+        monkeypatch.delenv("DATA_PIPELINE_TOKENIZE_MODEL", raising=False)
+        monkeypatch.delenv("DATA_PIPELINE_TOKENIZE_MAX_LENGTH", raising=False)
+        cfg = DataPipelineConfig()
+        assert cfg.tokenize_model == "qwen3-14b"
+        assert cfg.tokenize_max_length == 4096

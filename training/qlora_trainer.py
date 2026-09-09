@@ -28,7 +28,12 @@ from trl.trainer.sft_trainer import SFTTrainer
 
 from training.callbacks import WandbCheckpointCallback, WandbLoggingCallback
 from training.prompt_loader import PromptLoader
-from training.qlora_config import GPU_MAP, _get_model_config, build_qlora_config
+from training.qlora_config import (
+    GPU_MAP,
+    _get_model_config,
+    build_qlora_config,
+    default_model_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +63,7 @@ class QLoRATrainer:
 
     def __init__(  # noqa: PLR0913, PLR0917
         self,
-        model_name: str = "qwen3-14b",
+        model_name: str | None = None,
         variant: str = "baseline_14b",
         data_dir: str = "data/tokenized",
         output_dir: str = "/tmp/qlora-output",
@@ -74,7 +79,7 @@ class QLoRATrainer:
         tokenizer: PreTrainedTokenizer | None = None,
         max_train_samples: int | None = None,
     ):
-        self.model_name = model_name
+        self.model_name = model_name or default_model_name()
         self.variant = variant
         self.hf_id = hf_id
         self.data_dir = Path(data_dir)

@@ -16,13 +16,14 @@ import yaml
 from peft import LoraConfig
 from trl.trainer.sft_config import SFTConfig
 
+from registry.loader import default_model_key, get_model_config, load_models
+
 logger = logging.getLogger(__name__)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CONFIG_DIR = _REPO_ROOT / "config"
-_MODELS_PATH = _CONFIG_DIR / "models.yaml"
 _VARIANTS_PATH = _CONFIG_DIR / "qlora_variants.yaml"
 
 # ── Model → Modal GPU mapping ────────────────────────────────────────────────
@@ -44,12 +45,10 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _get_model_config(model_name: str) -> dict[str, Any]:
-    """Load ``models.yaml`` and return the entry for *model_name*."""
-    data = _load_yaml(_MODELS_PATH)
-    models: dict = data.get("models", {})
-    if model_name not in models:
-        raise KeyError(f"Unknown model {model_name!r}. Available: {list(models.keys())}")
-    return dict(models[model_name])
+    """Return the merged registry entry (``config/models.yaml`` ← user overlay)
+    for *model_name*.
+    """
+    return get_model_config(model_name)
 
 
 def _get_variant_config(variant: str) -> dict[str, Any]:
@@ -126,7 +125,7 @@ GPU_MEMORY_OVERRIDES: dict[str, dict[str, Any]] = {
 
 def build_qlora_config(
     variant: str,
-    model_name: str = "qwen3-14b",
+    model_name: str | None = None,
     output_dir: str | None = None,
     run_name: str | None = None,
     gpu_type: str | None = None,
@@ -136,6 +135,7 @@ def build_qlora_config(
     Args:
         variant: Key from ``qlora_variants.yaml`` (e.g. ``"baseline"``).
         model_name: Key from ``models.yaml`` (e.g. ``"qwen3-14b"``).
+            Defaults to the registry default model.
         output_dir: Override output directory (default ``/tmp/qlora-{variant}``).
         run_name: W&B run name (auto-generated if ``None``).
         gpu_type: Modal GPU spec (e.g. ``"A10G:1"``, ``"A100:1"``, ``"H100:1"``).
@@ -145,6 +145,7 @@ def build_qlora_config(
         Tuple of ``(LoraConfig, SFTConfig)`` ready for ``QLoRATrainer``
         or ``SFTTrainer``.
     """
+    model_name = model_name or default_model_name()
     model_cfg = _get_model_config(model_name)
     var_cfg = _get_variant_config(variant)
 
@@ -208,10 +209,47 @@ def resolve_gpu_type(model_name: str, prefer_fallback: bool = False) -> str:
     return GPU_MAP.get(gpu_label, gpu_label)
 
 
+# ── Device budget per GPU tier ────────────────────────────────────────────────
+# VRAM cap (per device) + CPU spill for model loading, keyed by the registry
+# gpu_mapping label (same labels GPU_MAP resolves from). A10G values doubled as
+# the default for unknown tiers.
+DEVICE_MEMORY_BUDGETS: dict[str, dict[Any, str]] = {
+    "a10g-24gb": {0: "18GiB", "cpu": "32GiB"},
+    "a100-80gb": {0: "70GiB", "cpu": "64GiB"},
+    "h100-80gb": {0: "70GiB", "cpu": "64GiB"},
+    "a100-40gb": {0: "34GiB", "cpu": "48GiB"},
+}
+
+
+def resolve_device_memory(
+    model_cfg: dict[str, Any], prefer_fallback: bool = False
+) -> dict[Any, str]:
+    """Device-map memory budget for ``model_cfg``'s resolved GPU tier.
+
+    Mirrors :func:`resolve_gpu_type`'s gpu_mapping resolution (including
+    ``prefer_fallback``): the selected tier label picks the budget, falling
+    back to the A10G-shaped values when the tier is unknown.
+    """
+    mapping: dict[str, str] = model_cfg.get("gpu_mapping", {}) or {}
+    label = (
+        (mapping.get("fallback") or mapping.get("primary"))
+        if prefer_fallback
+        else (mapping.get("primary") or mapping.get("fallback"))
+    ) or "a10g-24gb"
+    return dict(DEVICE_MEMORY_BUDGETS.get(label, DEVICE_MEMORY_BUDGETS["a10g-24gb"]))
+
+
+def default_model_name() -> str:
+    """Registry default model key; literal last resort if the registry is absent."""
+    try:
+        return default_model_key()
+    except (OSError, KeyError, yaml.YAMLError):
+        return "qwen3-14b"
+
+
 def list_models() -> list[str]:
     """Return all registered model names."""
-    data = _load_yaml(_MODELS_PATH)
-    return list(data.get("models", {}).keys())
+    return list(load_models().keys())
 
 
 def list_variants() -> list[str]:
@@ -222,7 +260,7 @@ def list_variants() -> list[str]:
 
 def build_model_and_peft(
     variant: str,
-    model_name: str = "qwen3-14b",
+    model_name: str | None = None,
     max_seq_length: int = 8192,
     use_flash_attn: bool = True,
     gpu_type: str | None = None,
@@ -234,7 +272,7 @@ def build_model_and_peft(
 
     Args:
         variant: Key from qlora_variants.yaml
-        model_name: Key from models.yaml
+        model_name: Key from models.yaml (defaults to the registry default)
         max_seq_length: Max sequence length (overrides variant config)
         use_flash_attn: Whether to use flash attention
         gpu_type: Modal GPU spec (e.g. ``"A10G:1"``). When provided, applies
@@ -245,6 +283,7 @@ def build_model_and_peft(
     """
     from training.unsloth_factory import build_model_and_peft as _build
 
+    model_name = model_name or default_model_name()
     model_cfg = _get_model_config(model_name)
     var_cfg = _get_variant_config(variant)
 

@@ -27,7 +27,11 @@ from pathlib import Path
 
 import typer
 
-from data_engineering.config import DataPipelineConfig
+from data_engineering.config import (
+    DataPipelineConfig,
+    default_tokenize_max_length,
+    default_tokenize_model,
+)
 from data_engineering.run_pipeline import run_pipeline
 from data_engineering.schema import PipelineResult
 from data_engineering.tokenize import tokenize_dataset
@@ -153,14 +157,14 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         min=1000,
     ),
     tokenize_model: str = typer.Option(
-        "qwen3-14b",
+        default_tokenize_model(),
         "--tokenize-model",
         help="Model name from models.yaml for tokenization",
     ),
     tokenize_max_length: int = typer.Option(
-        4096,
+        default_tokenize_max_length(),
         "--tokenize-max-length",
-        help="Maximum sequence length for tokenization",
+        help="Maximum sequence length for tokenization (registry context_window)",
         min=512,
         max=32768,
     ),
@@ -222,7 +226,7 @@ def tokenize(  # noqa: PLR0913 -- typer CLI dispatcher; Option() calls required 
         help="Run ID of the dataset to tokenize (defaults to latest)",
     ),
     model_name: str = typer.Option(
-        "qwen3-14b",
+        default_tokenize_model(),
         "--model-name",
         help="Model name from models.yaml",
     ),

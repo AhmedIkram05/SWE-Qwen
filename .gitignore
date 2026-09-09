@@ -233,6 +233,9 @@ wandb/
 .modal/
 models/
 
+# User model registry overlay (gitignored by design)
+config/models.user.yaml
+
 
 # Service account keys (GCP)
 *-sa-key.json

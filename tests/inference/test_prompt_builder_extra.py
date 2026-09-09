@@ -66,6 +66,70 @@ class TestNoThinkWrap:
         assert prompt_builder.no_think_wrap("my/hf2", "hello") == "FROM_HF"
         assert "my/hf2" in prompt_builder._TOKENIZER_CACHE
 
+    @pytest.fixture
+    def flagged_registry(self, monkeypatch, tmp_path):
+        """Tmp registry with one flagged and one unflagged model entry."""
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "models.yaml").write_text(
+            "models:\n"
+            "  qwen3-14b:\n"
+            '    hf_id: "Qwen/Qwen3-14B"\n'
+            "    context_window: 32768\n"
+            '    target_modules: ["q_proj"]\n'
+            "    prompt_behavior:\n"
+            "      no_think: true\n"
+            "  thinky-1b:\n"
+            '    hf_id: "Thinky/Thinky-1B"\n'
+            "    context_window: 2048\n"
+            '    target_modules: ["q_proj"]\n'
+            "    prompt_behavior:\n"
+            "      no_think: false\n"
+        )
+        monkeypatch.setattr(prompt_builder, "_REPO_ROOT", tmp_path)
+        # Pin _eval to prompt_builder itself: once evaluation.inference is
+        # imported (always true in a full-suite session), `state._REPO_ROOT`
+        # would ignore the tmp registry and read the real one.
+        monkeypatch.setattr(prompt_builder, "_eval", lambda: prompt_builder)
+
+    def test_enable_thinking_false_when_flagged(self, flagged_registry, monkeypatch):
+        captured: dict = {}
+
+        class _Tok:
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return "WRAPPED"
+
+        monkeypatch.setitem(prompt_builder._TOKENIZER_CACHE, "Qwen/Qwen3-14B", _Tok())
+        assert prompt_builder.no_think_wrap("Qwen/Qwen3-14B", "hello") == "WRAPPED"
+        assert captured["kwargs"]["enable_thinking"] is False
+        assert captured["kwargs"]["tokenize"] is False
+
+    def test_plain_template_when_not_flagged(self, flagged_registry, monkeypatch):
+        captured: dict = {}
+
+        class _Tok:
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return "WRAPPED"
+
+        monkeypatch.setitem(prompt_builder._TOKENIZER_CACHE, "Thinky/Thinky-1B", _Tok())
+        assert prompt_builder.no_think_wrap("Thinky/Thinky-1B", "hello") == "WRAPPED"
+        assert "enable_thinking" not in captured["kwargs"]
+        assert captured["kwargs"]["tokenize"] is False
+
+
+class TestApplyNoThinkRaw:
+    def test_inserts_switch_when_flagged(self, monkeypatch):
+        monkeypatch.setattr(prompt_builder, "no_think_flag", lambda hf_id: True)
+        assert (
+            prompt_builder.apply_no_think_raw("m", "A\n### Response\nB")
+            == "A\n/no_think\n### Response\nB"
+        )
+
+    def test_passthrough_when_not_flagged(self, monkeypatch):
+        monkeypatch.setattr(prompt_builder, "no_think_flag", lambda hf_id: False)
+        assert prompt_builder.apply_no_think_raw("m", "A\n### Response\nB") == "A\n### Response\nB"
+
 
 class TestFilesFromDiff:
     def test_empty_patch(self):
@@ -278,13 +342,14 @@ class TestResolveHfId:
     def test_full_hf_id_passthrough(self):
         assert prompt_builder.resolve_hf_id("Qwen/Qwen3-14B") == "Qwen/Qwen3-14B"
 
-    def test_missing_pyyaml_returns_default(self, mocker):
-        mocker.patch.dict(sys.modules, {"yaml": None})
-        assert prompt_builder.resolve_hf_id("qwen3-99b") == prompt_builder._DEFAULT_HF_ID
+    def test_unknown_key_raises(self):
+        with pytest.raises(KeyError, match="unknown registry key"):
+            prompt_builder.resolve_hf_id("qwen3-99b")
 
-    def test_missing_registry_file_returns_default(self, monkeypatch, tmp_path):
+    def test_missing_registry_file_raises(self, monkeypatch, tmp_path):
         monkeypatch.setattr(prompt_builder, "_REPO_ROOT", tmp_path)
-        assert prompt_builder.resolve_hf_id("qwen3-14b") == prompt_builder._DEFAULT_HF_ID
+        with pytest.raises(OSError):
+            prompt_builder.resolve_hf_id("qwen3-14b")
 
     def test_registry_entry(self, monkeypatch, tmp_path):
         (tmp_path / "config").mkdir()
@@ -293,6 +358,15 @@ class TestResolveHfId:
         )
         monkeypatch.setattr(prompt_builder, "_REPO_ROOT", tmp_path)
         assert prompt_builder.resolve_hf_id("qwen3-14b") == "OWNER/MODEL"
+
+    def test_registry_entry_without_hf_id_raises(self, monkeypatch, tmp_path):
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "models.yaml").write_text(
+            "models:\n  qwen3-14b:\n    context_window: 32768\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(prompt_builder, "_REPO_ROOT", tmp_path)
+        with pytest.raises(KeyError, match="unknown registry key"):
+            prompt_builder.resolve_hf_id("qwen3-14b")
 
 
 class TestResolveAdapterPath:

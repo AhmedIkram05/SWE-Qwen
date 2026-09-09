@@ -36,6 +36,7 @@ from evaluation.schema import (
 from evaluation.schema import (
     TestResult as _TestResult,  # noqa: N813 — avoid pytest Test* collection
 )
+from registry.loader import ModelSpec
 
 try:
     from evaluation.test_runner import classify_test_outcomes as _classify_impl
@@ -336,6 +337,38 @@ class TestEvalConfig:
         cfg = EvalConfig()
         assert cfg.ci_sample_size == 10
         assert cfg.checkpoint_dir == Path("data/custom_checkpoints")
+
+    def test_env_wins_over_registry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """PHASE-10 Step 2: env values beat the registry-derived defaults."""
+        monkeypatch.setenv("EVAL_BASELINE_MODEL", "env/Base-Model")
+        monkeypatch.setenv("EVAL_LORA_ARTIFACT_PATTERN", "env-{variant}")
+        cfg = EvalConfig()
+        assert cfg.baseline_model == "env/Base-Model"
+        assert cfg.lora_artifact_pattern == "env-{variant}"
+
+    def test_registry_missing_uses_literals(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fail(*_args, **_kwargs):
+            raise OSError("no registry")
+
+        monkeypatch.setattr("evaluation.config.load_models", fail)
+        monkeypatch.setattr("evaluation.config.default_model_key", fail)
+        cfg = EvalConfig()
+        assert cfg.baseline_model == "Qwen/Qwen3-14B"
+        assert cfg.lora_artifact_pattern == "model-qwen3-14b-{variant}"
+
+    def test_fresh_default_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        spec = ModelSpec.model_validate(
+            {
+                "hf_id": "meta-llama/Fresh-8B",
+                "context_window": 8192,
+                "target_modules": ["q_proj"],
+            }
+        )
+        monkeypatch.setattr("evaluation.config.load_models", lambda: {"fresh": spec})
+        monkeypatch.setattr("evaluation.config.default_model_key", lambda: "fresh")
+        cfg = EvalConfig()
+        assert cfg.baseline_model == "meta-llama/Fresh-8B"
+        assert cfg.lora_artifact_pattern == "model-fresh-{variant}"
 
 
 # ── metrics: compute_f2p ──────────────────────────────────────────────────

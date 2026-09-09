@@ -172,38 +172,38 @@ class TestMain:
         return httpx_fake
 
     def test_main_success(self, mod, env, fake_sdks, capsys):
-        assert mod.main() == 0
+        assert mod.main([]) == 0
         assert "preflight passed" in capsys.readouterr().out
 
     def test_main_health_raises(self, mod, env, fake_sdks):
         fake_sdks.Client.return_value.__enter__.return_value.get.side_effect = RuntimeError(
             "conn refused"
         )
-        assert mod.main() == 1
+        assert mod.main([]) == 1
 
     def test_main_health_bad_status(self, mod, env, fake_sdks):
         fake_sdks.Client.return_value.__enter__.return_value.get.return_value.status_code = 500
-        assert mod.main() == 1
+        assert mod.main([]) == 1
 
     def test_main_health_bad_body(self, mod, env, fake_sdks):
         fake_sdks.Client.return_value.__enter__.return_value.get.return_value.json.return_value = {
             "status": "down"
         }
-        assert mod.main() == 1
+        assert mod.main([]) == 1
 
     def test_main_non_stream_fails(self, mod, env, fake_sdks, mocker):
         # base model check passes, LoRA check fails → return 1
         mocker.patch.object(mod, "_non_stream", side_effect=[True, False])
-        assert mod.main() == 1
+        assert mod.main([]) == 1
 
     def test_main_non_stream_base_fails(self, mod, env, fake_sdks, mocker):
         mocker.patch.object(mod, "_non_stream", return_value=False)
-        assert mod.main() == 1
+        assert mod.main([]) == 1
 
     def test_main_stream_fails(self, mod, env, fake_sdks, mocker):
         mocker.patch.object(mod, "_non_stream", return_value=True)
         mocker.patch.object(mod, "_stream", return_value=False)
-        assert mod.main() == 1
+        assert mod.main([]) == 1
 
     def test_import_inserts_repo_root(self, mocker):
         """Module-level bootstrap re-inserts the repo root on sys.path."""

@@ -22,8 +22,9 @@ from inference.openai_compat import (
     iter_chunks,
     resolve_engine_model,
 )
+from registry.loader import ModelSpec
 
-_BASE_HF_ID = "Qwen/Qwen3-14B"  # resolve_hf_id("qwen3-14b") from config/models.yaml
+_BASE_HF_ID = prompt_builder.resolve_hf_id("qwen3-14b")  # registry-driven (config/models.yaml)
 _FAKE_ADAPTER = "/tmp/fake-adapter"
 
 
@@ -98,6 +99,34 @@ class TestResolveEngineModel:
         assert resolve_engine_model("baseline_14b", ServeConfig()) == (
             _BASE_HF_ID,
             "qwen3-14b-baseline_14b",
+            None,
+        )
+
+    def test_fresh_model_bare_base_serves_plain(self, monkeypatch):
+        # A freshly registered model (no variants, empty default_variant)
+        # must serve the plain base — no ModelNotFoundError, no LoRA.
+        _patch_adapter(monkeypatch)
+        for var in (
+            "SERVING_BASE_MODEL",
+            "SERVING_SERVING_HF_ID",
+            "SERVING_QUANTIZATION",
+            "SERVING_VARIANTS",
+            "SERVING_DEFAULT_VARIANT",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        spec = ModelSpec.model_validate(
+            {
+                "hf_id": "meta-llama/Fresh-8B",
+                "context_window": 8192,
+                "target_modules": ["q_proj"],
+            }
+        )
+        monkeypatch.setattr("inference.config.load_models", lambda: {"fresh": spec})
+        monkeypatch.setattr("inference.config.default_model_key", lambda: "fresh")
+        monkeypatch.setattr(prompt_builder, "resolve_hf_id", lambda name: "meta-llama/Fresh-8B")
+        assert resolve_engine_model("fresh", ServeConfig()) == (
+            "meta-llama/Fresh-8B",
+            None,
             None,
         )
 

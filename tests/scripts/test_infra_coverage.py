@@ -16,6 +16,11 @@ from unittest import mock
 
 import pytest
 
+# Hoisted so `training` (and its real trl/peft/transformers deps) is cached
+# at collection time — TestBuildFallback patches sys.modules["transformers"]/
+# ["peft"] and importing `training` under that patch poisons trl's dataclasses.
+from training.unsloth_factory import _build_fallback
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -304,9 +309,9 @@ class TestBuildFallback:
     def test_bnb_config_fp4(self, mocker):
         deps = self._mock_fallback_deps(mocker)
 
-        from training.unsloth_factory import _build_fallback
-
-        model_cfg = {"hf_id": "Qwen/Qwen3-14B"}
+        # Mirror config/models.yaml: qwen3-14b carries the fp4 fallback
+        # (CUDA illegal-memory-access workaround); bare cfg defaults to nf4.
+        model_cfg = {"hf_id": "Qwen/Qwen3-14B", "fallback_quantization": "fp4"}
         variant_cfg = {"lora": {"r": 8}}
         _build_fallback(model_cfg, variant_cfg)
 
