@@ -13,13 +13,15 @@ import sys
 import wandb
 
 
-def init_wandb_project(
+def init_wandb_project(  # noqa: PLR0913 — one-shot infra script; metadata knobs are CLI args
     project_name: str = "swe-qwen",
     entity: str | None = None,
     description: str | None = None,
     tags: list[str] | None = None,
     config: dict[str, object] | None = None,
-):
+    *,
+    model_family: str = "qwen",
+) -> bool:
     """
     Initialize W&B project with standard configuration.
 
@@ -65,7 +67,7 @@ def init_wandb_project(
         {
             "project": project_name,
             "framework": "pytorch",
-            "model_family": "qwen",
+            "model_family": model_family,
             "task": "code-generation",
         }
     )
@@ -90,7 +92,7 @@ def init_wandb_project(
     return True
 
 
-def create_sweep_config(project_name: str, entity: str | None = None):
+def create_sweep_config(project_name: str, entity: str | None = None) -> str:
     """Create a hyperparameter sweep configuration."""
     sweep_config = {
         "name": "swe-qwen-lora-sweep",
@@ -149,7 +151,7 @@ def _registry_path(project_name: str, entity: str | None) -> str:
     return f"{entity}/{project_name}" if entity else project_name
 
 
-def setup_artifact_registries(project_name: str, entity: str | None = None):
+def setup_artifact_registries(project_name: str, entity: str | None = None) -> None:
     """Set up model and dataset artifact registries."""
     api = wandb.Api()
 
@@ -173,6 +175,9 @@ def main():
     parser.add_argument("--project", default="swe-qwen", help="W&B project name")
     parser.add_argument("--entity", help="W&B entity (username or team)")
     parser.add_argument("--description", help="Project description")
+    parser.add_argument("--model-family", default="qwen", help="Model family tag")
+    parser.add_argument("--model", default="Qwen/Qwen3-30B-A3B", help="Primary model HF id")
+    parser.add_argument("--fallback-model", default="Qwen/Qwen3-14B", help="Fallback model HF id")
     parser.add_argument("--create-sweep", action="store_true", help="Create hyperparameter sweep")
     parser.add_argument("--setup-registries", action="store_true", help="Setup artifact registries")
     args = parser.parse_args()
@@ -186,8 +191,8 @@ def main():
     tags = ["swe", "qwen", "qwen3-moe", "code-generation", "fine-tuning", "llm"]
 
     config = {
-        "model": "Qwen/Qwen3-30B-A3B",
-        "fallback_model": "Qwen/Qwen3-14B",
+        "model": args.model,
+        "fallback_model": args.fallback_model,
         "method": "LoRA",
         "quantization": "4-bit",
         "target_modules": [
@@ -207,6 +212,7 @@ def main():
         description=description,
         tags=tags,
         config=config,
+        model_family=args.model_family,
     )
 
     if not success:
