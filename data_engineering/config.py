@@ -1,8 +1,39 @@
 """Centralized configuration for the data engineering pipeline."""
 
+from __future__ import annotations
+
+import contextlib
+import os
 from pathlib import Path
 
+import yaml
+from pydantic import ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from registry.loader import default_model_key, load_models
+
+# Legacy Phase-4 literal: last-resort default only when the registry is
+# missing or unreadable (PHASE-10 Steps 2/9-3).
+_LEGACY_MODEL = "qwen3-14b"
+_LEGACY_MAX_LENGTH = 4096
+
+
+def default_tokenize_model() -> str:
+    """Registry default key (env-overridable), legacy literal last resort."""
+    if env_value := os.environ.get("DATA_PIPELINE_TOKENIZE_MODEL"):
+        return env_value
+    try:
+        return default_model_key()
+    except (KeyError, OSError, yaml.YAMLError):
+        return _LEGACY_MODEL
+
+
+def default_tokenize_max_length() -> int:
+    """Registry ``context_window`` of the default model, literal last resort."""
+    try:
+        return load_models()[default_tokenize_model()].context_window
+    except (KeyError, OSError, yaml.YAMLError, ValidationError):
+        return _LEGACY_MAX_LENGTH
 
 
 class DataPipelineConfig(BaseSettings):
@@ -46,8 +77,36 @@ class DataPipelineConfig(BaseSettings):
     max_train_examples: int = 30000  # Cap total training size after augmentation
 
     # Tokenization (integrated at end of pipeline)
-    tokenize_model: str = "qwen3-14b"
-    tokenize_max_length: int = 4096
+    # Registry-first (default key / context_window); env (DATA_PIPELINE_*) and
+    # init kwargs win; see _resolve_registry.
+    tokenize_model: str = _LEGACY_MODEL
+    tokenize_max_length: int = _LEGACY_MAX_LENGTH
+
+    @model_validator(mode="after")
+    def _resolve_registry(self) -> DataPipelineConfig:
+        """Resolve ``tokenize_model``/``tokenize_max_length`` registry-first.
+
+        Env/init values win (already in ``model_fields_set``). A readable
+        registry without ``tokenize_model`` raises — literals apply only when
+        the registry is missing or unreadable (no silent family fallback).
+        """
+        try:
+            models = load_models()
+        except (OSError, yaml.YAMLError):
+            return self
+        if "tokenize_model" not in self.model_fields_set:
+            # no default flagged → keep the legacy literal key
+            with contextlib.suppress(KeyError):
+                self.tokenize_model = default_model_key()
+        spec = models.get(self.tokenize_model)
+        if spec is None:
+            raise ValueError(
+                f"unknown model {self.tokenize_model!r} in the registry; "
+                f"available: {sorted(models)}"
+            )
+        if "tokenize_max_length" not in self.model_fields_set:
+            self.tokenize_max_length = spec.context_window
+        return self
 
     # Stage control
     resume_from: str | None = None  # stage name to resume from (None = full run)
