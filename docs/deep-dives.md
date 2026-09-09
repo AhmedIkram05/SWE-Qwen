@@ -4,7 +4,29 @@
 
 ## Component Deep Dives
 
-Each subsystem below is independently runnable, CI-gated, and covered end-to-end in `docs/`.
+Each subsystem below is independently runnable, CI-gated, and covered end-to-end in `docs/`. All model identity resolves through the registry (`registry/` + `config/models.yaml` + gitignored `config/models.user.yaml`) - the `qwen3-14b` values quoted throughout are the current default model's receipts, not hardcodes.
+
+### 0. Model Registry (`registry/`)
+
+Any open-weight causal LM on Hugging Face plugs into every stage with one command - no tracked config edited, no GPU, no download:
+
+```bash
+model add meta-llama/Llama-3.1-8B-Instruct --name llama-31-8b --context 8192 --target-modules auto
+model list   # merged view: key · HF id · context · quant · serving base · source file
+```
+
+`add` validates over plain HTTP (registry reachability → `max_position_embeddings` context probe → chat-template presence → thinking-capability markers → LoRA target-module auto-detect) and writes **only** to `config/models.user.yaml` (gitignored); `load_models()` deep-merges it under the tracked `config/models.yaml` per model key. Every stage - tokenize, train, eval, promote, serve, deploy - reads through `registry/` (env > registry > literal last-resort), so the new key is immediately usable everywhere.
+
+| Per-model field | Drives |
+| --------------- | ------ |
+| `hf_id` · `context_window` · `target_modules` | tokenize tokenizer + length; QLoRA target modules |
+| `quantization` · `fallback_quantization` | Unsloth path + TRL+PEFT+bitsandbytes fallback precision |
+| `serving_hf_id` · `serving_quantization` | serving base: pre-quantized (AWQ/FP8) when set, plain bf16/fp16 with the `quantization` kwarg omitted when null |
+| `prompt_behavior.no_think` | gates both the `/no_think` insert and the `enable_thinking=False` template kwarg |
+| `gpu_mapping` (primary/fallback) | Modal training GPU, serving GPU, device memory budgets |
+| `default: true` | the one key all `--model` defaults resolve through (`registry.default_model_key()`) |
+
+Unknown keys and missing files raise - there is no silent fallback model anywhere in the serving or eval path.
 
 ### 1. Data Engineering (`data_engineering/`)
 
@@ -19,7 +41,7 @@ The data layer turns raw GitHub issue + PR dumps into a tokenized, `pydantic`-ty
 | `clean` | Six counted gates (no test files · patch > 500 lines · binary diffs · non-Python · empty body · no F2P signal), then exact + semantic dedup → `cleaned.jsonl` | 17,456 ✓ · 726 dup |
 | `split` | By-repo 80/10/10 (`--train-ratio 0.8`) - a whole repo goes to one split to stop cross-repo leakage | 15,011 / 1,556 / 889 · 46 repos |
 | `golden` | Carves the held-out eval set **before** tokenization from verified + test + dev slices (`GoldenSet{records, f2p_verified_count, source_split}`) | 2,313 |
-| `tokenize` | Qwen3-14B tokenizer, `max_length=8192` (cap 32768), SFT `packing=true` → arrow datasets via `datasets` | 14,833 train · 2,304 golden |
+| `tokenize` | registry tokenizer, `max_length` ← model `context_window` (this run: Qwen3-14B @ 8192), SFT `packing=true` → arrow datasets via `datasets` | 14,833 train · 2,304 golden |
 
 Every run is hash-pinned in a `manifest.json` + `dataset_card.md`, artifacts are versioned in W&B (`dataset-cleaned:v8`-era tags) and mirrored to `gs://swe-qwen-datasets/datasets/{run_id}/`; `python -m data_engineering.cli config` dumps the effective `DataPipelineConfig` for reproduction.
 
@@ -34,7 +56,7 @@ flowchart LR
     B --> C["clean.py<br/>6 quality gates"]
     C --> D["split.py<br/>by-repo 80/10/10"]
     D --> E["golden.py<br/>verified+test+dev → golden"]
-    C --> F["tokenize.py<br/>Qwen3-14B · 8,192 ctx"]
+    C --> F["tokenize.py<br/>registry tokenizer · ctx"]
     D --> F
     style A fill:#2a2a52,color:#fff
     style B fill:#3b82f6,color:#fff
@@ -52,7 +74,7 @@ flowchart LR
 | Duplicates | exact + semantic (726 removed) | no data inflation |
 | Split | per-repo 80/10/10, `--train-ratio 0.8` | prevent repo leakage between splits |
 | Golden set | carved from verified + test + dev | eval oracle never sees training data |
-| Tokenization | Qwen3-14B tokenizer, `max_length=8192` (max 32768) | fits LoRA context; SFT packing enabled |
+| Tokenization | registry tokenizer, `max_length` ← `context_window` (this run: 8192 of 32768) | fits LoRA context; SFT packing enabled |
 
 **Live run numbers** (run id `expanded-repos`): ingest **20,477** → validate **20,470** (7 schema errors) → clean **17,456** (net −3,014: 12 binary diffs, 1,212 non-Python records, 1,149 oversized patches, 726 duplicates) → split **15,011 / 1,556 / 889** (46 repos) → golden **2,313** → tokenized **14,833 / 1,550 / 885 / 2,304** (train/val/test/golden).
 
@@ -64,7 +86,7 @@ flowchart LR
 flowchart LR
     A["data/tokenized/"] --> B["modal_train.py<br/>Modal app swe-qwen-training-v2"]
     B --> C["qlora_trainer.py<br/>Unsloth + FlashAttention 2.8"]
-    C --> D["W&B artifact<br/>model-qwen3-14b-{variant}"]
+    C --> D["W&B artifact<br/>model-{key}-{variant}"]
     D --> E["models/comparisons/expanded-repos/"]
     style A fill:#2a2a52,color:#fff
     style B fill:#8b5cf6,color:#fff
@@ -85,9 +107,9 @@ Shared: **1 epoch**, `max_seq_length=4096` (longest in corpus), bf16, `paged_ada
 
 1. `modal run training/modal_train.py::train_qlora` boots an **image-as-code** Modal app: `debian-slim` + torch 2.11 (cu126) + `transformers>=5.5` + `unsloth[colab-new]` + flash-attn 2.8.3 cu126 wheel, with `wandb-secret` / `hf-secret` and the `swe-qwen-models` volume attached.
 2. The tokenized corpus is pulled from the **public** GCS bucket (`tokenized/{run_id}/`) using the stdlib `urllib` JSON API - deliberately *not* `CloudBucketMount`, because the GCP org policy forbids HMAC service-account keys (`iam.disableServiceAccountKeyCreation`).
-3. `unsloth_factory` loads the base Qwen3-14B 4-bit NF4 and applies fast-attention patches; `qlora_trainer.py` runs the variant block from `config/qlora_variants.yaml` with `packing=true`, gradient checkpointing, and `paged_adamw_8bit`.
+3. `unsloth_factory` loads the registry base (this run: Qwen3-14B 4-bit NF4) and applies fast-attention patches; `qlora_trainer.py` runs the variant block from `config/qlora_variants.yaml` with `packing=true`, gradient checkpointing, and `paged_adamw_8bit`. Non-Unsloth families fall back to TRL+PEFT+bitsandbytes (`fallback_quantization` per model); device memory budgets derive from the registry GPU tier.
 4. Every 10 steps it logs loss / grad-norm / lr; checkpoints save every 500 steps (last 3 kept); `eval_strategy="no"` because evaluation is the *separate* execution-based step in the next section.
-5. On completion the adapter uploads to W&B (`model-qwen3-14b-{variant}`) and lands in `models/comparisons/{run_id}/{variant}/` with `adapter_model.safetensors`, `chat_template.jinja`, tokenizer + `training_args`.
+5. On completion the adapter uploads to W&B (`model-{key}-{variant}` - this run: `model-qwen3-14b-{variant}`) and lands in `models/comparisons/{run_id}/{variant}/` with `adapter_model.safetensors`, `chat_template.jinja`, tokenizer + `training_args`.
 
 **Why these three variants** - a deliberate one-GPU ablation: `r16/α32 @ lr2e-5` (baseline), `r32/α64` (more trainable parameters), `r16/α32 @ lr5e-5` + dropout (faster adaptation). `scripts/run_3config_comparison.py` trains all three sequentially on the same corpus so the subsequent eval compares *configurations, not data*. Resume mid-run: `training/resume.py` locates the newest adapter; `--resume` continues from the last checkpoint.
 
@@ -99,7 +121,8 @@ Shared: **1 epoch**, `max_seq_length=4096` (longest in corpus), bf16, `paged_ada
 **One-command trio:**
 
 ```bash
-python -m data_engineering.cli run --run-id expanded-repos --tokenize-model qwen3-14b --tokenize-max-length 8192
+model add meta-llama/Llama-3.1-8B-Instruct --name llama-31-8b --context 8192   # any HF causal LM; qwen3-14b is the registry default
+python -m data_engineering.cli run --run-id expanded-repos                     # tokenizer/context default from the registry
 modal run training/modal_train.py::train_qlora --model-name qwen3-14b --variant baseline_14b --run-id expanded-repos
 python scripts/run_3config_comparison.py --run-id expanded-repos --max-train-samples 3000   # + --force-retrain · drop the flag for the full 14,833-example corpus
 ```
@@ -174,7 +197,7 @@ flowchart LR
     style E fill:#64748b,color:#fff
 ```
 
-Promotion is a **decision with a paper trail**, never a merge. `promotion/` splits the concern: `rules.py` (the criteria), `gate.py` (the verdict), `registry.py` (W&B `eval-champion`), `audit.py` (the human-readable record), `deploy.py` (the hand-off).
+Promotion is a **decision with a paper trail**, never a merge. `promotion/` splits the concern: `run.py` (the orchestrator: candidate-model resolution, paired evals, deploy hand-off), `rules.py` (the criteria), `gate.py` (the verdict), `registry.py` (W&B `eval-champion`), `audit.py` (the human-readable record), `deploy.py` (the hand-off).
 
 **The four conditions, checked on the same paired sample as the compare:**
 
@@ -183,23 +206,23 @@ Promotion is a **decision with a paper trail**, never a merge. `promotion/` spli
 3. **No regression** - P2P may not drop more than 2 points across the paired set; an offensive win that breaks other tests is not a win.
 4. **Silent promotions are rejected** - if a challenger can't clear its own confidence interval, `gate.py` keeps the incumbent and writes the rejection for the audit trail.
 
-**Who remembers:** the champion of record is `gs://swe-qwen-datasets/ci/champion.json` (read by `eval.yml` baselines and the dashboards); `registry.py` appends the full decision record to the W&B `eval-champion` collection; deployment is gated to the `production` environment, and any step can be **dry-run** with `RUN_MODAL_EVAL=false` - the gate re-scores the last logged numbers at $0.
+**Who remembers:** the champion of record is `gs://swe-qwen-datasets/ci/champion.json` (read by `eval.yml` - which also derives the smoke `--models` from its `model_ref` - and the dashboards); `registry.py` appends the full decision record to the W&B `eval-champion` collection; deployment is gated to the `production` environment, and any step can be **dry-run** with `RUN_MODAL_EVAL=false` - the gate re-scores the last logged numbers at $0.
 
 ```bash
 python -m evaluation.cli compare --run_ids run_baseline,run_golden --promote-to-registry    # local gate + promote
-gh workflow run promote.yml -f candidate_variant=higher_rank_14b                            # CI champion/challenger
+gh workflow run promote.yml -f candidate_variant=higher_rank_14b -f candidate_model=qwen3-14b  # CI champion/challenger (model resolves arg > champion record > config)
 ```
 
 ### 5. Inference Serving (`inference/`)
 
-OpenAI-compatible API surface - **your client code doesn't change**. `POST /v1/chat/completions` (stream + non-stream), `GET /health`; models resolve as `qwen3-14b`, `qwen3-14b:{variant}`, bare `{variant}`, or W&B artifact name; errors are faithful OpenAI envelopes (401/422/404/500).
+OpenAI-compatible API surface - **your client code doesn't change**. `POST /v1/chat/completions` (stream + non-stream), `GET /health`; models resolve as `{key}`, `{key}:{variant}`, bare `{variant}` (registry default key), or W&B artifact name (this run: `qwen3-14b…`); errors are faithful OpenAI envelopes (401/422/404/500).
 
 | Endpoint | Auth | Behavior |
 | -------- | ---- | -------- |
 | `POST /v1/chat/completions` | Bearer (`MODAL_SERVE_TOKEN`, constant-time compare, fail-closed) | chat completion, SSE streaming (`data: [DONE]`) |
 | `GET /health` | open | `{status, model, engine}` |
 
-Engines: **VLLMEngine** (`SERVING_STUB=0`; AWQ int4 `Qwen/Qwen3-14B-AWQ`, `enable_lora=True`, `max_lora_rank=64`, gpu_mem 0.85, 16 max seqs, `LoRARequest(lora_int_id=1)` per request) and **StubEngine** (default, deterministic local dev). Prompt assembly inserts the Qwen3 `no_think` soft-switch (`/no_think\n### Response`) for LoRA models. Full API reference: [docs/api.md](docs/api.md).
+Engines: **VLLMEngine** (`SERVING_STUB=0`; this run: AWQ int4 `Qwen/Qwen3-14B-AWQ` - or the plain `hf_id` in bf16/fp16 when the model has no `serving_hf_id`, with the `quantization` kwarg omitted; `enable_lora=True`, `max_lora_rank=64`, gpu_mem 0.85, 16 max seqs, `LoRARequest(lora_int_id=1)` per request) and **StubEngine** (default, deterministic local dev). Prompt assembly applies the registry `prompt_behavior.no_think` gate (this run: Qwen3 `/no_think\n### Response`) for LoRA models. Full API reference: [docs/api.md](docs/api.md).
 
 **Wire format** - OpenAI-compatible (`model_config = {"extra": "ignore"}`), see the full schemas in [docs/api.md](docs/api.md):
 
@@ -214,14 +237,14 @@ Streaming returns SSE `data: {json}\n\n` frames - role chunk → content chunks 
 **Under the hood:**
 
 1. **Auth first.** Every completion checks the Bearer token against `MODAL_SERVE_TOKEN` with `hmac.compare_digest`, fail-closed (401 before any prompt touches the model); `/health` stays open. Per-request order: auth → pydantic validation (422) → model resolution (404) → engine call.
-2. **Model resolution** (`openai_compat.resolve_engine_model`): `qwen3-14b` = base model, no adapter; `qwen3-14b:{variant}` / bare `{variant}` / `model-qwen3-14b-{variant}` = LoRA. Requesting the same name as the base returns the base without an adapter.
-3. **VLLMEngine** holds a process-singleton `_LLM_CACHE` keyed by the serving Hf id - one AWQ int4 `Qwen/Qwen3-14B-AWQ` process with `enable_lora=True`, `max_lora_rank=64`, and a per-request `LoRARequest(lora_name, lora_int_id=1, lora_path)`. The **first request for a variant pulls the LoRA weights from W&B** (demonstrated: 1,399.16 MB / 40 files) and caches them on the `serve-model-cache` volume - serverless adapters, zero pre-provisioning.
-4. **Prompt assembly differs by model type** - LoRA models are conditioned on the raw `### Response -> patch` continuation with the Qwen3 `no_think` soft-switch (`/no_think\n### Response`); the base model gets the full chat template with `enable_thinking=False` - a 14B that "thinks out loud" burns ~75% of the budget before diffing.
+2. **Model resolution** (`openai_compat.resolve_engine_model`): `{key}` = base model, no adapter; `{key}:{variant}` / bare `{variant}` / `model-{key}-{variant}` = LoRA. Requesting the same name as the base returns the base without an adapter.
+3. **VLLMEngine** holds a process-singleton `_LLM_CACHE` keyed by the serving Hf id - one process on the resolved base (this run: AWQ int4 `Qwen/Qwen3-14B-AWQ`) with `enable_lora=True`, `max_lora_rank=64`, and a per-request `LoRARequest(lora_name, lora_int_id=1, lora_path)`. The **first request for a variant pulls the LoRA weights from W&B** (demonstrated: 1,399.16 MB / 40 files) and caches them on the `serve-model-cache` volume - serverless adapters, zero pre-provisioning.
+4. **Prompt assembly differs by model type** - LoRA models are conditioned on the raw `### Response -> patch` continuation with the `no_think` soft-switch when the registry flags it (this run: Qwen3 `/no_think\n### Response`); the base model gets the full chat template with `enable_thinking=False` only for flagged models - a 14B that "thinks out loud" burns ~75% of the budget before diffing.
 5. **The wire stays OpenAI**: `chatcmpl-{12 hex}` ids, `choices`/`usage`, SSE `data: [DONE]`, word-chunk streaming with TTFB recorded at the first chunk; every request emits a `RequestRecord` (ts · model · stream · ttfb_ms · latency_ms · tokens · error) to the observability layer.
 
 <p align="center">
   <img src="assets/media/modal-qwen-server.png" alt="Modal serving endpoint" width="560"/>
-  <br/><em>Modal serving endpoint - the vLLM + LoRA server sits at zero/cold until a request scales it up; per-request GPU billing, no idle cost.</em>
+  <br/><em>Modal serving endpoint (class <code>ModelServer</code>, per-model GPU) - the vLLM + LoRA server sits at zero/cold until a request scales it up; per-request GPU billing, no idle cost.</em>
 </p>
 
 <p align="center">
@@ -254,25 +277,24 @@ Every layer of the platform phones home, and the dashboards that visualize it ar
 
 | Layer | Tooling | Coverage of |
 | ----- | ------- | ----------- |
-| Unit + integration | pytest (**1,456 tests passed** (1,462 collected: 1 skipped, 5 deselected), ~3 min) | every package: data_engineering, evaluation, inference, training, promotion, observability, scripts |
+| Unit + integration | pytest (**1539 tests passed** (1541 collected: 1 skipped, 1 deselected), ~3 min) | every package: data_engineering, evaluation, inference, training, promotion, observability, scripts, registry |
 | Lint / format | ruff (line-length 100, strict rule set) | `All checks passed` |
-| Type checking | mypy (strict-ish) | 42 source files, `Success: no issues found` |
+| Type checking | mypy (strict-ish) | 75 source files across 8 packages, `Success: no issues found` |
 | Coverage | pytest-cov (`--cov`, branch=true) + Codecov | 8 packages |
-| Model regression | `eval.yml` smoke gate (20-instance F2P vs baseline, `_SMOKE_TOLERANCE=0.05`, PRs read / main writes) | catches real model-quality regressions per PR |
+| Model regression | `eval.yml` smoke gate (20-instance F2P vs baseline with `--models` from champion.json, `_SMOKE_TOLERANCE=0.05`, PRs read / main writes) | catches real model-quality regressions per PR |
 
 <p align="center">
-  <img src="assets/media/pytest-summary.png" width="480" alt="pytest summary - 1,456 tests passed (1,462 collected)" />
+  <img src="assets/media/pytest-summary.png" width="480" alt="pytest summary - 1539 tests passed (1541 collected)" />
 </p>
 
-> The full offline suite runs green in ~3 minutes (`pytest`, 5 deselected = Modal/GCP/W&B integration tests).
+> The full offline suite runs green in ~3 minutes (`pytest -m "not requires_credentials"`, 1 deselected = credential-gated test).
 
 Run locally:
 
 ```bash
 uv sync --extra dev
-ruff check . && ruff format --check .
-mypy data_engineering/ evaluation/ scripts/
-pytest -m "not requires_modal and not requires_gcp and not requires_wandb and not requires_credentials"
+ruff check . && ruff format --check . && mypy
+pytest -m "not requires_credentials"
 ```
 
 ---
@@ -299,9 +321,9 @@ gs://swe-qwen-datasets           <- private GCS, dedicated 3-module layout
 | Workflow | Job | Key config |
 | -------- | --- | ---------- |
 | `ci.yml` | lint + typecheck + tests | ruff · mypy · pytest (offline markers) · paths-ignore `**.md`, `docs/**` · concurrency cancel-in-progress |
-| `cd.yml` | infra plan / apply + Modal deploy | `pull_request` plan · `push main` apply · env `production` |
-| `eval.yml` | SWE-bench smoke gate | 20-instance F2P vs `smoke_baseline.json` · PRs read / main writes |
-| `promote.yml` | champion/challenger promotion | paired eval · 4-condition statistical gate · W&B decision record · optional dry-run |
+| `cd.yml` | infra plan / apply + Modal deploy | `pull_request` plan · `push main` apply · env `production` · `SERVING_BASE_MODEL` / `SERVING_GPU` pins for the serving deploy |
+| `eval.yml` | SWE-bench smoke gate | 20-instance F2P vs `smoke_baseline.json` · `--models` derived from champion.json `model_ref` · PRs read / main writes |
+| `promote.yml` | champion/challenger promotion | `candidate_model` + `candidate_variant` inputs · paired eval · 4-condition statistical gate · W&B decision record · optional dry-run |
 
 <p align="center">
   <img src="assets/media/ci.png" alt="ci.yml run" width="400"/>
