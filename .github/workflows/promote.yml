@@ -111,7 +111,7 @@ jobs:
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@v3
 
       # REQUIRED here (unlike eval.yml's warn-and-continue baseline): the
       # paired eval cannot run without the champion record. Skipped when the
@@ -221,7 +221,7 @@ jobs:
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@v3
 
       # Required: run.py's --deploy reads champion.json directly (no GCS
       # fallback in the deploy path) and aborts without it.
