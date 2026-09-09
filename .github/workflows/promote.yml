@@ -12,6 +12,13 @@ on:
         description: "Variant name to evaluate as challenger (e.g. higher_rank_14b)"
         required: true
         type: string
+      # Empty input (or the UI field left blank) = fall through the resolution
+      # order: champion record's model_ref base, then ServeConfig.base_model.
+      candidate_model:
+        description: "Model base for the champion/challenger refs (empty = champion record's model_ref base)"
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   # decision 11: never cancel a run mid-promotion (mid-decision or mid-deploy).
@@ -133,7 +140,7 @@ jobs:
           if [ "${{ vars.RUN_MODAL_EVAL }}" = "false" ]; then
             # candidate_variant is a required workflow_dispatch input, so it is
             # always present; run.py's parser requires it on the gating path.
-            uv run python -m promotion.run --no-eval --candidate-variant ${{ inputs.candidate_variant }} 2>&1 | tee gating-off.log
+            uv run python -m promotion.run --no-eval --candidate-variant ${{ inputs.candidate_variant }} --candidate-model "${{ inputs.candidate_model }}" 2>&1 | tee gating-off.log
             uv run modal token info
             exit 0
           fi
@@ -142,7 +149,7 @@ jobs:
         id: decide
         if: ${{ vars.RUN_MODAL_EVAL != 'false' }}
         run: |
-          uv run python -m promotion.run --candidate-variant ${{ inputs.candidate_variant }} 2>&1 | tee promotion.log
+          uv run python -m promotion.run --candidate-variant ${{ inputs.candidate_variant }} --candidate-model "${{ inputs.candidate_model }}" 2>&1 | tee promotion.log
 
       # Decision record itself lives in the W&B `promotion-decision-*` artifact
       # (audit.py writes no local files); the log carries the promote= line.
@@ -258,6 +265,7 @@ jobs:
         run: |
           uv run python -m promotion.run --deploy \
             --variant ${{ needs.decide.outputs.champion }} \
+            --candidate-model "${{ inputs.candidate_model }}" \
             --decision-id ${{ needs.decide.outputs.decision_id }} \
             --f2p-rate ${{ needs.decide.outputs.candidate_f2p }} \
             --p2p-rate ${{ needs.decide.outputs.candidate_p2p }}

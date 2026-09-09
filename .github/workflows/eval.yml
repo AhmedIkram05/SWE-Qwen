@@ -106,6 +106,9 @@ jobs:
 
       # Baseline lives in GCS (gitignored locally). Split download so a first
       # run without a baseline doesn't fail: bootstrap happens on push to main.
+      # The champion record is downloaded alongside it (same warn-and-continue
+      # contract): the smoke gate's --models derives from its model_ref, the
+      # literal is only a first-cycle fallback.
       - name: Download smoke baseline
         run: |
           set +e
@@ -115,6 +118,14 @@ jobs:
           set -e
           if [ $rc -ne 0 ]; then
             echo "::warning::No smoke baseline in GCS yet (rc=$rc); will bootstrap on push to main."
+          fi
+          set +e
+          gcloud storage cp gs://swe-qwen-datasets/ci/champion.json data/eval_results/ \
+            2> /tmp/gcs_champion_err.txt
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "::warning::No champion record in GCS yet (rc=$rc); smoke gate will use the literal model."
           fi
           ls -la data/eval_results/ 2>/dev/null || true
 
@@ -142,7 +153,13 @@ jobs:
             echo "::notice::RUN_MODAL_EVAL=false — validating Modal creds instead of running GPU eval"
             uv run modal token info
           else
-            uv run eval run --mode smoke --models qwen3-14b:higher_rank_14b $FLAGS
+            # The champion record's model_ref (e.g. "qwen3-14b:higher_rank_14b")
+            # is the smoke model; the literal is a first-cycle fallback only.
+            CHAMPION_MODEL_REF=""
+            if [ -f data/eval_results/champion.json ]; then
+              CHAMPION_MODEL_REF="$(uv run python -c 'import json; print(json.load(open("data/eval_results/champion.json"))["model_ref"])' 2>/dev/null)" || CHAMPION_MODEL_REF=""
+            fi
+            uv run eval run --mode smoke --models "${CHAMPION_MODEL_REF:-qwen3-14b:higher_rank_14b}" $FLAGS
           fi
 
       # CD-owned baseline: write it back to the ci/ path the download step reads.
