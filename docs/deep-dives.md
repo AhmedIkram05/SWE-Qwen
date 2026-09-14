@@ -46,7 +46,7 @@ The data layer turns raw GitHub issue + PR dumps into a tokenized, `pydantic`-ty
 Every run is hash-pinned in a `manifest.json` + `dataset_card.md`, artifacts are versioned in W&B (`dataset-cleaned:v8`-era tags) and mirrored to `gs://swe-qwen-datasets/datasets/{run_id}/`; `python -m data_engineering.cli config` dumps the effective `DataPipelineConfig` for reproduction.
 
 <p align="center">
-  <img src="assets/media/gcs-artifacts.png" width="560" alt="gs://swe-qwen-datasets expanded-repos artifact tree" />
+  <img src="../assets/media/gcs-artifacts.png" width="560" alt="gs://swe-qwen-datasets expanded-repos artifact tree" />
   <br/><em>Live GCS: `datasets/expanded-repos/swebench/*.jsonl` - 8 objects, 1.95 GiB total (raw 796 MB → cleaned 223 MB …).</em>
 </p>
 
@@ -114,7 +114,7 @@ Shared: **1 epoch**, `max_seq_length=4096` (longest in corpus), bf16, `paged_ada
 **Why these three variants** - a deliberate one-GPU ablation: `r16/α32 @ lr2e-5` (baseline), `r32/α64` (more trainable parameters), `r16/α32 @ lr5e-5` + dropout (faster adaptation). `scripts/run_3config_comparison.py` trains all three sequentially on the same corpus so the subsequent eval compares *configurations, not data*. Resume mid-run: `training/resume.py` locates the newest adapter; `--resume` continues from the last checkpoint.
 
 <p align="center">
-  <img src="assets/media/training.gif" width="560" alt="Modal volumes + trained adapters (carousel)" />
+  <img src="../assets/media/training.gif" width="560" alt="Modal volumes + trained adapters (carousel)" />
   <br/><em>Live Modal volumes (6: `serve-model-cache`, `eval-repo-cache`, `eval-test-cache`, `eval-model-cache`, `swe-qwen-data`, `swe-qwen-models`) + GCS bucket (437 dataset run dirs, 322 tokenized run dirs) → real trained artifacts: 3 adapters with `adapter_model.safetensors`, `chat_template.jinja`, tokenizer, `training_args.bin` + checkpoints.</em>
 </p>
 
@@ -243,12 +243,12 @@ Streaming returns SSE `data: {json}\n\n` frames - role chunk → content chunks 
 5. **The wire stays OpenAI**: `chatcmpl-{12 hex}` ids, `choices`/`usage`, SSE `data: [DONE]`, word-chunk streaming with TTFB recorded at the first chunk; every request emits a `RequestRecord` (ts · model · stream · ttfb_ms · latency_ms · tokens · error) to the observability layer.
 
 <p align="center">
-  <img src="assets/media/modal-qwen-server.png" alt="Modal serving endpoint" width="560"/>
+  <img src="../assets/media/modal-qwen-server.png" alt="Modal serving endpoint" width="560"/>
   <br/><em>Modal serving endpoint (class <code>ModelServer</code>, per-model GPU) - the vLLM + LoRA server sits at zero/cold until a request scales it up; per-request GPU billing, no idle cost.</em>
 </p>
 
 <p align="center">
-  <img src="assets/media/inference-demo.png" alt="Streaming inference demo" width="560"/>
+  <img src="../assets/media/inference-demo.png" alt="Streaming inference demo" width="560"/>
   <br/><em>Live streaming - `/v1/chat/completions` with `curl -N` over SSE: role chunk → content chunks → `finish_reason:"stop"` → `data: [DONE]`.</em>
 </p>
 
@@ -263,12 +263,12 @@ Every layer of the platform phones home, and the dashboards that visualize it ar
 - **Cost** - `observability/cost.py` folds Modal + GCS spend into each `EvalRun.cost_usd` (the `$30` figure in `assets/results.txt` is the sum of the two runs' recorded spend).
 
 <p align="center">
-  <img src="assets/media/langfuse.png" alt="Langfuse trace" width="560"/>
+  <img src="../assets/media/langfuse.png" alt="Langfuse trace" width="560"/>
   <br/><em>Langfuse - one request traced end-to-end (prompt → generated patch → latency), sampled at 10% (`telemetry_trace_sample_rate`).</em>
 </p>
 
 <p align="center">
-  <img src="assets/media/w%26b-dashboards.gif" alt="W&B dashboards-as-code" width="480"/>
+  <img src="../assets/media/wandb-dashboards.webp" alt="W&B dashboards-as-code" width="640"/>
   <br/><em>W&B workspaces - dashboards as code: `scripts/build_dashboards.py` + `scripts/seed_dashboards.py` (wandb-workspaces) keep the layout in git, not in a browser tab.</em>
 </p>
 
@@ -284,7 +284,7 @@ Every layer of the platform phones home, and the dashboards that visualize it ar
 | Model regression | `eval.yml` smoke gate (20-instance F2P vs baseline with `--models` from champion.json, `_SMOKE_TOLERANCE=0.05`, PRs read / main writes) | catches real model-quality regressions per PR |
 
 <p align="center">
-  <img src="assets/media/pytest-summary.png" width="480" alt="pytest summary - 1539 tests passed (1541 collected)" />
+  <img src="../assets/media/pytest-summary.png" width="480" alt="pytest summary - 1539 tests passed (1541 collected)" />
 </p>
 
 > The full offline suite runs green in ~3 minutes (`pytest -m "not requires_credentials"`, 1 deselected = credential-gated test).
@@ -326,13 +326,13 @@ gs://swe-qwen-datasets           <- private GCS, dedicated 3-module layout
 | `promote.yml` | champion/challenger promotion | `candidate_model` + `candidate_variant` inputs · paired eval · 4-condition statistical gate · W&B decision record · optional dry-run |
 
 <p align="center">
-  <img src="assets/media/ci.png" alt="ci.yml run" width="400"/>
-  <img src="assets/media/eval.png" alt="eval.yml run" width="400"/>
+  <img src="../assets/media/ci.png" alt="ci.yml run" width="400"/>
+  <img src="../assets/media/eval.png" alt="eval.yml run" width="400"/>
   <br/><em>Left: `ci.yml` - ruff + mypy + the full pytest suite. Right: `eval.yml` - the SWE-bench smoke gate on PRs (baseline read-only for PRs, updated on main).</em>
 </p>
 <p align="center">
-  <img src="assets/media/cd-deploy.png" alt="cd.yml run" width="400"/>
-  <img src="assets/media/promote.png" alt="promote.yml run" width="400"/>
+  <img src="../assets/media/cd-deploy.png" alt="cd.yml run" width="400"/>
+  <img src="../assets/media/promote.png" alt="promote.yml run" width="400"/>
   <br/><em>Left: `cd.yml` - Terraform plan/apply + Modal deploy, gated to production. Right: `promote.yml` - champion-vs-challenger statistical promotion with the 4-condition gate.</em>
 </p>
 

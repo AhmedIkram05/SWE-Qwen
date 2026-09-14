@@ -160,38 +160,43 @@ Everything below was captured against **live systems** - the real GCS bucket, th
 ### Evaluation results
 
 <p align="center">
-  <img src="assets/media/eval-f2p-p2p.png" width="680" alt="Execution-based eval · F2P / P2P from assets/results.txt" />
+  <img src="assets/media/eval-f2p-p2p.png" width="700" alt="Execution-based eval · F2P / P2P from assets/results.txt" />
   <br/><em>Source of truth: <code>assets/results.txt</code> - <code>evaluation.cli compare</code> output (100 golden instances per variant, est. cost $30).
 </p>
 
 ### Training curves
 
 <p align="center">
-  <img src="assets/media/training-loss-curve.png" width="680" alt="Real loss curve from Modal training log" />
+  <img src="assets/media/training-loss-curve.png" width="700" alt="Real loss curve from Modal training log" />
   <br/><em>Real training loss + learning rate extracted from `logs/modal-higher_rank_14b-20260806-030415.log` - QLoRA on Modal A100-80GB, the champion variant, final loss 0.5843 after 1 epoch.</em>
+</p>
+
+<p align="center">
+  <img src="assets/media/training.gif" width="700" alt="Modal volumes + trained adapters (carousel)" />
+  <br/><em>What the same run touched on live infra: 6 Modal volumes (`serve-model-cache`, `eval-repo-cache`, `eval-test-cache`, `eval-model-cache`, `swe-qwen-data`, `swe-qwen-models`) + the GCS bucket (437 dataset run dirs, 322 tokenized run dirs) → the 3 trained adapters that shipped from it (<code>adapter_model.safetensors</code>, <code>chat_template.jinja</code>, tokenizer, <code>training_args.bin</code>).</em>
 </p>
 
 ### Inference demo
 
 <p align="center">
-  <img src="assets/media/serve-demo.png" width="560" alt="Live uvicorn serve + /health + chat + error handling" />
+  <img src="assets/media/serve-demo.png" width="700" alt="Live uvicorn serve + /health + chat + error handling" />
   <br/><em>Live server: `/health` → `StubEngine`, real `chatcmpl-998dfe608954` completion, 401 without bearer token, `model_not_found` envelope. The first request per model pulled the 1.4 GB LoRA adapter from W&B into cache.</em>
 </p>
 
 <p align="center">
-  <img src="assets/media/inference-demo.png" width="680" alt="SSE streaming demo · data: chunks → [DONE]" />
+  <img src="assets/media/inference-demo.png" width="700" alt="SSE streaming demo · data: chunks → [DONE]" />
   <br/><em>Same server, streaming path (port 8753): <code>stream: true</code> chunks arrive as SSE <code>data:</code> events and terminate with <code>[DONE]</code>, one request from Python-function prompt to stop.</em>
 </p>
 
 ### Data pipeline run
 
 <p align="center">
-  <img src="assets/media/cli-data-pipeline.png" width="560" alt="python -m data_engineering.cli --help" />
+  <img src="assets/media/cli-data-pipeline.png" width="700" alt="python -m data_engineering.cli --help" />
   <br/><em>`python -m data_engineering.cli --help` - one command runs the whole pipeline; model, tokenizer and length defaults resolve from the registry.</em>
 </p>
 
 <p align="center">
-  <img src="assets/media/data-pipeline-run.png" width="640" alt="real pipeline run transcript" />
+  <img src="assets/media/data-pipeline-run.png" width="700" alt="real pipeline run transcript" />
   <br/><em>The actual run (run id `expanded-repos`, `assets/data-eng.txt`): 20,477 ingested → 20,470 validated (7 rejected) → 17,456 cleaned → 15,011/1,556/889 split + 2,313 golden → 14,833 tokenized - W&B artifacts, manifest hash, and the GCS round-trip in one transcript.</em>
 </p>
 
@@ -205,27 +210,32 @@ Everything below was captured against **live systems** - the real GCS bucket, th
 ### CI/CD gates (4 workflows)
 
 <p align="center">
-  <img src="assets/media/cicd-tour.gif" width="680" alt="CI/CD tour · ci.yml → cd.yml → eval.yml → promote.yml" />
+  <img src="assets/media/cicd-tour.gif" width="700" alt="CI/CD tour · ci.yml → cd.yml → eval.yml → promote.yml" />
   <br/><em>CI runs tests on every PR, CD bakes + pushes the trained artifact, <code>eval.yml</code> derives the smoke gate models from the champion record with read-only access, and <code>promote.yml</code> (with <code>candidate_model</code> input) re-runs the paired champion/challenger comparison before flipping the registry - you can't self-certify.</em>
 </p>
 
 ### Infra proof (Modal + GCS)
 
 <p align="center">
-  <img src="assets/media/infra-proof.gif" width="680" alt="Infra proof · Modal server → volumes → GCS artifacts → trained adapters" />
+  <img src="assets/media/infra-proof.gif" width="700" alt="Infra proof · Modal server → volumes → GCS artifacts → trained adapters" />
   <br/><em>The live Modal vLLM server (class <code>ModelServer</code>, per-model GPU), the mounted GCS-backed volumes, the W&B artifact round-trip, and the 3 trained LoRA adapters ready to ship.</em>
 </p>
 
 ### Quality & observability receipts
 
 <p align="center">
-  <img src="assets/media/pytest-summary.png" width="640" alt="pytest summary · 1539 tests passed (1541 collected)" />
+  <img src="assets/media/pytest-summary.png" width="700" alt="pytest summary · 1539 tests passed (1541 collected)" />
   <br/><em>Offline test suite: 1539 tests passed (1541 collected: 1 skipped, 1 deselected) in ~3 min.</em>
 </p>
 
 <p align="center">
-  <img src="assets/media/langfuse.png" width="640" alt="Langfuse trace dashboard" />
+  <img src="assets/media/langfuse.png" width="700" alt="Langfuse trace dashboard" />
   <br/><em>Langfuse: 10% trace sampling of every train / eval / serve event.</em>
+</p>
+
+<p align="center">
+  <img src="assets/media/wandb-dashboards.webp" width="700" alt="W&B dashboards-as-code" />
+  <br/><em>W&B workspaces - dashboards as code: <code>scripts/build_dashboards.py</code> + <code>scripts/seed_dashboards.py</code> (wandb-workspaces) keep the layout in git, not in a browser tab; two projects (<code>swe-qwen-data</code>, <code>swe-qwen</code>) cover every pipeline artifact and training/eval run with live loss curves.</em>
 </p>
 
 ## Anatomy of a Real Run (the system was up)
