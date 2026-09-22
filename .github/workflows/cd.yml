@@ -42,6 +42,10 @@ env:
 jobs:
   terraform-plan:
     name: Terraform Plan
+    # Dependabot skip: GCP WIF deploy SA is no longer active, so auth fails on
+    # dependabot PRs and blocks them. CI (lint/test) runs independently and
+    # still gives lint feedback without WIF.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     defaults:
       run:
