@@ -52,7 +52,7 @@ jobs:
         working-directory: infra/terraform
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v3
@@ -120,7 +120,7 @@ jobs:
         working-directory: infra/terraform
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v3
@@ -163,7 +163,7 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
