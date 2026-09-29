@@ -3,7 +3,7 @@ name = "swe-qwen"
 version = "0.1.0"
 description = "Production-grade LLMOps platform for fine-tuning open-weight LLMs for automated software issue resolution"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "SWE-Qwen Team", email = "team@swe-qwen.dev"}
@@ -19,7 +19,7 @@ classifiers = [
 ]
 dependencies = [
     # Core ML/AI
-    "torch==2.14.0",
+    "torch==2.13.0",
     "transformers>=5.5.0,<5.6.0",
     "peft>=0.19.0",
     "bitsandbytes>=0.49.0",
