@@ -3,7 +3,7 @@ name = "swe-qwen"
 version = "0.1.0"
 description = "Production-grade LLMOps platform for fine-tuning open-weight LLMs for automated software issue resolution"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 license = {text = "MIT"}
 authors = [
     {name = "SWE-Qwen Team", email = "team@swe-qwen.dev"}
