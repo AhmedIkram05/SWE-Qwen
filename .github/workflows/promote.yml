@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -89,7 +89,7 @@ jobs:
       candidate_p2p: ${{ steps.decide.outputs.candidate_p2p }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -199,7 +199,7 @@ jobs:
       MODAL_SERVE_TOKEN: ${{ secrets.MODAL_SERVE_TOKEN }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
