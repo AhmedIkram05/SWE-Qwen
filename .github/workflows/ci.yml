@@ -58,7 +58,7 @@ jobs:
           key: mypy-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('data_engineering/**', 'training/**', 'evaluation/**', 'inference/**', 'observability/**', 'scripts/**', 'promotion/**') }}
 
       - name: Install dependencies
-        run: uv sync --extra dev --frozen
+        run: uv sync --extra dev --extra inference --frozen
 
       - name: Run Ruff (lint)
         run: uv run ruff check data_engineering/ training/ tests/ evaluation/ inference/ observability/ scripts/ promotion/
