@@ -6,6 +6,12 @@ name: "CD: Terraform Infra & Modal Deploy"
 # The Modal endpoint deploys on merge to main (and manual dispatch).
 # Phase 9 owns the "if promoted then deploy" promotion logic; this workflow
 # only wires the triggers.
+#
+# GCP/Modal master switch: terraform-apply and deploy-modal are gated on the
+# GCP_DEPLOY_ENABLED repo variable (terraform-plan is NOT gated — WIF auth
+# works and the plan is a useful review signal). Unset/false keeps the
+# gated jobs skipped (grey, not red) instead of queueing forever on the
+# `production` environment approval.
 on:
   pull_request:
     branches: [main]
@@ -111,7 +117,8 @@ jobs:
     name: Terraform Apply
     needs: terraform-plan
     # Merge to main (or manual dispatch). Pull requests stop at plan.
-    if: github.event_name != 'pull_request'
+    # Gated on GCP_DEPLOY_ENABLED — see the header comment.
+    if: vars.GCP_DEPLOY_ENABLED == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: production # requires manual approval in Settings → Environments
     timeout-minutes: 30
@@ -156,7 +163,8 @@ jobs:
     runs-on: ubuntu-latest
     # Deploy on merge to main and on manual dispatch (skip PRs).
     # Phase 9 adds the "if champion promoted" condition on top.
-    if: github.event_name != 'pull_request'
+    # Gated on GCP_DEPLOY_ENABLED — see the header comment.
+    if: vars.GCP_DEPLOY_ENABLED == 'true' && github.event_name != 'pull_request'
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
