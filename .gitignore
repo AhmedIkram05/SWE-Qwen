@@ -288,3 +288,6 @@ data/eval_checkpoints/
 data/eval_results/
 data/golden.jsonl
 artifacts/
+
+# Stray Hugging Face datasets cache (lands in ./None/ when cache_dir resolves unset)
+None/
