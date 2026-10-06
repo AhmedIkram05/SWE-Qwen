@@ -40,7 +40,7 @@ export WANDB_API_KEY=...
 
 ## 2. Build the Dataset
 
-All stages are one Typer CLI. Data docs: [`docs/dataset.md`](docs/dataset.md).
+All stages are one Typer CLI. Data docs: [`docs/dataset.md`](dataset.md).
 
 ```bash
 # Full pipeline: ingest → validate → clean → split → golden → tokenize
@@ -127,7 +127,7 @@ Checkpoint hygiene: `save_strategy` keeps the last 3; use `training/resume.py` t
 
 ## 4. Evaluate
 
-Evaluation is execution-based — see [`docs/evaluation.md`](docs/evaluation.md) for the methodology. All commands come from `evaluation/` CLI (`python -m evaluation.cli`).
+Evaluation is execution-based — see [`docs/evaluation.md`](evaluation.md) for the methodology. All commands come from `evaluation/` CLI (`python -m evaluation.cli`).
 
 ```bash
 export EVAL_DATASET_RUN_ID=expanded-repos
@@ -176,7 +176,6 @@ python -m evaluation.cli compare --run_ids run_baseline,run_golden
 # Paired challenger-vs-champion eval on the same dev subset
 gh workflow run promote.yml -f candidate_variant=higher_rank_14b
 
-# $0 dry run — skip Modal eval, gate on the latest logged numbers only
 gh workflow run promote.yml -f candidate_variant=higher_rank_14b \
   # (set repo variable RUN_MODAL_EVAL=false)
 ```
@@ -184,7 +183,7 @@ gh workflow run promote.yml -f candidate_variant=higher_rank_14b \
 The gate (in `promotion/gate.py`):
 
 1. **F2P absolute floor**: `min_f2p_threshold = 0.15` (15%)
-2. **Relative gain**: champion must exceed challenger's F2P by **≥5 points** (or beat on all paired metrics)
+2. **Relative gain**: the challenger must beat the champion's F2P by **≥5 points** (`PROMOTE_MIN_F2P_GAIN = 0.05`; all four gates must pass — there is no alternate path)
 3. **CI lower bound > 0**: Wilson 95% CI of the F2P gain must not include zero (McNemar significance)
 4. **P2P safeguard**: no more than **2 points** Pass-to-Pass regression vs champion
 
@@ -201,7 +200,7 @@ curl -s https://<workspace>.modal.run/v1/chat/completions \
   -d '{"model":"qwen3-14b:baseline_14b","messages":[{"role":"user","content":"Write a prime sieve."}]}'
 ```
 
-See [`docs/api.md`](docs/api.md) for the full wire format.
+See [`docs/api.md`](api.md) for the full wire format.
 
 ---
 

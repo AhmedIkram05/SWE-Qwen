@@ -78,7 +78,7 @@ flowchart LR
 
 **Live run numbers** (run id `expanded-repos`): ingest **20,477** → validate **20,470** (7 schema errors) → clean **17,456** (net −3,014: 12 binary diffs, 1,212 non-Python records, 1,149 oversized patches, 726 duplicates) → split **15,011 / 1,556 / 889** (46 repos) → golden **2,313** → tokenized **14,833 / 1,550 / 885 / 2,304** (train/val/test/golden).
 
-**Reproducibility:** any stage can be re-run independently (`--stages ingest,validate,clean`, `--resume-from validated|cleaned`), every run is hash-pinned in a `manifest.json` + `dataset_card.md`, and artifacts are versioned in W&B and mirrored to GCS. See [docs/dataset.md](docs/dataset.md).
+**Reproducibility:** any stage can be re-run independently (`--stages ingest,validate,clean`, `--resume-from validated|cleaned`), every run is hash-pinned in a `manifest.json` + `dataset_card.md`, and artifacts are versioned in W&B and mirrored to GCS. See [docs/dataset.md](dataset.md).
 
 ### 2. QLoRA Training (`training/`)
 
@@ -129,7 +129,7 @@ python scripts/run_3config_comparison.py --run-id expanded-repos --max-train-sam
 
 **Prompts are versioned components** (`training/prompts/`): `system.j2`, `user.j2`, `assistant.j2`, `chat.j2` - Jinja2 templates shared with inference (`inference/prompt_builder.py`), so a prompt change between two experiments is **attributable and auditable** (not a silent confounder). `evaluation.cli run_prompt_ab` runs A/B prompt-template comparisons (`--sample 200`) with the same paired significance machinery.
 
-See [docs/experiments.md](docs/experiments.md) for the full training/experiment loop.
+See [docs/experiments.md](experiments.md) for the full training/experiment loop.
 
 <p align="center">
 
@@ -180,7 +180,7 @@ flowchart TB
 - Runs **resume** (`--resume run_id`), persist under `data/eval_results/` with `cost_usd` billing, and stream per-example + aggregate rows to the W&B `swe-qwen` project.
 - `compare` re-aggregates on the **paired** instances, reports `F2PMetrics` (rates + 95% Wilson CIs + latency + per-repo breakdown), then McNemar + paired bootstrap across runs - the numbers behind `assets/results.txt`.
 
-The released reference run (100 golden instances/model) is reproduced from `assets/results.txt` in [docs/evaluation.md](docs/evaluation.md) - with the champion `higher_rank_14b` clearing the promotion gate (F2P 17.20% ≥ 15%, P2P 90.10% ≥ 90%).
+The released reference run (100 golden instances/model) is reproduced from `assets/results.txt` in [docs/evaluation.md](evaluation.md) - with the champion `higher_rank_14b` clearing the promotion gate (F2P 17.20% ≥ 15%, P2P 90.10% ≥ 90%).
 
 ### 4. Promotion & Registry (`promotion/`)
 
@@ -206,7 +206,7 @@ Promotion is a **decision with a paper trail**, never a merge. `promotion/` spli
 3. **No regression** - P2P may not drop more than 2 points across the paired set; an offensive win that breaks other tests is not a win.
 4. **Silent promotions are rejected** - if a challenger can't clear its own confidence interval, `gate.py` keeps the incumbent and writes the rejection for the audit trail.
 
-**Who remembers:** the champion of record is `gs://swe-qwen-datasets/ci/champion.json` (read by `eval.yml` - which also derives the smoke `--models` from its `model_ref` - and the dashboards); `registry.py` appends the full decision record to the W&B `eval-champion` collection; deployment is gated to the `production` environment, and any step can be **dry-run** with `RUN_MODAL_EVAL=false` - the gate re-scores the last logged numbers at $0.
+**Who remembers:** the champion of record is `gs://swe-qwen-datasets/ci/champion.json` (read by `eval.yml` - which also derives the smoke `--models` from its `model_ref` - and the dashboards); `registry.py` appends the full decision record to the W&B `eval-champion` collection; deployment is gated to the `production` environment.
 
 ```bash
 python -m evaluation.cli compare --run_ids run_baseline,run_golden --promote-to-registry    # local gate + promote
@@ -222,9 +222,9 @@ OpenAI-compatible API surface - **your client code doesn't change**. `POST /v1/c
 | `POST /v1/chat/completions` | Bearer (`MODAL_SERVE_TOKEN`, constant-time compare, fail-closed) | chat completion, SSE streaming (`data: [DONE]`) |
 | `GET /health` | open | `{status, model, engine}` |
 
-Engines: **VLLMEngine** (`SERVING_STUB=0`; this run: AWQ int4 `Qwen/Qwen3-14B-AWQ` - or the plain `hf_id` in bf16/fp16 when the model has no `serving_hf_id`, with the `quantization` kwarg omitted; `enable_lora=True`, `max_lora_rank=64`, gpu_mem 0.85, 16 max seqs, `LoRARequest(lora_int_id=1)` per request) and **StubEngine** (default, deterministic local dev). Prompt assembly applies the registry `prompt_behavior.no_think` gate (this run: Qwen3 `/no_think\n### Response`) for LoRA models. Full API reference: [docs/api.md](docs/api.md).
+Engines: **VLLMEngine** (`SERVING_STUB=0`; this run: AWQ int4 `Qwen/Qwen3-14B-AWQ` - or the plain `hf_id` in bf16/fp16 when the model has no `serving_hf_id`, with the `quantization` kwarg omitted; `enable_lora=True`, `max_lora_rank=64`, gpu_mem 0.85, 16 max seqs, `LoRARequest(lora_int_id=1)` per request) and **StubEngine** (default, deterministic local dev). Prompt assembly applies the registry `prompt_behavior.no_think` gate (this run: Qwen3 `/no_think\n### Response`) for LoRA models. Full API reference: [docs/api.md](api.md).
 
-**Wire format** - OpenAI-compatible (`model_config = {"extra": "ignore"}`), see the full schemas in [docs/api.md](docs/api.md):
+**Wire format** - OpenAI-compatible (`model_config = {"extra": "ignore"}`), see the full schemas in [docs/api.md](api.md):
 
 ```json
 // POST /v1/chat/completions · Authorization: Bearer $MODAL_SERVE_TOKEN
