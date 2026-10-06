@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import inspect
 import os
 import sys
 import types
@@ -39,6 +41,15 @@ class _FakeModalApp:
         """
         _ = kwargs
 
+        def _run(func: Any, a: Any, k: Any) -> Any:
+            """Call the function directly (no container); async functions run
+            in a fresh event loop (mirrors Modal executing them in the
+            container's loop)."""
+            result = func(*a, **k)
+            if inspect.iscoroutine(result):
+                return asyncio.run(result)
+            return result
+
         def _deco(fn: Any) -> Any:
             fn._modal_function = True
 
@@ -54,11 +65,11 @@ class _FakeModalApp:
 
                 def local(self, *a, **k):
                     """Call the function directly (no container)."""
-                    return self._func(*a, **k)
+                    return _run(self._func, a, k)
 
                 def remote(self, *a, **k):
                     """Alias for local - no container."""
-                    return self._func(*a, **k)
+                    return _run(self._func, a, k)
 
             return _ModalFunctionWrapper(fn)
 
