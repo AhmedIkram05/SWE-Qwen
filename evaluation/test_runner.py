@@ -978,7 +978,11 @@ def _activate_venv(venv_dir: Path) -> None:
 
 
 _BASELINE_CACHE_DIR = Path("/test_cache") / "instance_baselines"
-_BASELINE_CACHE_VERSION = 2  # invalidates caches from before test_patch/gold_patch flow
+# v2: invalidates caches from before test_patch/gold_patch flow.
+# v3: invalidates v2 payloads written by the batch path, which stored an
+# empty tests_before (divergent schema — a later single-instance cache hit
+# would report an empty tests_before as ground-truth context).
+_BASELINE_CACHE_VERSION = 3
 _VERIFIED_DIR = Path("/test_cache") / ".verified"
 
 
@@ -1007,12 +1011,18 @@ def _load_baseline_cache(instance_id: str, base_sha: str) -> dict[str, Any] | No
 
 
 def _save_baseline_cache(instance_id: str, data: dict[str, Any]) -> None:
-    """Atomically save baseline cache for *instance_id*."""
+    """Atomically save baseline cache for *instance_id*.
+
+    Stamps the current schema version into the payload so every writer
+    (single-instance and batch) produces the same cache schema — callers
+    cannot write a stale version by hand.
+    """
     _BASELINE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = _baseline_cache_path(instance_id)
     tmp = path.with_name(path.name + ".tmp")
+    payload = {**data, "version": _BASELINE_CACHE_VERSION}
     try:
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)
     except OSError:
         logger.warning("failed to write baseline cache for %s", instance_id)
@@ -1128,8 +1138,14 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     instance_id: str = "",
     verify_mode: str = "all",
     gold_patch: str | None = None,
+    repo_name: str | None = None,
+    gt_error_hint: str = "missing image?",
 ) -> dict[str, Any]:
     """Run the full per-instance eval test sequence against ``repo_dir``.
+
+    Shared by ``run_tests_in_container``, ``_run_swebench_instance_body``
+    and (one call per job) ``run_tests_batch`` — the single source of truth
+    for baseline-cache read/write and ground-truth verification.
 
     Assumes ``repo_dir`` is a git checkout whose history contains
     ``base_sha`` (swebench image or cloned/installed repo).  Sequence:
@@ -1158,10 +1174,11 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     logger.info("── instance %s (%d tests) ──", instance_id or repo_dir.name, len(test_names))
     # ponytail: /testbed is the same name in every swebench image — key the
     # once-per-repo marker on the instance's real repo, not the filesystem name
-    if str(repo_dir) == "/testbed":
-        repo_name = _swebench_repo_key(instance_id) if instance_id else "testbed"
-    else:
-        repo_name = str(repo_dir)
+    if repo_name is None:
+        if str(repo_dir) == "/testbed":
+            repo_name = _swebench_repo_key(instance_id) if instance_id else "testbed"
+        else:
+            repo_name = str(repo_dir)
 
     if reset_first:
         _reset_to_base(repo_dir, base_sha)
@@ -1230,7 +1247,7 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
                 "warning": f2p < _GT_F2P_THRESHOLD,
             }
             if f2p < _GT_F2P_THRESHOLD:
-                error = "ground truth F2P<100% (env drift or missing image?)"
+                error = f"ground truth F2P<100% (env drift or {gt_error_hint})"
                 logger.error("%s for %s", error, repo_dir)
             # First successful verification → mark repo as verified
             elif verify_mode == "once_per_repo" and not _is_repo_verified(repo_key):
@@ -1251,7 +1268,6 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
             _save_baseline_cache(
                 instance_id,
                 {
-                    "version": _BASELINE_CACHE_VERSION,
                     "base_sha": base_sha,
                     "tests_before": [t.model_dump() for t in tests_before],
                     "tests_head": [t.model_dump() for t in tests_head],
@@ -1554,10 +1570,16 @@ def swebench_fn(repo: str, instance_id: str) -> Any:
     return fn
 
 
+# Modal function timeout for run_tests_batch (seconds). The truncation
+# guard inside the function returns partial results _BATCH_FN_TIMEOUT - 300
+# seconds in — derive both from this one constant, never hand-mirror literals.
+_BATCH_FN_TIMEOUT = 3600
+
+
 @app.function(
     image=BASE_IMAGE,
     volumes={"/repo_cache": repo_volume, "/test_cache": test_volume},
-    timeout=3600,  # 60 min: batch runs multiple repos, each may need 15 min for pip install
+    timeout=_BATCH_FN_TIMEOUT,  # 60 min: multiple repos, up to 15 min each for pip install
     gpu=None,
 )
 def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
@@ -1572,14 +1594,15 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     """Execute test suites for multiple patches in a single container.
 
     One container per (repo, base_sha): clone once, checkout once, install
-    once, run ``tests_before`` once, then per job: apply ground-truth
-    ``test_patch`` + ``gold_patch`` (per-job; gold patches differ per
-    instance so there is no shared-head fast path), verify ground truth,
-    reset, re-apply ``test_patch`` then the generated patch and run
-    ``tests_after`` (F2P tests only exist with test_patch applied).
+    once, then each job runs the shared per-instance sequence
+    (``_execute_instance``): reset -> ground-truth ``test_patch`` +
+    ``gold_patch`` -> ground truth -> reset -> ``test_patch`` + generated
+    patch -> ``tests_after``.
 
-    Uses baseline cache (T3) when jobs carry ``instance_id`` keys, and
-    honours *verify_mode* for once-per-repo ground-truth (T4).
+    Sharing the single-instance helper is what keeps the baseline cache
+    consistent: every job writes the same schema (real per-instance
+    ``tests_before``, version stamped by ``_save_baseline_cache``) instead
+    of the old divergent payload with an empty ``tests_before``.
 
     Args:
         repo: GitHub repo ``"owner/name"``.
@@ -1588,7 +1611,8 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
             their own ``test_patch`` key (SWE-bench instances in the same repo
             have distinct test patches).
         test_jobs: Per-job dicts with ``generated_patch``, ``fail_to_pass``,
-            ``pass_to_pass``, and optionally ``test_patch`` / ``instance_id``.
+            ``pass_to_pass``, and optionally ``test_patch`` / ``gold_patch`` /
+            ``instance_id``.
         timeout: Per-test timeout in seconds.
         max_retries: Extra attempts for failed/errored tests.
         verify_mode: Ground-truth verification mode.
@@ -1600,10 +1624,6 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     import time
 
     start_time = time.time()
-
-    from evaluation.metrics import compute_f2p
-    from evaluation.patch_applier import apply_patch
-    from evaluation.schema import PatchApplicationResult, TestResult
 
     repo_dir = Path("/repo_cache") / repo
 
@@ -1625,194 +1645,63 @@ def run_tests_batch(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
         }
         return [dict(error_result) for _ in test_jobs]
 
-    # ── Shared: tests_before (same base state for all jobs) ──
-    all_test_names: list[str] = []
-    for job in test_jobs:
-        all_test_names.extend(job.get("fail_to_pass") or [])
-        all_test_names.extend(job.get("pass_to_pass") or [])
-    all_test_names = list(set(all_test_names))
-
-    # ponytail: baseline runs use max_retries=0 — flaky detection only matters for the final eval
-    tests_before = collect_test_results(repo_dir, all_test_names, timeout=timeout, max_retries=0)
-
-    # ── Per-job: reset, ground truth, apply generated patch, run tests_after ──
-    job_test_patches = [job.get("test_patch") or test_patch or "" for job in test_jobs]
-    job_gold_patches = [job.get("gold_patch") or "" for job in test_jobs]
+    # ── Per-job: shared helper does reset, ground truth, patch, tests_after ──
     results: list[dict[str, Any]] = []
     for i, job in enumerate(test_jobs):
         elapsed = time.time() - start_time
-        batch_timeout_warn = 3300
-        if elapsed > batch_timeout_warn:
+        if elapsed > _BATCH_FN_TIMEOUT - 300:  # return partial results before Modal kills the fn
             logger.warning("Approaching fn timeout for %s, truncating remaining jobs", repo)
-            remaining_jobs = len(test_jobs) - i
-            if remaining_jobs > 0:
-                error_result = {
-                    "repo": repo,
-                    "base_sha": base_sha,
-                    "error": "timeout approaching, truncated",
-                    "tests_before": [t.model_dump() for t in tests_before],
-                    "tests_head": [],
-                    "tests_after": [],
-                    "patch_application": {},
-                    "ground_truth": {},
-                }
-                results.extend([dict(error_result) for _ in range(remaining_jobs)])
+            error_result = {
+                "repo": repo,
+                "base_sha": base_sha,
+                "error": "timeout approaching, truncated",
+                "tests_before": [],
+                "tests_head": [],
+                "tests_after": [],
+                "patch_application": {},
+                "ground_truth": {},
+            }
+            results.extend([dict(error_result) for _ in range(len(test_jobs) - i)])
             break
 
         logger.info(
             "Processing job %d/%d for %s (%.1fs elapsed)", i + 1, len(test_jobs), repo, elapsed
         )
-        _reset_to_base(repo_dir, base_sha)
-
-        fail_to_pass = job.get("fail_to_pass") or []
-        pass_to_pass = job.get("pass_to_pass") or []
-        job_test_names = [*fail_to_pass, *pass_to_pass]
         job_instance_id = job.get("instance_id") or ""
-
-        # Use baseline cache or compute tests_head
-        tests_head: list[TestResult] = []
-        ground_truth: dict[str, Any] = {}
-        job_error: str | None = None
-        job_test_patch = job_test_patches[i]
-        cached = _load_baseline_cache(job_instance_id, base_sha) if job_instance_id else None
-
-        if cached is not None:
-            tests_head = [TestResult.model_validate(t) for t in (cached.get("tests_head") or [])]
-            ground_truth = cached.get("ground_truth") or {}
-            logger.info("baseline cache hit for job %s", job_instance_id)
-
-        elif job_test_patch:
-            skip_gt = verify_mode == "once_per_repo" and _is_repo_verified(repo)
-            if skip_gt:
-                ground_truth = {"f2p": 1.0, "p2p": 1.0, "warning": False, "skipped": True}
-            else:
-                patch_result = apply_patch(repo_dir, job_test_patch, base_sha, skip_checkout=True)
-                if patch_result.success:
-                    gold_patch = job_gold_patches[i]
-                    if gold_patch:
-                        gold_result = apply_patch(
-                            repo_dir, gold_patch, base_sha, skip_checkout=True
-                        )
-                        if not gold_result.success:
-                            logger.warning(
-                                "gold_patch application failed for %s: %s",
-                                repo,
-                                gold_result.error,
-                            )
-                    _install_repo(repo_dir)
-                    tests_head = collect_test_results(
-                        repo_dir, job_test_names, timeout=timeout, max_retries=0
-                    )
-                else:
-                    logger.warning(
-                        "test_patch application failed for %s: %s", repo, patch_result.error
-                    )
-                if tests_head:
-                    f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
-                        tests_before, tests_head, fail_to_pass, pass_to_pass
-                    )
-                    _before_names = {t.name for t in tests_before}
-                    _head_names = {t.name for t in tests_head}
-                    logger.info(
-                        "ground truth for %s: f2p=%.2f p2p=%.2f | before: %d/%d collected, "
-                        "head: %d/%d collected | f2p missed in before: %s | f2p missed in head: %s",
-                        repo,
-                        f2p,
-                        p2p,
-                        len(tests_before),
-                        len(job_test_names),
-                        len(tests_head),
-                        len(job_test_names),
-                        [n for n in fail_to_pass if n not in _before_names][:3],
-                        [n for n in fail_to_pass if n not in _head_names][:3],
-                    )
-                    ground_truth = {
-                        "f2p": f2p,
-                        "p2p": p2p,
-                        "warning": f2p < _GT_F2P_THRESHOLD,
-                    }
-                    if f2p < _GT_F2P_THRESHOLD:
-                        job_error = "ground truth F2P<100% (env drift or install incomplete?)"
-                        logger.error("%s for %s", job_error, repo)
-                    elif verify_mode == "once_per_repo" and not _is_repo_verified(repo):
-                        _mark_repo_verified(repo)
-
-            if job_instance_id and not job_error:
-                _save_baseline_cache(
-                    job_instance_id,
-                    {
-                        "version": 2,
-                        "base_sha": base_sha,
-                        "tests_before": [],
-                        "tests_head": [t.model_dump() for t in tests_head],
-                        "ground_truth": ground_truth,
-                    },
-                )
-
-        _reset_to_base(repo_dir, base_sha)
-
-        if job_error is not None:
-            logger.error("Skipping generated-patch tests for %s: %s", repo, job_error)
+        try:
+            result = _execute_instance(
+                repo_dir,
+                base_sha,
+                job.get("test_patch") or test_patch,
+                job.get("generated_patch"),
+                job.get("fail_to_pass") or [],
+                job.get("pass_to_pass") or [],
+                timeout,
+                max_retries,
+                instance_id=job_instance_id,
+                verify_mode=verify_mode,
+                gold_patch=job.get("gold_patch"),
+                repo_name=repo,
+                gt_error_hint="install incomplete?",
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad job must not kill the batch
+            logger.error(
+                "job %d failed for %s: %s", i + 1, job_instance_id or repo, exc, exc_info=True
+            )
             results.append(
                 {
                     "repo": repo,
                     "base_sha": base_sha,
-                    "error": job_error,
-                    "tests_before": [t.model_dump() for t in tests_before],
-                    "tests_head": [t.model_dump() for t in tests_head],
+                    "error": str(exc),
+                    "tests_before": [],
+                    "tests_head": [],
                     "tests_after": [],
                     "patch_application": {},
-                    "ground_truth": ground_truth,
+                    "ground_truth": {},
                 }
             )
-            logger.info("Completed job %d/%d for %s (errored)", i + 1, len(test_jobs), repo)
             continue
-
-        generated_patch = job.get("generated_patch") or ""
-        if generated_patch:
-            if job_test_patch:
-                apply_patch(repo_dir, job_test_patch, base_sha, skip_checkout=True)
-            patch_result = apply_patch(repo_dir, generated_patch, base_sha, skip_checkout=True)
-            if patch_result.success:
-                _install_repo(repo_dir)
-                tests_after = collect_test_results(
-                    repo_dir, job_test_names, timeout=timeout, max_retries=max_retries
-                )
-            else:
-                logger.warning(
-                    "generated patch application failed for %s: %s",
-                    repo,
-                    patch_result.error,
-                )
-                tests_after = [
-                    TestResult(
-                        name=n,
-                        status="errored",
-                        duration=0.0,
-                        output="patch did not apply",
-                        retry_count=0,
-                    )
-                    for n in job_test_names
-                ]
-        else:
-            patch_result = PatchApplicationResult(
-                success=False,
-                method_used="failed",
-                error="no generated patch provided",
-            )
-            tests_after = []
-
-        results.append(
-            {
-                "repo": repo,
-                "base_sha": base_sha,
-                "tests_before": [t.model_dump() for t in tests_before],
-                "tests_head": [t.model_dump() for t in tests_head],
-                "tests_after": [t.model_dump() for t in tests_after],
-                "patch_application": patch_result.model_dump(),
-                "ground_truth": ground_truth,
-            }
-        )
+        results.append(result)
         logger.info("Completed job %d/%d for %s", i + 1, len(test_jobs), repo)
 
     return results

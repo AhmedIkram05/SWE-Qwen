@@ -1694,3 +1694,28 @@ class TestRunTestsBatch:
         assert len(results) == 3
         assert results[0]["error"] == "timeout approaching, truncated"
         assert all(r["error"] == "timeout approaching, truncated" for r in results)
+
+    def test_batch_cache_write_matches_single_instance_schema(self, monkeypatch, tmp_path):
+        """Batch-written caches carry the shared schema: current version + real tests_before."""
+        self._setup(monkeypatch)
+        monkeypatch.setattr(tr, "_BASELINE_CACHE_DIR", tmp_path / "baselines")
+        jobs = [
+            {
+                "instance_id": "inst-batch-cache-1",
+                "test_patch": "tp",
+                "generated_patch": "g1",
+                "fail_to_pass": ["t1"],
+                "pass_to_pass": ["p1"],
+            },
+        ]
+        results = tr.run_tests_batch.local("o/r", "sha", "tp", jobs)
+        assert results[0].get("error") is None
+
+        cached = tr._load_baseline_cache("inst-batch-cache-1", "sha")
+        assert cached is not None
+        assert cached["version"] == tr._BASELINE_CACHE_VERSION
+        # real per-instance before-run (base + test_patch), not the old empty placeholder
+        assert [t["name"] for t in cached["tests_before"]] == ["t1", "p1"]
+        assert cached["tests_before"][0]["status"] == "failed"
+        assert len(cached["tests_head"]) == 2
+        assert cached["ground_truth"] == {"f2p": 1.0, "p2p": 1.0, "warning": False}
