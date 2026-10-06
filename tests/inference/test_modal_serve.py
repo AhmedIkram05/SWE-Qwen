@@ -5,12 +5,14 @@ decorated class bodies are exercised directly with a stubbed ``VLLMEngine``.
 No cloud, no GPU, no network.
 """
 
+import asyncio
 import shutil
 from pathlib import Path
 
 import pytest
 
 from inference import modal_serve
+from inference.serve import GenerationResult
 
 pytestmark = pytest.mark.unit
 
@@ -29,18 +31,43 @@ def registry_dir(tmp_path: Path) -> Path:
 
 class TestBuildSmoke:
     def test_generates_ping_on_a_fake_engine(self, mocker):
-        engine = mocker.MagicMock()
-        mocker.patch("inference.modal_serve.VLLMEngine", return_value=engine)
-        modal_serve._build_smoke()
-        engine.generate.assert_called_once_with(
-            "ping",
-            lora=None,
-            max_tokens=8,
-            temperature=0.0,
-            top_p=1.0,
-            stop=None,
-            repetition_penalty=1.0,
-        )
+        calls: list[dict] = []
+
+        class FakeEngine:
+            def __init__(self, config):
+                self.config = config
+
+            async def generate(
+                self, prompt, *, lora, max_tokens, temperature, top_p, stop, repetition_penalty
+            ):
+                calls.append(
+                    {
+                        "prompt": prompt,
+                        "lora": lora,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "top_p": top_p,
+                        "stop": stop,
+                        "repetition_penalty": repetition_penalty,
+                    }
+                )
+                yield GenerationResult(
+                    text="pong", prompt_tokens=1, completion_tokens=1, finished=True
+                )
+
+        mocker.patch("inference.modal_serve.VLLMEngine", FakeEngine)
+        asyncio.run(modal_serve._build_smoke())
+        assert calls == [
+            {
+                "prompt": "ping",
+                "lora": None,
+                "max_tokens": 8,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stop": None,
+                "repetition_penalty": 1.0,
+            }
+        ]
 
 
 class TestModelServer:

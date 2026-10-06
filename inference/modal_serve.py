@@ -80,7 +80,7 @@ def resolve_serving_gpu(repo_root: Path | None = None) -> str:
 _SERVING_GPU = resolve_serving_gpu()
 
 
-def _build_smoke() -> None:
+async def _build_smoke() -> None:
     """Boot-time fail-fast: engine init errors (VRAM, max_model_len) surface
     during image build, not at first request.
 
@@ -91,7 +91,7 @@ def _build_smoke() -> None:
     reuse it instead of re-downloading 28 GB.
     """
     engine = VLLMEngine(ServeConfig())
-    engine.generate(
+    async for _ in engine.generate(
         "ping",
         lora=None,
         max_tokens=8,
@@ -99,7 +99,8 @@ def _build_smoke() -> None:
         top_p=1.0,
         stop=None,
         repetition_penalty=1.0,
-    )
+    ):
+        pass
 
 
 app = modal.App("swe-qwen-serving")

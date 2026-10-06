@@ -6,13 +6,15 @@ shared prompt builder (``prompt_builder``) to a pluggable engine: the real
 deterministic ``StubEngine`` for local dev and tests.
 
 Local dev: ``uvicorn inference.serve:app`` (module-level ``app``) uses the
-stub engine unless ``SERVING_STUB=0`` selects the vLLM engine.  Sync route
-handlers run in FastAPI's threadpool; vLLM's sync engine is thread-safe and
-batches internally.
+stub engine unless ``SERVING_STUB=0`` selects the vLLM engine.  Route handlers
+are ``async def``; the engine is vLLM's ``AsyncLLMEngine`` whose core runs in
+a background subprocess with per-request output queues, so concurrent
+requests don't couple and streaming yields real token deltas.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hmac
 import json
@@ -21,7 +23,8 @@ import os
 import random
 import threading
 import time
-from collections.abc import Iterator
+import uuid
+from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
 from fastapi import FastAPI, Header
@@ -37,9 +40,11 @@ from inference.openai_compat import (
     ModelNotFoundError,
     assemble_response,
     build_messages,
+    content_chunk_frame,
     create_request_id,
     error_response,
-    iter_chunks,
+    final_chunk_frame,
+    first_chunk_frame,
     resolve_engine_model,
 )
 from inference.telemetry import MetricsCollector, RequestRecord, add_trace_record
@@ -50,16 +55,28 @@ logger = logging.getLogger(__name__)
 
 
 class GenerationResult:
-    """One engine generation: text plus token accounting."""
+    """One incremental engine output: CUMULATIVE text plus token accounting."""
 
-    def __init__(self, text: str, prompt_tokens: int, completion_tokens: int) -> None:
+    def __init__(
+        self,
+        text: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        finished: bool = False,
+    ) -> None:
         self.text = text
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
+        self.finished = finished
 
 
 class Engine(Protocol):
-    """Minimal generation contract implemented by both engines."""
+    """Minimal generation contract implemented by both engines.
+
+    ``generate`` is an async generator: each yield is one incremental
+    (CUMULATIVE) engine output, so the serving layer streams real token
+    deltas and per-request completion never couples to other requests.
+    """
 
     def generate(  # noqa: PLR0913
         self,
@@ -71,7 +88,7 @@ class Engine(Protocol):
         top_p: float,
         stop: str | list[str] | None,
         repetition_penalty: float,
-    ) -> GenerationResult: ...
+    ) -> AsyncIterator[GenerationResult]: ...
 
 
 # ── vLLM engine ────────────────────────────────────────────────────────────
@@ -106,8 +123,13 @@ class VLLMEngine:
         return spec.hf_id, None
 
     def _ensure_engine(self) -> Any:
-        """Return the process-singleton vLLM LLM for this config's model."""
-        from vllm import LLM
+        """Return the process-singleton vLLM AsyncLLMEngine for this config's model.
+
+        Lazy on the first request's event loop: the engine core runs in a
+        background subprocess, so ``from_engine_args`` is loop-safe outside a
+        running loop too (vLLM starts its output handler lazily and idempotently).
+        """
+        from vllm import AsyncEngineArgs, AsyncLLMEngine
 
         key, quantization = self._engine_spec()
         with _LLM_LOCK:
@@ -126,11 +148,11 @@ class VLLMEngine:
                 # Only the pre-quantized base path (validated against vLLM at
                 # load time); the plain base gets vLLM's native dtype.
                 llm_kwargs["quantization"] = quantization
-            llm = LLM(**llm_kwargs)
+            llm = AsyncLLMEngine.from_engine_args(AsyncEngineArgs(**llm_kwargs))
             _LLM_CACHE[key] = llm
             return llm
 
-    def generate(  # noqa: PLR0913
+    async def generate(  # noqa: PLR0913
         self,
         prompt: str,
         *,
@@ -140,7 +162,14 @@ class VLLMEngine:
         top_p: float,
         stop: str | list[str] | None,
         repetition_penalty: float,
-    ) -> GenerationResult:
+    ) -> AsyncIterator[GenerationResult]:
+        """Stream this request's incremental outputs (no cross-request bleed).
+
+        One unique ``request_id`` per call: vLLM's AsyncLLMEngine keeps a
+        per-request output queue, so each generator sees only its own
+        CUMULATIVE outputs, and closing the generator (client disconnect)
+        aborts just this engine request.
+        """
         from vllm import SamplingParams
         from vllm.lora.request import LoRARequest
 
@@ -157,13 +186,16 @@ class VLLMEngine:
             stop=stop or [],
             repetition_penalty=repetition_penalty,
         )
-        outputs = llm.generate([prompt], sampling_params, lora_request=lora_request)
-        output = outputs[0]
-        return GenerationResult(
-            text=output.outputs[0].text,
-            prompt_tokens=len(output.prompt_token_ids),
-            completion_tokens=len(output.outputs[0].token_ids),
-        )
+        request_id = uuid.uuid4().hex
+        async for out in llm.generate(
+            prompt, sampling_params, request_id, lora_request=lora_request
+        ):
+            yield GenerationResult(
+                text=out.outputs[0].text,
+                prompt_tokens=len(out.prompt_token_ids or []),
+                completion_tokens=len(out.outputs[0].token_ids),
+                finished=out.finished,
+            )
 
 
 class StubEngine:
@@ -173,7 +205,7 @@ class StubEngine:
     inference.serve:app`` by default so local dev never touches vLLM.
     """
 
-    def generate(  # noqa: PLR0913
+    async def generate(  # noqa: PLR0913
         self,
         prompt: str,
         *,
@@ -183,14 +215,15 @@ class StubEngine:
         top_p: float,
         stop: str | list[str] | None,
         repetition_penalty: float,
-    ) -> GenerationResult:
+    ) -> AsyncIterator[GenerationResult]:
         model_tag = lora[0] if lora is not None else "base"
         logger.info("StubEngine generate (model=%s)", model_tag)
         text = f"stub[{model_tag}]: ...{prompt[-40:]}"
-        return GenerationResult(
+        yield GenerationResult(
             text=text,
             prompt_tokens=len(prompt.split()),
             completion_tokens=len(text.split()),
+            finished=True,
         )
 
 
@@ -271,7 +304,7 @@ def _is_authorized(authorization: str | None) -> bool:
     return scheme == "Bearer" and hmac.compare_digest(token, expected)
 
 
-def _stream_gen(  # noqa: PLR0913, PLR0917
+async def _stream_gen(  # noqa: PLR0913, PLR0917
     engine: Engine,
     request: ChatCompletionRequest,
     config: ServeConfig,
@@ -281,20 +314,25 @@ def _stream_gen(  # noqa: PLR0913, PLR0917
     request_id: str,
     created: int,
     t0: float,
-) -> Iterator[str]:
-    """SSE generator: build prompt, generate, stream word chunks, telemetry.
+) -> AsyncIterator[str]:
+    """SSE generator: build prompt, stream real token deltas, telemetry.
 
-    Generation errors are streamed to the client as an OpenAI-style error
-    frame followed by ``[DONE]``; telemetry is recorded exactly once in the
-    ``finally`` block (TTFB = time of the first yielded chunk).
+    Engine outputs are CUMULATIVE: only the new suffix of each yield is
+    streamed (word chunks), so the client sees incremental text as it is
+    generated instead of a dump after completion.  Generation errors are
+    streamed to the client as an OpenAI-style error frame followed by
+    ``[DONE]``; telemetry is recorded exactly once in the ``finally`` block
+    (TTFB = time of the first yielded chunk).
     """
     ttfbs_ms: float | None = None
     output_tokens = 0
     error_type: str | None = None
+    sent = 0
+    role_sent = False
     try:
         system_prompt, user_text = build_messages(request)
         prompt = _build_prompt(hf_id, system_prompt, user_text, lora)
-        result = engine.generate(
+        async for res in engine.generate(
             prompt,
             lora=lora,
             max_tokens=max_tokens,
@@ -304,17 +342,43 @@ def _stream_gen(  # noqa: PLR0913, PLR0917
             repetition_penalty=request.repetition_penalty
             if request.repetition_penalty is not None
             else config.repetition_penalty,
+        ):
+            # CUMULATIVE outputs: stream only the new suffix.  (sse-starlette
+            # adds its own "data: " framing, so hand it the raw payloads.)
+            delta = res.text[sent:] if len(res.text) > sent else ""
+            sent = len(res.text)
+            if delta:
+                if not role_sent:
+                    ttfbs_ms = (time.perf_counter() - t0) * 1000.0
+                    role_sent = True
+                    yield (
+                        first_chunk_frame(request_id, created, request.model)
+                        .removeprefix("data: ")
+                        .rstrip("\n")
+                    )
+                for word in delta.split():
+                    yield (
+                        content_chunk_frame(request_id, created, request.model, word)
+                        .removeprefix("data: ")
+                        .rstrip("\n")
+                    )
+            if res.finished:
+                output_tokens = res.completion_tokens
+                break
+        yield (
+            final_chunk_frame(request_id, created, request.model)
+            .removeprefix("data: ")
+            .rstrip("\n")
         )
-        # ponytail: full token-streaming via a future engine stream API;
-        # V1 streams word chunks of the completed text.
-        pieces = result.text.split() or [""]
-        for frame in iter_chunks(request_id, created, request.model, iter(pieces)):
-            if ttfbs_ms is None:
-                ttfbs_ms = (time.perf_counter() - t0) * 1000.0
-            # iter_chunks yields full "data: ...\n\n" SSE frames; sse-starlette
-            # adds its own "data: " framing, so hand it the raw payloads.
-            yield frame.removeprefix("data: ").rstrip("\n")
-        output_tokens = result.completion_tokens
+        yield "[DONE]"
+    except asyncio.CancelledError:
+        # Client disconnect: the ASGI server closes the in-flight generator;
+        # vLLM aborts this request's engine work when the generator is
+        # cancelled.  Re-raise so the runtime records the cancellation, but
+        # keep the container alive (telemetry records it as "cancelled").
+        error_type = "cancelled"
+        logger.debug("streaming request cancelled (model=%s)", request.model)
+        raise
     except RuntimeError:
         # Client disconnect / request cancellation: the ASGI server closes the
         # in-flight generator and raises INTO the suspended yield.  Expected
@@ -393,7 +457,7 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
         }
 
     @app.post("/v1/chat/completions", response_model=None)
-    def chat_completions(
+    async def chat_completions(
         payload: dict[str, Any],
         authorization: str | None = Header(default=None),
     ) -> ChatCompletionResponse | EventSourceResponse | JSONResponse:
@@ -456,10 +520,11 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
                 headers={"Cache-Control": "no-cache"},
             )
 
+        last: GenerationResult | None = None
         try:
             system_prompt, user_text = build_messages(request)
             prompt = _build_prompt(hf_id, system_prompt, user_text, lora)
-            result = engine.generate(
+            async for res in engine.generate(
                 prompt,
                 lora=lora,
                 max_tokens=max_tokens,
@@ -469,9 +534,11 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
                 repetition_penalty=request.repetition_penalty
                 if request.repetition_penalty is not None
                 else config.repetition_penalty,
-            )
+            ):
+                last = res
         except Exception:
             logger.exception("generation failed for model=%s", request.model)
+        if last is None:
             _, body = error_response(500, "internal generation failure", "server_error")
             _record(
                 request.model,
@@ -484,6 +551,7 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
                 t0=t0,
             )
             return JSONResponse(status_code=500, content=body)
+        result = last
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         _record(
             request.model,

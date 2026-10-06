@@ -5,8 +5,10 @@ The ``vllm`` package is faked via ``sys.modules`` inside the tests; the
 tokenizer cache is stubbed so nothing ever touches HuggingFace.
 """
 
+import asyncio
 import sys
 import types
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,25 +33,34 @@ def fake_adapter(monkeypatch):
 
 def _install_fake_vllm(mocker) -> dict:
     """Install a vLLM stand-in capturing constructor/generate arguments."""
-    vllm_mod = types.ModuleType("vllm")
+    vllm_mod: Any = types.ModuleType("vllm")
     state: dict = {}
 
-    class FakeLLM:
-        def __init__(self, **kwargs):
-            state["llm_kwargs"] = kwargs
-
-        def generate(self, prompts, sampling_params, lora_request=None):
+    class FakeAsyncLLM:
+        async def generate(self, prompt, sampling_params, request_id, lora_request=None):
             state["sampling_params"] = sampling_params
             state["lora_request"] = lora_request
             token = types.SimpleNamespace(text="generated text", token_ids=[1, 2, 3])
-            output = types.SimpleNamespace(outputs=[token], prompt_token_ids=[4, 5, 6])
-            return [output]
+            output = types.SimpleNamespace(
+                outputs=[token], prompt_token_ids=[4, 5, 6], finished=True
+            )
+            yield output
 
-    vllm_mod.LLM = FakeLLM
+    class FakeAsyncEngineArgs:
+        def __init__(self, **kwargs):
+            state["llm_kwargs"] = kwargs
+
+    class FakeAsyncLLMEngine:
+        @classmethod
+        def from_engine_args(cls, _args, **_kwargs):
+            return FakeAsyncLLM()
+
+    vllm_mod.AsyncEngineArgs = FakeAsyncEngineArgs
+    vllm_mod.AsyncLLMEngine = FakeAsyncLLMEngine
     vllm_mod.SamplingParams = types.SimpleNamespace
 
-    lora_mod = types.ModuleType("vllm.lora")
-    request_mod = types.ModuleType("vllm.lora.request")
+    lora_mod: Any = types.ModuleType("vllm.lora")
+    request_mod: Any = types.ModuleType("vllm.lora.request")
     request_mod.LoRARequest = lambda lora_name=None, lora_int_id=None, lora_path=None: (
         types.SimpleNamespace(lora_name=lora_name, lora_int_id=lora_int_id, lora_path=lora_path)
     )
@@ -63,20 +74,32 @@ def _install_fake_vllm(mocker) -> dict:
     return state
 
 
+async def _drain(agen):
+    """Consume an engine async generator; return its last yielded result."""
+    last = None
+    async for res in agen:
+        last = res
+    return last
+
+
 class TestVLLMEngine:
     def test_generate_with_lora_then_cache_hit(self, mocker):
         state = _install_fake_vllm(mocker)
         mocker.patch.object(serve, "_LLM_CACHE", {})
         engine = serve.VLLMEngine(ServeConfig())
 
-        result = engine.generate(
-            "prompt",
-            lora=("adapter_name", "/path"),
-            max_tokens=16,
-            temperature=0.0,
-            top_p=1.0,
-            stop=None,
-            repetition_penalty=1.0,
+        result = asyncio.run(
+            _drain(
+                engine.generate(
+                    "prompt",
+                    lora=("adapter_name", "/path"),
+                    max_tokens=16,
+                    temperature=0.0,
+                    top_p=1.0,
+                    stop=None,
+                    repetition_penalty=1.0,
+                )
+            )
         )
         assert result.text == "generated text"
         assert result.completion_tokens == 3
@@ -87,14 +110,18 @@ class TestVLLMEngine:
 
         # second engine reuses the process-singleton LLM (cache-hit branch)
         second = serve.VLLMEngine(ServeConfig())
-        result2 = second.generate(
-            "p2",
-            lora=None,
-            max_tokens=8,
-            temperature=0.5,
-            top_p=0.9,
-            stop=["\n\n"],
-            repetition_penalty=1.2,
+        result2 = asyncio.run(
+            _drain(
+                second.generate(
+                    "p2",
+                    lora=None,
+                    max_tokens=8,
+                    temperature=0.5,
+                    top_p=0.9,
+                    stop=["\n\n"],
+                    repetition_penalty=1.2,
+                )
+            )
         )
         assert result2.prompt_tokens == 3
         assert state["lora_request"] is None
@@ -104,14 +131,18 @@ class TestVLLMEngine:
         state = _install_fake_vllm(mocker)
         mocker.patch.object(serve, "_LLM_CACHE", {})
         engine = serve.VLLMEngine(ServeConfig())
-        engine.generate(
-            "p",
-            lora=("n", "p"),
-            max_tokens=4,
-            temperature=0.0,
-            top_p=1.0,
-            stop=[],
-            repetition_penalty=1.1,
+        asyncio.run(
+            _drain(
+                engine.generate(
+                    "p",
+                    lora=("n", "p"),
+                    max_tokens=4,
+                    temperature=0.0,
+                    top_p=1.0,
+                    stop=[],
+                    repetition_penalty=1.1,
+                )
+            )
         )
         assert state["sampling_params"].stop == []
 
@@ -143,14 +174,18 @@ class TestVLLMEngine:
         mocker.patch.object(serve, "load_models", return_value={"plain-base": spec})
         mocker.patch("inference.config.default_model_key", return_value="plain-base")
         engine = serve.VLLMEngine(ServeConfig())
-        engine.generate(
-            "p",
-            lora=None,
-            max_tokens=8,
-            temperature=0.0,
-            top_p=1.0,
-            stop=None,
-            repetition_penalty=1.0,
+        asyncio.run(
+            _drain(
+                engine.generate(
+                    "p",
+                    lora=None,
+                    max_tokens=8,
+                    temperature=0.0,
+                    top_p=1.0,
+                    stop=None,
+                    repetition_penalty=1.0,
+                )
+            )
         )
         assert state["llm_kwargs"]["model"] == "Owner/Plain-Base"
         assert "quantization" not in state["llm_kwargs"]
@@ -276,7 +311,7 @@ class _ThrowingEngine:
     def __init__(self, exc):
         self._exc = exc
 
-    def generate(  # noqa: PLR0913
+    async def generate(  # noqa: PLR0913
         self,
         prompt,
         *,
@@ -288,6 +323,7 @@ class _ThrowingEngine:
         repetition_penalty,
     ):
         raise self._exc
+        yield  # unreachable: makes this an async generator (raises on first anext)
 
 
 def _stream_payload():
@@ -331,26 +367,34 @@ class TestStreamingErrors:
 
 class TestStubEngine:
     def test_generates_tagged_text(self):
-        result = serve.StubEngine().generate(
-            "ppp",
-            lora=("qwen3-14b-v", "/p"),
-            max_tokens=1,
-            temperature=0.0,
-            top_p=1.0,
-            stop=None,
-            repetition_penalty=1.0,
+        result = asyncio.run(
+            _drain(
+                serve.StubEngine().generate(
+                    "ppp",
+                    lora=("qwen3-14b-v", "/p"),
+                    max_tokens=1,
+                    temperature=0.0,
+                    top_p=1.0,
+                    stop=None,
+                    repetition_penalty=1.0,
+                )
+            )
         )
         assert result.text.startswith("stub[qwen3-14b-v]:")
         assert result.prompt_tokens == 1
 
     def test_generates_base_tag_without_lora(self):
-        result = serve.StubEngine().generate(
-            "ppp",
-            lora=None,
-            max_tokens=1,
-            temperature=0.0,
-            top_p=1.0,
-            stop=None,
-            repetition_penalty=1.0,
+        result = asyncio.run(
+            _drain(
+                serve.StubEngine().generate(
+                    "ppp",
+                    lora=None,
+                    max_tokens=1,
+                    temperature=0.0,
+                    top_p=1.0,
+                    stop=None,
+                    repetition_penalty=1.0,
+                )
+            )
         )
         assert result.text.startswith("stub[base]:")

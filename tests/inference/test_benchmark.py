@@ -98,9 +98,9 @@ class TestSweepConfig:
             def __init__(self, config):
                 self.config = config
 
-            def generate(self, prompt, **kwargs):
+            async def generate(self, prompt, **kwargs):
                 type(self).generated += 1
-                return types.SimpleNamespace(completion_tokens=10)
+                yield types.SimpleNamespace(completion_tokens=10, finished=True)
 
         mocker.patch("inference.serve.VLLMEngine", FakeEngine)
         row = benchmark._sweep_config.remote(0.85, 16, "awq", 4096)
@@ -124,8 +124,9 @@ class TestSweepConfig:
             def __init__(self, config):
                 pass
 
-            def generate(self, *args, **kwargs):
+            async def generate(self, *args, **kwargs):
                 raise ValueError("out of VRAM")
+                yield  # unreachable: makes this an async generator
 
         mocker.patch("inference.serve.VLLMEngine", BoomEngine)
         row = benchmark._sweep_config.remote(0.85, 16, "awq", 4096)

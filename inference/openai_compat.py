@@ -219,6 +219,45 @@ def assemble_response(
     )
 
 
+def first_chunk_frame(request_id: str, created: int, model: str) -> str:
+    """SSE frame for the role chunk (``delta={"role": "assistant"}``)."""
+    return _chunk_frame(
+        request_id,
+        created,
+        model,
+        ChatChunkChoice(index=0, delta={"role": "assistant"}, finish_reason=None),
+    )
+
+
+def content_chunk_frame(request_id: str, created: int, model: str, piece: str) -> str:
+    """SSE frame for one content chunk (``delta={"content": piece}``)."""
+    return _chunk_frame(
+        request_id,
+        created,
+        model,
+        ChatChunkChoice(index=0, delta={"content": piece}, finish_reason=None),
+    )
+
+
+def final_chunk_frame(request_id: str, created: int, model: str) -> str:
+    """SSE frame for the final chunk (``delta={}``, ``finish_reason="stop"``)."""
+    return _chunk_frame(
+        request_id, created, model, ChatChunkChoice(index=0, delta={}, finish_reason="stop")
+    )
+
+
+def _chunk_frame(request_id: str, created: int, model: str, choice: ChatChunkChoice) -> str:
+    """Serialize one chunk choice into a complete SSE frame."""
+    chunk = ChatCompletionChunk(
+        id=request_id,
+        object="chat.completion.chunk",
+        created=created,
+        model=model,
+        choices=[choice],
+    )
+    return f"data: {json.dumps(chunk.model_dump(), ensure_ascii=False)}\n\n"
+
+
 def iter_chunks(
     request_id: str, created: int, model: str, content_iter: Iterator[str]
 ) -> Iterator[str]:
@@ -230,38 +269,10 @@ def iter_chunks(
     ``data: [DONE]``.  Every yielded item is a complete SSE frame
     (``data: {json}\\n\\n``, json with ``ensure_ascii=False``).
     """
-
-    def frame(chunk: ChatCompletionChunk) -> str:
-        return f"data: {json.dumps(chunk.model_dump(), ensure_ascii=False)}\n\n"
-
-    yield frame(
-        ChatCompletionChunk(
-            id=request_id,
-            object="chat.completion.chunk",
-            created=created,
-            model=model,
-            choices=[ChatChunkChoice(index=0, delta={"role": "assistant"}, finish_reason=None)],
-        )
-    )
+    yield first_chunk_frame(request_id, created, model)
     for piece in content_iter:
-        yield frame(
-            ChatCompletionChunk(
-                id=request_id,
-                object="chat.completion.chunk",
-                created=created,
-                model=model,
-                choices=[ChatChunkChoice(index=0, delta={"content": piece}, finish_reason=None)],
-            )
-        )
-    yield frame(
-        ChatCompletionChunk(
-            id=request_id,
-            object="chat.completion.chunk",
-            created=created,
-            model=model,
-            choices=[ChatChunkChoice(index=0, delta={}, finish_reason="stop")],
-        )
-    )
+        yield content_chunk_frame(request_id, created, model, piece)
+    yield final_chunk_frame(request_id, created, model)
     yield "data: [DONE]\n\n"
 
 
