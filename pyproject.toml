@@ -222,7 +222,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["training", "data_engineering", "scripts", "inference", "evaluation", "observability", "promotion"]
+source = ["training", "data_engineering", "scripts", "inference", "evaluation", "observability", "promotion", "registry"]
 omit = ["tests/*", "*/__pycache__/*", "*/conftest.py"]
 branch = true
 
@@ -235,6 +235,7 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
 ]
+fail_under = 90
 precision = 2
 
 [tool.pre-commit-hooks]
