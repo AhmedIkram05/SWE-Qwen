@@ -20,6 +20,7 @@ overwrites the file, ``benchmark`` appends its section.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import os
 import time
@@ -60,16 +61,16 @@ benchmark_app = modal.App("swe-qwen-benchmark")
     secrets=modal_serve._secrets,
     timeout=1800,
 )
-def _sweep_config(
+async def _sweep_config(
     gpu_memory_utilization: float, max_num_seqs: int, quantization: str, max_model_len: int
 ) -> dict[str, Any]:
-    """Boot one engine; measure N=10 synthetic generations + 16-thread concurrency."""
-    from inference.serve import VLLMEngine
+    """Boot one engine; measure N=10 synthetic generations + 16-way concurrency."""
+    from inference.serve import GenerationResult, VLLMEngine
 
     # ServeConfig is pydantic-settings with the SERVING_ env prefix, so these
     # vars flow into config.quantization / gpu_memory_utilization /
-    # max_num_seqs / max_model_len and from there into vLLM's LLM(...)
-    # (VLLMEngine._ensure_engine).
+    # max_num_seqs / max_model_len and from there into vLLM's
+    # AsyncEngineArgs(...) (VLLMEngine._ensure_engine).
     os.environ["SERVING_GPU_MEMORY_UTILIZATION"] = str(gpu_memory_utilization)
     os.environ["SERVING_MAX_NUM_SEQS"] = str(max_num_seqs)
     os.environ["SERVING_QUANTIZATION"] = quantization
@@ -82,42 +83,38 @@ def _sweep_config(
     concurrent_ok = False
     error: str | None = None
     t0 = time.perf_counter()
+
+    async def _drain(prompt: str, max_tokens: int) -> GenerationResult | None:
+        """Drive one generation to completion; return its final (CUMULATIVE) result."""
+        last: GenerationResult | None = None
+        async for res in engine.generate(
+            prompt,
+            lora=None,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            top_p=1.0,
+            stop=None,
+            repetition_penalty=1.0,
+        ):
+            last = res
+        return last
+
     try:
         for prompt in _SWEEP_PROMPTS:
             g0 = time.perf_counter()
-            result = engine.generate(
-                prompt,
-                lora=None,
-                max_tokens=64,
-                temperature=0.0,
-                top_p=1.0,
-                stop=None,
-                repetition_penalty=1.0,
-            )
+            result = await _drain(prompt, 64)
             elapsed_ms = (time.perf_counter() - g0) * 1000.0
             latencies_ms.append(elapsed_ms)
-            total_tokens += result.completion_tokens
+            if result is not None:
+                total_tokens += result.completion_tokens
             gen_seconds += elapsed_ms / 1000.0
-        # generate() is synchronous, so per-generation wall time is the TTFB
-        # approximation (6.1 spec); tokens/sec come from the same windows.
-        # Concurrency check: 16 threads, one generate each — verifies
-        # VLLMEngine.generate thread-safety under vLLM's sync engine.
-        with ThreadPoolExecutor(max_workers=16) as pool:
-            futures = [
-                pool.submit(
-                    engine.generate,
-                    "def f():\n    return",
-                    lora=None,
-                    max_tokens=32,
-                    temperature=0.0,
-                    top_p=1.0,
-                    stop=None,
-                    repetition_penalty=1.0,
-                )
-                for _ in range(16)
-            ]
-            for future in futures:
-                future.result(timeout=120)
+        # Async engine: per-generation wall time is the TTFB approximation
+        # (6.1 spec); tokens/sec come from the same windows.  Concurrency
+        # check: 16 simultaneous asyncio tasks, one generate each — verifies
+        # per-request isolation under vLLM's AsyncLLMEngine (the real serving
+        # pattern; the endpoint itself runs 16 concurrent inputs per
+        # container via @modal.concurrent).
+        await asyncio.gather(*(_drain("def f():\n    return", 32) for _ in range(16)))
         concurrent_ok = True
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
