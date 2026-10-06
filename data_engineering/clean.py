@@ -47,8 +47,13 @@ def _has_f2p_keywords(record: IssueRecord) -> bool:
 
 
 def _is_binary_diff(diff: str) -> bool:
-    """Check if the unified diff contains binary file markers."""
-    return "Binary files" in diff or "Binary file" in diff
+    """Check if the unified diff contains binary file markers.
+
+    Git emits markers such as ``Binary files a/x and b/x differ`` as whole
+    lines of their own, so the check is line-anchored: a text hunk whose
+    added content merely mentions "Binary file" must not count as binary.
+    """
+    return any(line.startswith("Binary file") for line in diff.splitlines())
 
 
 def _count_py_files(files: list[str]) -> int:
