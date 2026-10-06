@@ -143,7 +143,7 @@ class TestChatCompletions:
 
     def test_engine_error_500(self, config):
         class FailingEngine:
-            def generate(  # noqa: PLR0913
+            async def generate(  # noqa: PLR0913
                 self,
                 prompt,
                 *,
@@ -155,6 +155,7 @@ class TestChatCompletions:
                 repetition_penalty,
             ):
                 raise RuntimeError("boom")
+                yield  # unreachable: makes this an async generator
 
         client = TestClient(create_app(FailingEngine(), config))
         response = client.post(
