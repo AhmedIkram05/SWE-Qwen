@@ -351,17 +351,25 @@ async def _stream_gen(  # noqa: PLR0913, PLR0917
                 if not role_sent:
                     ttfbs_ms = (time.perf_counter() - t0) * 1000.0
                     role_sent = True
-                    yield first_chunk_frame(request_id, created, request.model).removeprefix(
-                        "data: "
+                    yield (
+                        first_chunk_frame(request_id, created, request.model)
+                        .removeprefix("data: ")
+                        .rstrip("\n")
                     )
                 for word in delta.split():
-                    yield content_chunk_frame(
-                        request_id, created, request.model, word
-                    ).removeprefix("data: ")
+                    yield (
+                        content_chunk_frame(request_id, created, request.model, word)
+                        .removeprefix("data: ")
+                        .rstrip("\n")
+                    )
             if res.finished:
                 output_tokens = res.completion_tokens
                 break
-        yield final_chunk_frame(request_id, created, request.model).removeprefix("data: ")
+        yield (
+            final_chunk_frame(request_id, created, request.model)
+            .removeprefix("data: ")
+            .rstrip("\n")
+        )
         yield "[DONE]"
     except asyncio.CancelledError:
         # Client disconnect: the ASGI server closes the in-flight generator;
