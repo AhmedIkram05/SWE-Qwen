@@ -126,7 +126,7 @@ def generate_dataset_card(
     schema_pr_desc = "Not available in SWE-bench (empty string)"
     schema_commits_desc = "Not available in SWE-bench (empty list)"
     schema_labels_desc = "Not available in SWE-bench (empty list)"
-    golden_source = "Verified + Test + Dev splits (all have FAIL_TO_PASS)"
+    golden_source = "Held-out test split only (verified/test/dev provenance filtered within test; all have FAIL_TO_PASS)"
     f2p_verification = "Ground-truth F2P from SWE-bench `FAIL_TO_PASS`/`PASS_TO_PASS` fields"
 
     card = f"""# Dataset Card: SWE-Qwen Fine-Tuning Dataset

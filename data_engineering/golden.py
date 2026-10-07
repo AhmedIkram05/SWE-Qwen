@@ -25,7 +25,9 @@ def build_golden_set(
         splits: Complete train/val/test splits.
         min_size: Minimum number of golden examples required.
         source_split: Which split to source golden examples from
-            (``"test"`` or ``"all"``). Default ``"test"``.
+            (``"test"``, ``"all"``, or ``"verified+test+dev"`` — the
+            latter filters the repo-isolated test split by SWE-bench
+            provenance). Default ``"test"``.
 
     Returns:
         A ``GoldenSet`` with verified F2P records.
