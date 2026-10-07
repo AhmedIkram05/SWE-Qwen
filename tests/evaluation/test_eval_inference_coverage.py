@@ -559,7 +559,9 @@ class TestGeneratePatchesBatch:
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
         monkeypatch.setattr(inf, "_get_llm", fake_get_llm)
-        monkeypatch.setattr(inf, "_no_think_wrap", lambda hf_id, prompt: prompt)
+        # P0-5: the default is the unified RAW path for every variant
+        # (base and LoRA alike); identity keeps the test hermetic.
+        monkeypatch.setattr(inf, "_apply_no_think_raw", lambda hf_id, prompt: prompt)
         # few-shot golden fences would be picked up by extract_patch — this
         # test covers the batch loop, not the golden loader.
         monkeypatch.setattr(inf, "_golden_patches", lambda *a, **k: [])
@@ -668,7 +670,7 @@ class TestGeneratePatchesBatch:
 
         monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
         monkeypatch.setattr(inf, "_get_llm", fake_get_llm)
-        monkeypatch.setattr(inf, "_no_think_wrap", lambda hf_id, prompt: prompt)
+        monkeypatch.setattr(inf, "_apply_no_think_raw", lambda hf_id, prompt: prompt)
 
         out = generate_patches_batch.local("qwen3-14b", "baseline_14b", "chat", [_example()])
         assert out == ["diff --git a/fix.py b/fix.py\n@@ -1 +1 @@\n"]
@@ -802,3 +804,96 @@ class TestSharedLLM:
 
         assert hasattr(generate_patches_batch, "local")
         assert callable(generate_patches_batch.local)
+
+
+# ── P0-5: unified prompt wrapping ──────────────────────────────────────────
+
+
+class TestUnifiedPromptWrap:
+    """One wrapping function for ALL variants in a batch (P0-5 fairness).
+
+    The old fork (base chat-wrapped, LoRA raw) fed different token prefixes
+    to the two variants on identical instances.  With a unified flag, base
+    and LoRA must produce byte-identical prompts for the same instance —
+    identical prompt text through the same tokenizer means identical tokens.
+    """
+
+    def _install(self, monkeypatch, adapters: dict[str, str | None]) -> dict[str, _FakeLLM]:
+        import evaluation.inference as inf
+
+        llms: dict[str, _FakeLLM] = {}
+
+        def fake_resolve(variant, config):
+            return adapters[variant]
+
+        def fake_get_llm(model_name, adapter_path=None, eager=False):
+            return llms.setdefault(model_name, _FakeLLM())
+
+        monkeypatch.setattr(inf, "resolve_adapter_path", fake_resolve)
+        monkeypatch.setattr(inf, "_get_llm", fake_get_llm)
+        # Markers: record which wrap function ran so prefix identity is exact.
+        monkeypatch.setattr(inf, "_no_think_wrap", lambda hf_id, p: f"CHAT[{p}]")
+        monkeypatch.setattr(inf, "_apply_no_think_raw", lambda hf_id, p: f"RAW[{p}]")
+        monkeypatch.setattr(inf, "_golden_patches", lambda *a, **k: [])
+        return llms
+
+    def test_raw_default_base_and_lora_identical_prefix(self, fake_vllm, monkeypatch):
+        """Default prompt_wrap='raw': base vs LoRA get the SAME raw prompt."""
+        llms = self._install(monkeypatch, {"base": None, "lora": "/tmp/lora"})
+        generate_patches_batch.local("qwen3-14b", "base", "chat", [_example()])
+        generate_patches_batch.local("qwen3-14b", "lora", "chat", [_example()])
+
+        calls = llms["qwen3-14b"].calls
+        prompts_base, params_base, lora_base = calls[0]
+        prompts_lora, params_lora, lora_lora = calls[1]
+        assert prompts_base == prompts_lora  # identical token prefix
+        assert prompts_base[0].startswith("RAW[")
+        assert lora_base is None
+        assert lora_lora is not None
+        # Sampling params stay identical across variants.
+        assert params_base.kwargs == params_lora.kwargs
+
+    def test_chat_ablation_base_and_lora_identical_prefix(self, fake_vllm, monkeypatch):
+        """prompt_wrap='chat': base vs LoRA get the SAME chat-wrapped prompt."""
+        llms = self._install(monkeypatch, {"base": None, "lora": "/tmp/lora"})
+        generate_patches_batch.local("qwen3-14b", "base", "chat", [_example()], prompt_wrap="chat")
+        generate_patches_batch.local("qwen3-14b", "lora", "chat", [_example()], prompt_wrap="chat")
+
+        calls = llms["qwen3-14b"].calls
+        prompts_base, _, lora_base = calls[0]
+        prompts_lora, _, lora_lora = calls[1]
+        assert prompts_base == prompts_lora
+        assert prompts_base[0].startswith("CHAT[")
+        assert lora_base is None
+        assert lora_lora is not None
+
+    def test_raw_and_chat_flags_differ(self, fake_vllm, monkeypatch):
+        llms = self._install(monkeypatch, {"base": None})
+        generate_patches_batch.local("qwen3-14b", "base", "chat", [_example()])
+        generate_patches_batch.local("qwen3-14b", "base", "chat", [_example()], prompt_wrap="chat")
+        calls = llms["qwen3-14b"].calls
+        assert calls[0][0][0].startswith("RAW[")
+        assert calls[1][0][0].startswith("CHAT[")
+        assert calls[0][0] != calls[1][0]
+
+    def test_unknown_prompt_wrap_raises(self, fake_vllm, monkeypatch):
+        self._install(monkeypatch, {"base": None})
+        with pytest.raises(ValueError, match="unknown prompt_wrap"):
+            generate_patches_batch.local(
+                "qwen3-14b", "base", "chat", [_example()], prompt_wrap="both"
+            )
+
+    def test_prompt_hash_logged_per_instance(self, fake_vllm, monkeypatch, caplog):
+        import hashlib
+        import logging
+
+        llms = self._install(monkeypatch, {"base": None})
+        examples = [_example(), _example(instance_id="inst-2")]
+        with caplog.at_level(logging.INFO, logger="evaluation.inference"):
+            generate_patches_batch.local("qwen3-14b", "base", "chat", examples)
+
+        prompts = llms["qwen3-14b"].calls[0][0]
+        for example, prompt in zip(examples, prompts, strict=True):
+            digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+            assert digest in caplog.text
+            assert f"for instance {example.instance_id}" in caplog.text

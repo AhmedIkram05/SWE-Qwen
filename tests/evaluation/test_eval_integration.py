@@ -171,7 +171,9 @@ def _make_result(
     )
 
 
-def _make_metrics(model: str, variant: str, f2p: float, p2p: float) -> F2PMetrics:
+def _make_metrics(
+    model: str, variant: str, f2p: float, p2p: float, resolve_count: int = 0
+) -> F2PMetrics:
     return F2PMetrics(
         model_name=model,
         variant=variant,
@@ -185,6 +187,10 @@ def _make_metrics(model: str, variant: str, f2p: float, p2p: float) -> F2PMetric
         avg_latency=2.5,
         flaky_test_rate=0.0,
         per_repo_breakdown={},
+        apply_rate=0.3,
+        resolve_count=resolve_count,
+        resolve_rate=resolve_count / 10,
+        conditional_resolve_rate=resolve_count / 3 if resolve_count else 0.0,
     )
 
 
@@ -748,16 +754,24 @@ def test_revalidate_champion_gates(config: EvalConfig) -> None:
 
 
 def test_compare_and_report_markdown() -> None:
+    from evaluation.stats import wilson_ci
+
     metrics = {
         "qwen3-14b:baseline_14b": _make_metrics("qwen3-14b", "baseline_14b", 0.3, 0.95),
-        "qwen3-14b:higher_rank_14b": _make_metrics("qwen3-14b", "higher_rank_14b", 0.5, 0.95),
+        # resolve_count=6: the CI must be wilson(6, 10), NOT wilson(round(0.5*10), 10)
+        "qwen3-14b:higher_rank_14b": _make_metrics(
+            "qwen3-14b", "higher_rank_14b", 0.5, 0.95, resolve_count=6
+        ),
         "qwen3-14b:higher_lr_14b": _make_metrics("qwen3-14b", "higher_lr_14b", 0.3, 0.8),
         "qwen3-14b:below_floor_14b": _make_metrics("qwen3-14b", "below_floor_14b", 0.1, 0.95),
     }
 
     md = compare_and_report(metrics, proxy_champion="baseline_14b")
 
-    header = "| model | variant | total | f2p_rate | f2p_95ci | p2p_rate | avg_latency | flaky_rate | note |"  # noqa: E501
+    header = (
+        "| model | variant | total | f2p_rate | f2p_95ci | p2p_rate | avg_latency | flaky_rate"
+        " | apply_rate | resolve_rate | cond_resolve | note |"
+    )
     assert header in md
     assert "qwen3-14b" in md
     assert "higher_rank_14b" in md
@@ -768,6 +782,11 @@ def test_compare_and_report_markdown() -> None:
     champion_row = [line for line in md.splitlines() if "[champion]" in line]
     assert len(champion_row) == 1
     assert "higher_rank_14b" in champion_row[0]
+    # P0-5: CI bounds instance-resolve (resolve_count/total), not mean F2P.
+    lo, hi = wilson_ci(6, 10)
+    assert f"{lo:.1%}-{hi:.1%}" in champion_row[0]
+    lo_bad, hi_bad = wilson_ci(round(0.5 * 10), 10)
+    assert f"{lo_bad:.1%}-{hi_bad:.1%}" not in champion_row[0]
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────

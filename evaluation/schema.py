@@ -133,7 +133,15 @@ class EvalResult(BaseModel):
 
 
 class F2PMetrics(BaseModel):
-    """Aggregate metrics for one model/variant/prompt group."""
+    """Aggregate metrics for one model/variant/prompt group.
+
+    Fairness split (P0-5): ``apply_rate`` (patch applied / total) is
+    reported separately from ``resolve_rate`` (instance-resolve
+    ``F2P==1.0`` / total) and ``conditional_resolve_rate``
+    (resolved | applied). The legacy ``f2p_rate`` (mean partial credit)
+    conflated apply-fail with wrong-patch; prefer the split for
+    variant comparison. New fields default to 0.0/0 so old JSON loads.
+    """
 
     model_name: str
     variant: str
@@ -147,6 +155,10 @@ class F2PMetrics(BaseModel):
     avg_latency: float
     flaky_test_rate: float
     per_repo_breakdown: dict[str, dict]
+    apply_rate: float = 0.0
+    resolve_rate: float = 0.0
+    resolve_count: int = 0
+    conditional_resolve_rate: float = 0.0
 
 
 class EvalRun(BaseModel):

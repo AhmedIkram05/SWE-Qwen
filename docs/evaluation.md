@@ -98,6 +98,40 @@ Silent promotions (within noise) are rejected by design — a "win" that can't c
 - **Baseline**: `{output_dir}/smoke_baseline.json` stores `{"dataset_run_id", "rates": {model:variant:prompt: f2p_rate}}`. PRs read it; pushes to `main` update it (`--update-baseline`) — self-certification is impossible.
 - **Tolerance**: `_SMOKE_TOLERANCE = 0.05` absolute F2P drop against the baseline, plus the absolute `min_f2p_threshold` floor.
 
+### 3.2 Evaluation fairness (P0-5)
+
+Variant comparisons are only fair if every confounder except the model is
+pinned. `evaluation/inference.py` and `evaluation/comparison.py` enforce:
+
+- **Unified prompt wrapping.** One wrapping function is applied to ALL
+  variants in a batch: `prompt_wrap="raw"` (default) feeds base AND LoRA the
+  raw `### Response -> patch` continuation (matching how the adapters were
+  trained); `prompt_wrap="chat"` is the both-wrapped ablation. The old fork
+  (base chat-wrapped, LoRA raw) changed the token prefix between variants on
+  identical instances — an eval artifact, not a model difference. A sha256
+  hash of each final (wrapped) prompt is logged per instance, so the prompt
+  side of any comparison is auditable.
+- **Split rates, not one conflated F2P.** `F2PMetrics` reports
+  `apply_rate` (patch applied / total) separately from `resolve_rate`
+  (instance-resolve, strict `F2P == 1.0`, / total) and
+  `conditional_resolve_rate` (resolved | applied). "Patch failed to apply"
+  is no longer indistinguishable from "patch applied but wrong" in the
+  headline number.
+- **Wilson CI on the binary statistic.** The reported 95% CI bounds
+  instance-resolve (`resolve_count / total`) — a binomial CI on the mean
+  partial-credit `f2p_rate` is invalid (partial 0.5s are not Bernoulli
+  trials).
+- **Cross-variant paired significance.** `paired_significance` pairs the
+  same model under two different variants on identical instances (McNemar +
+  paired bootstrap over strict instance-resolve outcomes), in addition to
+  same-variant repeat-run pairing.
+- **Eager vs compiled variance.** Probe/smoke batches (<32 prompts) run on
+  an `enforce_eager` vLLM engine; larger batches run compiled
+  (torch.compile + CUDA graphs). The two engines can decode the same prompt
+  to slightly different tokens (different sampler kernels) — a known small
+  confounder. Compare variants at equal batch size (hence equal engine mode)
+  with identical sampling params (temperature/top_p/max_tokens).
+
 ---
 
 ## 4. Golden Set Protocol
@@ -136,3 +170,4 @@ python -m evaluation.cli run --mode smoke --ci-mode --models qwen3-14b:baseline_
 - **P2P on 100-instance samples** is a moderate regression signal; larger golden runs tighten it further.
 - **Image caching** keeps repos warm; brand-new instances pay a one-time cold start.
 - **Flaky retries** guard against infra flapping but cannot catch deterministic environment drift (tracked via `flaky_rate`).
+- **Engine mode** (eager for <32-prompt batches vs compiled otherwise) can shift individual decodings slightly (§3.2) — pair variants at equal batch size.
