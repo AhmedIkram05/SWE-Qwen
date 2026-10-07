@@ -302,9 +302,12 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
         max_new_tokens: Maximum completion length.
         temperature: Sampling temperature.
         top_p: Nucleus sampling probability.
-        dataset_run_id: Pipeline run id — the few-shot golden patches are
-            fetched from that run's GCS golden (``_ensure_golden``), keeping
-            GCS the single source of truth instead of the image-baked file.
+        dataset_run_id: Pipeline run id — the GCS golden index is refreshed
+            from that run's golden (``_ensure_golden``) so explicit few-shot
+            (``golden_patches``) uses GCS as the source of truth instead of
+            the image-baked file. Few-shot is opt-in: prompts render without
+            examples unless a caller passes ``example_patches`` (P0-1
+            parity contract, FEWSHOT_POLICY=none).
 
     Returns:
         List of patch strings, same order as ``examples``.

@@ -21,7 +21,13 @@ from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import AutoTokenizer
 
 from data_engineering.config import DataPipelineConfig
-from evaluation.inference import _file_snippets
+from inference.prompt_builder import (
+    CONTEXT_FILES_MAX,
+    TEST_FILES_MAX,
+    contract_file_snippets,
+    contract_snippet_candidates,
+    render_system_and_user,
+)
 from training.prompt_loader import PromptLoader
 
 logger = logging.getLogger(__name__)
@@ -108,6 +114,11 @@ def load_jsonl_split(path: Path) -> list[dict[str, Any]]:
 def _format_parts(record: dict[str, Any], prompt_loader: PromptLoader) -> tuple[str, str]:
     """Render a record's (full_text, prompt_only_text) training prompts.
 
+    Built through the shared prompt-parity contract
+    (``inference.prompt_builder``): same system strings, same snippet caps
+    (5 files x 150 lines), same candidate seeding, and no few-shot as
+    ``render_patch_prompt`` — so the eval prompt cannot drift from this one.
+
     Fetches the contents of the changed files at the record's base_sha and
     embeds them (### File Contents) so the model learns to write diffs
     against real code — mirroring the eval prompt. Best-effort: a missing
@@ -121,35 +132,34 @@ def _format_parts(record: dict[str, Any], prompt_loader: PromptLoader) -> tuple[
     files_changed: list[str] = record.get("files_changed", [])
     test_files: list[str] = record.get("test_files_changed", [])
 
+    context_files = files_changed[:CONTEXT_FILES_MAX]
+    test_files_capped = test_files[:TEST_FILES_MAX]
+
     context_snippets: list[dict[str, str]] = []
     metadata = record.get("metadata") or {}
     base_sha = metadata.get("base_sha") or record.get("base_sha")
     if base_sha and files_changed:
         try:
-            # ponytail: tighter than the eval path (10 files x 500 lines) —
-            # the gold patch must survive the training context window, so
-            # file contents get 5 files x 150 lines (~8-11K tokens worst case).
-            context_snippets = _file_snippets(
-                repo, base_sha, files_changed[:20], max_files=5, max_lines=150
+            # Snippet caps (5 files x 150 lines) come from the shared
+            # contract: the gold patch must survive the training context
+            # window, and eval uses the same bound.
+            context_snippets = contract_file_snippets(
+                repo,
+                base_sha,
+                contract_snippet_candidates(context_files, test_files_capped, issue_body),
             )
         except Exception as exc:
             logger.warning("Failed to fetch file contents for %s: %s", issue_id, exc)
 
-    user_content = prompt_loader.render(
-        "user",
+    system_prompt, user_content = render_system_and_user(
+        prompt_loader,
         issue_title=issue_id,
         issue_body=issue_body,
         repo_name=repo,
         repo_domain=repo_domain,
-        context_files=files_changed[:20],  # cap context files
-        test_files=test_files[:10],
+        context_files=context_files,
+        test_files=test_files_capped,
         context_snippets=context_snippets,
-    )
-    system_prompt = prompt_loader.render(
-        "system",
-        task_description="Fix the bug described in the issue by generating a correct patch.",
-        language="Python",
-        style_guide="Follow PEP 8 and the repository's existing code style.",
     )
     prompt_only = prompt_loader.render_chat(
         system_prompt=system_prompt,
