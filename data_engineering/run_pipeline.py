@@ -496,7 +496,9 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
 
     # Split
     if _stage_enabled(config, "split"):
-        seed = int.from_bytes(hashlib.sha256(run_id.encode()).digest()[:4], "little")
+        # Pinned seed: a random per-run run_id must not reshuffle the split
+        # (run_id-derived seed only when run_id_override is set).
+        seed = split.resolve_split_seed(config, run_id)
         splits = split.stratified_split(all_cleaned, config, seed=seed)
     else:
         splits = split.Splits()
