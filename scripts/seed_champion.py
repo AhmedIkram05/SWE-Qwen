@@ -3,7 +3,8 @@
 The champion loop needs a baseline on first run, and ``gs://swe-qwen-datasets/
 ci/champion.json`` is empty until this runs (writes there require GCP WIF
 auth).  This script writes the documented 2026-08-06 Champion
-(``higher_lr_14b`` — F2P 0.169, P2P 0.912, n=50 golden, promoted 2026-08-06)
+(``higher_rank_14b`` — F2P 0.172, P2P 0.901, n=100 golden, promoted
+2026-08-06; see ``assets/results.txt`` and ``promotion/MODEL_CARD.md``)
 to a local ``champion.json`` and prints the ``gcloud storage cp`` command to
 upload it::
 
@@ -39,12 +40,14 @@ def build_record(
     ``EvalConfig`` itself has no ``tier`` field (spec §4.6).
     """
     model_ref = model_ref or "qwen3-14b"
-    variant = variant or "higher_lr_14b"
+    variant = variant or "higher_rank_14b"
     return ChampionRecord(
         variant=variant,
         model_ref=f"{model_ref}:{variant}",
-        f2p_rate=0.169,
-        p2p_rate=0.912,
+        # 2026-08-06 champion per assets/results.txt (n=100 golden) and
+        # promotion/MODEL_CARD.md — NOT the earlier n=50 higher_lr_14b record.
+        f2p_rate=0.172,
+        p2p_rate=0.901,
         dataset_run_id="expanded-repos",
         tier="full",
         seed=42,
@@ -70,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--variant",
         default=None,
-        help="champion variant for future cycles (default: seeded 'higher_lr_14b')",
+        help="champion variant for future cycles (default: seeded 'higher_rank_14b')",
     )
     args = parser.parse_args(argv)
 

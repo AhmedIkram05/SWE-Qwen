@@ -1,8 +1,14 @@
 """Proxy F2P (Fail-to-Pass) scorer for Phase 4 champion selection.
 
+DRY-RUN ONLY (P0-4).
+
 True F2P evaluation runs a generated patch against the real test suite
 (Phase 5).  This proxy uses W&B training loss as a heuristic — lower loss
-indicates better learning.  Not a substitute for the real harness.
+indicates better learning.  It is NOT a substitute for the real harness,
+and its ranking can invert relative to true F2P: it must never drive
+promotion.  Champion selection for promotion requires real F2P scores via
+``python -m evaluation.cli compare`` (quality gates in
+``evaluation.comparison.revalidate_champion``).
 
 The proxy DOES NOT need a GPU or a model adapter.
 """
@@ -12,6 +18,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+
+#: Hard marker: every score produced here is a dry-run heuristic. Consumers
+#: (especially promotion code) must refuse entries that are not real F2P.
+DRY_RUN_ONLY = True
 
 
 def _wandb_project_entity() -> str:
@@ -57,6 +67,7 @@ def compute_proxy_f2p_scores(
             results[variant] = {
                 "mean_f2p": 0.0,
                 "count": len(records),
+                "dry_run": True,
                 "warning": "no W&B run found",
             }
             continue
@@ -66,6 +77,7 @@ def compute_proxy_f2p_scores(
             results[variant] = {
                 "mean_f2p": 0.0,
                 "count": len(records),
+                "dry_run": True,
                 "warning": "no finished W&B run found",
             }
             continue
@@ -76,6 +88,7 @@ def compute_proxy_f2p_scores(
             results[variant] = {
                 "mean_f2p": 0.0,
                 "count": len(records),
+                "dry_run": True,
                 "warning": "no train/loss in summary",
             }
             continue
@@ -97,6 +110,7 @@ def compute_proxy_f2p_scores(
             "mean_f2p": round(score, 4),
             "count": len(records),
             "loss": round(loss, 4),
+            "dry_run": True,
         }
 
     return results
@@ -105,6 +119,16 @@ def compute_proxy_f2p_scores(
 def select_champion(
     scores: dict[str, dict[str, Any]],
 ) -> str:
-    """Return the variant name with the highest mean F2P."""
+    """Return the variant name with the highest mean proxy F2P.
+
+    DRY-RUN ONLY (P0-4): *scores* come from the train-loss heuristic in
+    :func:`compute_proxy_f2p_scores`, which can invert the true F2P ranking.
+    This picks a dry-run comparison winner only — it must never be used for
+    promotion. Promoting a champion requires real F2P scores via
+    ``python -m evaluation.cli compare`` (gated by
+    ``evaluation.comparison.revalidate_champion``).
+    """
+    if not scores:
+        raise ValueError("cannot select a champion from empty scores")
     best = max(scores, key=lambda v: scores[v].get("mean_f2p", 0.0))
     return best

@@ -143,6 +143,11 @@ def revalidate_champion(
 def proxy_champion_from_f2p_proxy(golden_path: Path, variant_adapter_map: dict[str, str]) -> str:
     """Select the P4 proxy champion using the Phase 4 proxy scorer.
 
+    DRY-RUN ONLY (P0-4): the train-loss proxy can invert the true F2P
+    ranking, so its result annotates comparisons only. Champion promotion
+    requires real F2P via ``python -m evaluation.cli compare`` (gated by
+    :func:`revalidate_champion` below).
+
     Thin wrapper around ``scripts.f2p_proxy`` (P4 artifact — reused, not
     reimplemented): scores each variant from W&B training loss and returns
     the winning variant name.

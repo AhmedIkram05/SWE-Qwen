@@ -23,7 +23,9 @@ class TestQLoRATrainerUnit:
         assert trainer.model_name == "qwen3-14b"
         assert trainer.variant == "baseline_14b"
         assert trainer.data_dir == Path("data/tokenized")
-        assert trainer.output_dir == Path("/tmp/qlora-output")
+        # P0-4: output_dir is resolved per variant-run (no run_name/run_id
+        # given -> "local" suffix), no longer a shared base directory.
+        assert trainer.output_dir == Path("/tmp/qlora-output/baseline_14b-local")
         assert trainer.lora_config is None
         assert trainer.training_args is None
 
