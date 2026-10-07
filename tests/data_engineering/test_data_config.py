@@ -31,7 +31,7 @@ class TestDataPipelineConfig:
         assert str(cfg.output_dir) == "data"
         assert cfg.wandb_project == "swe-qwen-data"
         assert cfg.wandb_entity is None
-        assert cfg.golden_source_split == "verified+test+dev"
+        assert cfg.golden_source_split == "test"
         assert cfg.train_ratio == 0.8
         assert cfg.val_ratio == 0.1
         assert cfg.test_ratio == 0.1
@@ -156,7 +156,9 @@ class TestTokenizeRegistryResolution:
         monkeypatch.delenv("DATA_PIPELINE_TOKENIZE_MAX_LENGTH", raising=False)
         cfg = DataPipelineConfig()
         assert cfg.tokenize_model == "qwen3-14b"  # registry default: true
-        assert cfg.tokenize_max_length == 32768  # registry context_window
+        # Aligned with the trainer: min(context_window 32768, trainer 4096) —
+        # we never tokenize at 32k and silently train at 4k (P0-2).
+        assert cfg.tokenize_max_length == 4096
 
     def test_env_wins_over_registry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DATA_PIPELINE_TOKENIZE_MODEL", "qwen3-30b-a3b")
@@ -177,7 +179,8 @@ class TestTokenizeRegistryResolution:
         monkeypatch.setattr("data_engineering.config.default_model_key", lambda: "fresh")
         cfg = DataPipelineConfig()
         assert cfg.tokenize_model == "fresh"
-        assert cfg.tokenize_max_length == 8192
+        # Capped to the trainer's effective max_seq_length (4096), not 8192.
+        assert cfg.tokenize_max_length == 4096
 
     def test_unknown_model_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DATA_PIPELINE_TOKENIZE_MODEL", "does-not-exist")

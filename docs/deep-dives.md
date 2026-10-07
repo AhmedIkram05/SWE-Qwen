@@ -40,7 +40,7 @@ The data layer turns raw GitHub issue + PR dumps into a tokenized, `pydantic`-ty
 | `validate` | Builds `IssueRecord` (pydantic): `patch_diff` must parse as a `unidiff.PatchSet` **or** match `---`/`+++`/`@@` diff headers; field-level errors → `validation_errors.jsonl` | 20,470 ✓ · 7 rejected |
 | `clean` | Six counted gates (no test files · patch > 500 lines · binary diffs · non-Python · empty body · no F2P signal), then exact + semantic dedup → `cleaned.jsonl` | 17,456 ✓ · 726 dup |
 | `split` | By-repo 80/10/10 (`--train-ratio 0.8`) - a whole repo goes to one split to stop cross-repo leakage | 15,011 / 1,556 / 889 · 46 repos |
-| `golden` | Carves the held-out eval set **before** tokenization from verified + test + dev slices (`GoldenSet{records, f2p_verified_count, source_split}`) | 2,313 |
+| `golden` | Carves the held-out eval set **before** tokenization from the repo-isolated test split (verified/test/dev SWE-bench provenance filtered within it; never train/val) (`GoldenSet{records, f2p_verified_count, source_split}`) | 2,313 |
 | `tokenize` | registry tokenizer, `max_length` ← model `context_window` (this run: Qwen3-14B @ 8192), SFT `packing=true` → arrow datasets via `datasets` | 14,833 train · 2,304 golden |
 
 Every run is hash-pinned in a `manifest.json` + `dataset_card.md`, artifacts are versioned in W&B (`dataset-cleaned:v8`-era tags) and mirrored to `gs://swe-qwen-datasets/datasets/{run_id}/`; `python -m data_engineering.cli config` dumps the effective `DataPipelineConfig` for reproduction.
@@ -55,7 +55,7 @@ flowchart LR
     A["raw.jsonl"] --> B["validate.py<br/>IssueRecord pydantic schema<br/>errors → validation_errors"]
     B --> C["clean.py<br/>6 quality gates"]
     C --> D["split.py<br/>by-repo 80/10/10"]
-    D --> E["golden.py<br/>verified+test+dev → golden"]
+    D --> E["golden.py<br/>test split → golden (repo-isolated)"]
     C --> F["tokenize.py<br/>registry tokenizer · ctx"]
     D --> F
     style A fill:#2a2a52,color:#fff
@@ -73,7 +73,7 @@ flowchart LR
 | Binary / empty files | dropped | no junk tokens in training |
 | Duplicates | exact + semantic (726 removed) | no data inflation |
 | Split | per-repo 80/10/10, `--train-ratio 0.8` | prevent repo leakage between splits |
-| Golden set | carved from verified + test + dev | eval oracle never sees training data |
+| Golden set | carved from the held-out test split only (verified/test/dev provenance filtered within it) | eval oracle never sees training data |
 | Tokenization | registry tokenizer, `max_length` ← `context_window` (this run: 8192 of 32768) | fits LoRA context; SFT packing enabled |
 
 **Live run numbers** (run id `expanded-repos`): ingest **20,477** → validate **20,470** (7 schema errors) → clean **17,456** (net −3,014: 12 binary diffs, 1,212 non-Python records, 1,149 oversized patches, 726 duplicates) → split **15,011 / 1,556 / 889** (46 repos) → golden **2,313** → tokenized **14,833 / 1,550 / 885 / 2,304** (train/val/test/golden).

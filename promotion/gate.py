@@ -16,8 +16,10 @@ auditable :class:`PairEval`:
 - aggregate rates via :func:`evaluation.comparison.extract_model_metrics`.
 
 ``comparison.paired_significance`` is deliberately NOT used for the gate: it
-pairs the same variant across two runs and silently reports "no overlap" for
-different variants — display only (spec decision 1).
+is a display summary that pairs whatever variants the two runs happen to
+share (same-variant repeat-run AND cross-variant head-to-head), while the
+gate needs ONE auditable champion-vs-candidate :class:`PairEval` with
+asserted same-window pairing (spec decision 1).
 
 Pure computation over in-memory runs: no I/O, no cloud dependencies.
 """

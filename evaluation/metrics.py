@@ -71,6 +71,27 @@ def compute_f2p(
     return f2p_rate, p2p_rate, f2p_count, p2p_count
 
 
+def is_instance_resolved(result: EvalResult) -> bool:
+    """Instance-resolve predicate for fair comparison (P0-5).
+
+    Strict ``F2P==1.0`` on error-free results. Partial credit (e.g. 0.5)
+    counts for the legacy mean ``f2p_rate`` but NOT for resolve: a patch
+    that fixes half the F2P tests is still a failure for Wilson/McNemar,
+    which require binary outcomes.
+    """
+    return result.error is None and result.f2p == 1.0
+
+
+def apply_rate(successful_patches: int, total_examples: int) -> float:
+    """Patch apply-rate: applied / total."""
+    return successful_patches / total_examples if total_examples else 0.0
+
+
+def conditional_resolve_rate(resolve_count: int, applied_count: int) -> float:
+    """Resolved | applied: full fixes among successfully applied patches."""
+    return resolve_count / applied_count if applied_count else 0.0
+
+
 def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
     """Aggregate per-example results into a single ``F2PMetrics``.
 
@@ -108,6 +129,11 @@ def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
     example_count = len(results)
     f2p_examples = sum(1 for r in valid if r.f2p > 0.0)
     p2p_examples = sum(1 for r in valid if r.p2p > 0.0)
+    successful = sum(1 for r in results if r.patch_application.success)
+    resolved = sum(1 for r in valid if is_instance_resolved(r))
+    resolved_applied = sum(
+        1 for r in results if r.patch_application.success and is_instance_resolved(r)
+    )
 
     breakdown = {
         repo: {
@@ -123,7 +149,7 @@ def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
         variant=first.variant,
         prompt_template=first.prompt_template,
         total_examples=example_count,
-        successful_patches=sum(1 for r in results if r.patch_application.success),
+        successful_patches=successful,
         f2p_rate=sum(r.f2p for r in valid) / len(valid) if valid else 0.0,
         f2p_count=f2p_examples,
         p2p_rate=sum(r.p2p for r in valid) / len(valid) if valid else 0.0,
@@ -131,4 +157,8 @@ def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
         avg_latency=sum(r.latency_seconds for r in results) / example_count,
         flaky_test_rate=flaky_tests / total_tests if total_tests else 0.0,
         per_repo_breakdown=breakdown,
+        apply_rate=apply_rate(successful, example_count),
+        resolve_rate=resolved / example_count if example_count else 0.0,
+        resolve_count=resolved,
+        conditional_resolve_rate=conditional_resolve_rate(resolved_applied, successful),
     )

@@ -23,7 +23,42 @@ class WandbCheckpointCallback(TrainerCallback):
 
     Fires on ``on_save``: uploads the checkpoint directory as a
     ``model_checkpoint`` artifact with step/epoch/eval_loss metadata.
+
+    P0-4: uploads the checkpoint *this run* just saved (``checkpoint-{step}``
+    where step == ``state.global_step``), never the global ``checkpoint-*``
+    max — a stale checkpoint from a previous run sharing the output dir can
+    no longer be uploaded for the wrong run. ``run_id`` (the W&B run ID at
+    construction) additionally guards against a callback instance firing
+    under a different W&B run.
     """
+
+    def __init__(self, run_id: str | None = None) -> None:
+        self.run_id = run_id
+
+    @staticmethod
+    def _step_of(path: Path) -> int:
+        """Numeric step of a ``checkpoint-{step}`` dir; -1 when unparsable."""
+        step = path.name.rsplit("-", 1)[-1]
+        return int(step) if step.isdigit() else -1
+
+    def _select_checkpoint(self, output_dir: Path, global_step: int) -> Path | None:
+        """Return the checkpoint this run just saved, or None.
+
+        Primary: ``checkpoint-{global_step}`` — HF saves exactly this
+        directory before ``on_save`` fires. Fallback (resume edge cases):
+        the newest checkpoint at or below *global_step*.
+        """
+        current = output_dir / f"checkpoint-{global_step}"
+        if current.is_dir():
+            return current
+        candidates = [
+            p
+            for p in output_dir.glob("checkpoint-*")
+            if p.is_dir() and self._step_of(p) <= global_step
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=self._step_of)
 
     def on_save(
         self,
@@ -36,22 +71,26 @@ class WandbCheckpointCallback(TrainerCallback):
         if wandb.run is None:
             return
 
+        if self.run_id is not None and wandb.run.id != self.run_id:
+            logger.warning(
+                "WandbCheckpointCallback bound to run %s but active W&B run is %s — "
+                "skipping checkpoint upload",
+                self.run_id,
+                wandb.run.id,
+            )
+            return
+
         # Determine the latest checkpoint directory
         assert args.output_dir is not None
         checkpoint_dir = Path(args.output_dir)
         if not checkpoint_dir.exists():
             return
 
-        # Find the latest checkpoint folder (global_step-XXXX)
-        checkpoints = sorted(
-            [p for p in checkpoint_dir.glob("checkpoint-*") if p.is_dir()],
-            key=lambda p: int(p.name.split("-")[-1]),
-        )
-        if not checkpoints:
+        latest_ckpt = self._select_checkpoint(checkpoint_dir, state.global_step)
+        if latest_ckpt is None:
             return
 
-        latest_ckpt = checkpoints[-1]
-        step = int(latest_ckpt.name.split("-")[-1])
+        step = self._step_of(latest_ckpt)
 
         artifact_name = (
             f"checkpoint-{wandb.run.name}-step-{step}"

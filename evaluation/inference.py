@@ -18,6 +18,7 @@ on every invocation.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import threading
@@ -300,11 +301,17 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
     temperature: float = 0.1,
     top_p: float = 0.95,
     dataset_run_id: str | None = None,
+    prompt_wrap: str = "raw",
 ) -> list[str]:
     """Generate candidate fix patches for a batch of eval examples.
 
     Dispatches to the GPU tier configured by ``EvalConfig.inference_gpu``.
     See ``_generate_patches_batch_body`` for full docs.
+
+    Args:
+        prompt_wrap: Unified prompt wrapping applied to ALL variants in the
+            batch — ``"raw"`` (default, matches adapter training) or
+            ``"chat"`` (ablation). Never mixed within one batch.
     """
     from evaluation.config import EvalConfig
 
@@ -320,6 +327,7 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
         temperature,
         top_p,
         dataset_run_id,
+        prompt_wrap,
     )
 
 
@@ -335,6 +343,7 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     temperature: float = 0.1,
     top_p: float = 0.95,
     dataset_run_id: str | None = None,
+    prompt_wrap: str = "raw",
 ) -> list[str]:
     """Generate candidate fix patches for a batch of eval examples (body).
 
@@ -342,8 +351,25 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     2. Load the model (``resolve_hf_id(model_name)``) with vLLM, enabling LoRA
        if an adapter exists.
     3. Render prompts from the eval inputs via ``PromptLoader``.
-    4. Generate with the given sampling parameters.
-    5. Strip markdown code fences from completions.
+    4. Wrap every rendered prompt with ONE unified function (P0-5 fairness):
+       ``prompt_wrap="raw"`` (default) gives base AND LoRA variants the raw
+       ``### Response -> patch`` continuation (matching how the adapters were
+       trained); ``prompt_wrap="chat"`` gives base AND LoRA the chat-template
+       wrap (ablation).  The old per-variant fork (base chat-wrapped, LoRA
+       raw) fed different token prefixes to the two variants on identical
+       instances — an eval artifact, not a model difference.
+    5. Generate with the given sampling parameters.
+    6. Log a per-instance sha256 hash of the final (wrapped) prompt so the
+       prompt side of any variant comparison is auditable.
+    7. Strip markdown code fences from completions.
+
+    Eager-vs-compiled note: probe/smoke batches (<32 prompts) run on an
+    ``enforce_eager`` engine; larger batches run on the compiled one
+    (torch.compile + CUDA graphs).  The two engines can decode the same
+    prompt to slightly different tokens (different sampler kernels) — a
+    known small confounder.  Keep batch sizes (hence engine mode) equal
+    across variants when comparing; the per-instance prompt hashes above
+    pin the prompt side, sampling params must also be identical.
 
     Args:
         model_name: ``models.yaml`` key (e.g. ``"qwen3-14b"``).
@@ -353,9 +379,14 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
         max_new_tokens: Maximum completion length.
         temperature: Sampling temperature.
         top_p: Nucleus sampling probability.
-        dataset_run_id: Pipeline run id — the few-shot golden patches are
-            fetched from that run's GCS golden (``_ensure_golden``), keeping
-            GCS the single source of truth instead of the image-baked file.
+        dataset_run_id: Pipeline run id — the GCS golden index is refreshed
+            from that run's golden (``_ensure_golden``) so explicit few-shot
+            (``golden_patches``) uses GCS as the source of truth instead of
+            the image-baked file. Few-shot is opt-in: prompts render without
+            examples unless a caller passes ``example_patches`` (P0-1
+            parity contract, FEWSHOT_POLICY=none).
+        prompt_wrap: Unified wrapping for ALL variants — ``"raw"`` (default)
+            or ``"chat"`` (ablation). Any other value raises ``ValueError``.
 
     Returns:
         List of patch strings, same order as ``examples``.
@@ -389,16 +420,26 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
         render_patch_prompt(example, template_name=prompt_template, include_file_contents=True)
         for example in examples
     ]
-    # Adapters were trained on raw "### Response -> patch" continuation
-    # (tokenize.format_training_prompt); chat-wrapping that breaks the
-    # contract and produced repetition loops. Only the untrained base model
-    # gets the chat-template wrap. Both no-think gates (the raw "/no_think"
+    # P0-5 fairness: ONE wrapping function for every prompt in the batch,
+    # base and LoRA alike, so identical instances get identical token
+    # prefixes.  "raw" is the training-matching default (adapters were
+    # trained on the raw "### Response -> patch" continuation); "chat" is
+    # the both-wrapped ablation.  Both no-think gates (the raw "/no_think"
     # insertion and enable_thinking=False) key off the registry's
     # prompt_behavior.no_think flag inside prompt_builder.
-    prompts = [
-        _no_think_wrap(hf_id, p) if adapter_path is None else _apply_no_think_raw(hf_id, p)
-        for p in rendered
-    ]
+    if prompt_wrap not in ("raw", "chat"):
+        raise ValueError(f"unknown prompt_wrap {prompt_wrap!r}; expected 'raw' or 'chat'")
+    wrap = _no_think_wrap if prompt_wrap == "chat" else _apply_no_think_raw
+    prompts = [wrap(hf_id, p) for p in rendered]
+    for example, prompt in zip(examples, prompts, strict=True):
+        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        logger.info(
+            "prompt hash %s for instance %s (wrap=%s, %d chars)",
+            digest,
+            example.instance_id,
+            prompt_wrap,
+            len(prompt),
+        )
     # ponytail: no repetition_penalty => decoding degeneracy (the model fell
     # into a ~1000x "```" fence loop eating the whole 8192 budget). 1.15 breaks
     # self-repetition; bump to ~1.3 if loops persist.

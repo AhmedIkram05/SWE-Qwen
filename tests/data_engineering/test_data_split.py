@@ -14,6 +14,7 @@ def _make_record(
     commit_msgs: list[str] | None = None,
     pr_description: str = "",
     files_changed: list[str] | None = None,
+    metadata: dict | None = None,
 ) -> IssueRecord:
     return IssueRecord(
         issue_id=issue_id,
@@ -24,6 +25,7 @@ def _make_record(
         files_changed=files_changed or ["foo.py"],
         commit_messages=commit_msgs or ["fix: something"],
         pr_description=pr_description,
+        metadata=metadata or {},
     )
 
 
@@ -174,3 +176,67 @@ class TestExtractGolden:
         )
         golden = extract_golden(splits, config.min_golden_examples, config.golden_source_split)
         assert len(golden) == 2  # from both train and test
+
+
+class TestGoldenIsolation:
+    """P0-3: golden eval must stay repo-isolated (golden repos ⊆ test repos)."""
+
+    def test_default_config_is_test(self) -> None:
+        assert DataPipelineConfig().golden_source_split == "test"
+
+    def test_verified_plus_filters_to_test_only(self) -> None:
+        splits = Splits(
+            train=[
+                _make_record(
+                    "train#1",
+                    repo="org/train-repo",
+                    test_files=["test_a.py"],
+                    metadata={"source_split": "verified"},
+                ),
+            ],
+            val=[
+                _make_record(
+                    "val#1",
+                    repo="org/val-repo",
+                    test_files=["test_b.py"],
+                    metadata={"source_split": "test"},
+                ),
+            ],
+            test=[
+                _make_record(
+                    "test#1",
+                    repo="org/test-repo",
+                    test_files=["test_c.py"],
+                    metadata={"source_split": "dev"},
+                ),
+            ],
+        )
+        golden = extract_golden(splits, 0, "verified+test+dev")
+        golden_repos = {r.repo for r in golden}
+        assert golden_repos == {"org/test-repo"}
+        assert golden_repos.isdisjoint({"org/train-repo", "org/val-repo"})
+
+    def test_default_golden_no_train_leakage(self) -> None:
+        config = DataPipelineConfig()
+        assert config.golden_source_split == "test"
+        records = [
+            _make_record(f"train{i}#{j}", repo=f"train-org/r{i}")
+            for i in range(8)
+            for j in range(2)
+        ] + [
+            _make_record(f"other{i}#{j}", repo=f"other-org/r{i}")
+            for i in range(4)
+            for j in range(2)
+        ]
+        # Give every record golden-qualifying F2P shape.
+        for r in records:
+            r.test_files_changed = ["test_x.py"]
+            r.commit_messages = ["fix: bug fix"]
+        splits = stratified_split(records, config, seed=42)
+        golden = extract_golden(splits, config.min_golden_examples, config.golden_source_split)
+        assert golden  # non-empty, so the set assertions below are not vacuous
+        golden_repos = {r.repo for r in golden}
+        test_repos = {r.repo for r in splits.test}
+        train_repos = {r.repo for r in splits.train}
+        assert golden_repos <= test_repos
+        assert golden_repos.isdisjoint(train_repos)

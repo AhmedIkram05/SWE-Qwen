@@ -27,16 +27,31 @@ variants:
       optim: "paged_adamw_8bit"
       logging_steps: 10
       save_strategy: "steps"
-      save_steps: 500
-      eval_strategy: "no"           # Disabled — eval OOMs on A10G. Run as separate step.
+      # P0-4: must be < total steps so intermediate checkpoints actually
+      # exist. 1-epoch 14B runs total ~16-76 steps; the old 500 produced
+      # zero intermediates (only the final save). 10 guarantees >=1
+      # intermediate checkpoint on every expected run.
+      save_steps: 10
+      # Eval stays off by default — it OOMs on A10G 24GB. To eval during
+      # training, override eval_strategy to "steps" (separate-eval-worker-ready);
+      # eval_steps is preset so the override works out of the box.
+      eval_strategy: "no"
+      eval_steps: 10
+      # Separate-eval-worker-ready — enable together with
+      # eval_strategy: "steps" (load_best_model_at_end requires eval to be
+      # enabled; default remains off on A10G):
+      # load_best_model_at_end: true
+      # metric_for_best_model: eval_loss
+      # greater_is_better: false
       save_total_limit: 3
-      load_best_model_at_end: false
       report_to: "wandb"
       ddp_find_unused_parameters: false
       gradient_checkpointing: true
       dataloader_num_workers: 2
       remove_unused_columns: false
-      packing: true
+      # False for pre-tokenized input_ids/labels: packing concatenates
+      # examples across -100 prompt boundaries and corrupts the loss mask.
+      packing: false
       max_seq_length: 4096
       dataloader_pin_memory: false
 

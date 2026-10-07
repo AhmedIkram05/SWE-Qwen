@@ -7,8 +7,10 @@ experiment resumption.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,47 @@ from training.qlora_config import (
 logger = logging.getLogger(__name__)
 
 
+def resolve_run_output_dir(
+    output_dir: str | Path,
+    variant: str,
+    run_name: str | None,
+    run_id: str | None = None,
+) -> str:
+    """Resolve per-variant-run checkpoint directory (P0-4).
+
+    Shared ``output_dir`` across variants caused stale ``checkpoint-108``
+    contamination. Returns ``{base}/{variant}-{run_name or run_id or "local"}``.
+    Idempotent: if *output_dir* already ends with the leaf, returned as-is.
+    """
+    suffix = (run_name or run_id or "local").strip().replace("/", "-") or "local"
+    leaf = f"{variant}-{suffix}"
+    base = Path(output_dir)
+    if base.name == leaf:
+        return str(base)
+    return str(base / leaf)
+
+
+def prepare_run_output_dir(
+    output_dir: str | Path,
+    resume_from_checkpoint: str | None = None,
+) -> Path:
+    """Create per-run *output_dir*; remove stale ``checkpoint-*`` unless resuming.
+
+    Idempotent: re-running on an already-prepared directory is a no-op.
+    """
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    if resume_from_checkpoint:
+        return out
+    for stale in out.glob("checkpoint-*"):
+        if stale.is_dir():
+            shutil.rmtree(stale, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                stale.unlink()
+    return out
+
+
 class QLoRATrainer:
     """End-to-end QLoRA trainer for SWE-Qwen.
 
@@ -45,11 +88,16 @@ class QLoRATrainer:
         model_name: Key from ``models.yaml`` (e.g. ``"qwen3-14b"``).
         variant: Key from ``qlora_variants.yaml`` (e.g. ``"baseline"``).
         data_dir: Path to tokenized ``.arrow`` shards (from ``tokenize.py``).
-        output_dir: Local directory for checkpoints (Modal volume mount point).
+        output_dir: Base directory for checkpoints (Modal volume mount point).
+            Resolved per variant-run to ``{base}/{variant}-{run_name or run_id
+            or "local"}`` (P0-4: a shared base caused stale checkpoint
+            contamination across variants).
         wandb_project: W&B project name.
         wandb_entity: W&B entity (optional).
         run_name: Optional W&B run name (auto-generated if ``None``).
         resume_from_checkpoint: Path or W&B artifact ref for resume.
+        run_id: Pipeline run ID used for the per-run output-dir suffix when
+            *run_name* is unset (P0-4: ``{base}/{variant}-{run_name or run_id}``).
         use_flash_attn: Enable Flash Attention 2.
         prompt_template_dir: Override prompt template directory.
         gpu_type: GPU identifier for training (e.g. ``"A10G:1"``).
@@ -71,6 +119,7 @@ class QLoRATrainer:
         wandb_entity: str | None = None,
         run_name: str | None = None,
         resume_from_checkpoint: str | None = None,
+        run_id: str | None = None,
         use_flash_attn: bool = True,
         prompt_template_dir: str | None = None,
         gpu_type: str | None = None,
@@ -84,10 +133,17 @@ class QLoRATrainer:
         self.hf_id = hf_id
         self.data_dir = Path(data_dir)
         self.max_train_samples = max_train_samples
-        self.output_dir = Path(output_dir)
+        # P0-4: checkpoints live in a per-variant-run directory, cleaned at
+        # start (unless resuming) so a stale checkpoint-N from a previous run
+        # can never be picked up by this one.
+        self.output_dir = prepare_run_output_dir(
+            resolve_run_output_dir(output_dir, variant, run_name, run_id),
+            resume_from_checkpoint,
+        )
         self.wandb_project = wandb_project
         self.wandb_entity = wandb_entity
         self.run_name = run_name
+        self.run_id = run_id
         self.resume_from_checkpoint = resume_from_checkpoint
         self.use_flash_attn = use_flash_attn
         self.prompt_template_dir = prompt_template_dir
@@ -322,7 +378,7 @@ class QLoRATrainer:
             eval_dataset=self.eval_dataset,
             processing_class=self.tokenizer,
             callbacks=[
-                WandbCheckpointCallback(),
+                WandbCheckpointCallback(run_id=wandb.run.id if wandb.run is not None else None),
                 WandbLoggingCallback(),
             ],
         )
