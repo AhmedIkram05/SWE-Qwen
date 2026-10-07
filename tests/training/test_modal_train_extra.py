@@ -15,6 +15,8 @@ import types
 
 import pytest
 
+from training import qlora_trainer as _real_qlora_trainer
+
 _MODULE_NAME = "training.modal_train"
 
 
@@ -147,6 +149,10 @@ def _fake_training_imports(mocker, *, with_torch_shutdown=True):
 
     fake_qtr = types.ModuleType("training.qlora_trainer")
     fake_qtr.QLoRATrainer = mocker.MagicMock(return_value=trainer)
+    # P0-4: the REAL pure resolver is exercised (no filesystem); prepare is
+    # stubbed to identity because /models is a Modal volume, not a local dir.
+    fake_qtr.prepare_run_output_dir = lambda output_dir, resume_from_checkpoint=None: output_dir
+    fake_qtr.resolve_run_output_dir = _real_qlora_trainer.resolve_run_output_dir
 
     modules = {
         "training.qlora_config": fake_qcfg,
@@ -226,6 +232,7 @@ class TestTrainQlora:
         assert train_call[1]["data_dir"] == "/tmp/data/tokenized/final"
         assert train_call[1]["max_train_samples"] == 99
         assert train_call[1]["gpu_type"] == "A100:1"
+        assert train_call[1]["run_id"] == "run-abc"
 
         ns.shutdown_workers.assert_called_once()
         assert result == {
@@ -234,7 +241,8 @@ class TestTrainQlora:
             "artifact_name": "model-qwen3-14b-baseline_14b",
             "model_name": "qwen3-14b",
             "variant": "baseline_14b",
-            "output_dir": "/models/qlora-output",
+            # P0-4: per-variant-run output dir, not the shared base.
+            "output_dir": "/models/qlora-output/baseline_14b-my-run",
             "metrics": {"train_loss": 0.42},
         }
 

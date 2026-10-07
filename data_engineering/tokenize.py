@@ -21,7 +21,13 @@ from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import AutoTokenizer
 
 from data_engineering.config import DataPipelineConfig
-from evaluation.inference import _file_snippets
+from inference.prompt_builder import (
+    CONTEXT_FILES_MAX,
+    TEST_FILES_MAX,
+    contract_file_snippets,
+    contract_snippet_candidates,
+    render_system_and_user,
+)
 from training.prompt_loader import PromptLoader
 
 logger = logging.getLogger(__name__)
@@ -108,6 +114,11 @@ def load_jsonl_split(path: Path) -> list[dict[str, Any]]:
 def _format_parts(record: dict[str, Any], prompt_loader: PromptLoader) -> tuple[str, str]:
     """Render a record's (full_text, prompt_only_text) training prompts.
 
+    Built through the shared prompt-parity contract
+    (``inference.prompt_builder``): same system strings, same snippet caps
+    (5 files x 150 lines), same candidate seeding, and no few-shot as
+    ``render_patch_prompt`` — so the eval prompt cannot drift from this one.
+
     Fetches the contents of the changed files at the record's base_sha and
     embeds them (### File Contents) so the model learns to write diffs
     against real code — mirroring the eval prompt. Best-effort: a missing
@@ -121,35 +132,34 @@ def _format_parts(record: dict[str, Any], prompt_loader: PromptLoader) -> tuple[
     files_changed: list[str] = record.get("files_changed", [])
     test_files: list[str] = record.get("test_files_changed", [])
 
+    context_files = files_changed[:CONTEXT_FILES_MAX]
+    test_files_capped = test_files[:TEST_FILES_MAX]
+
     context_snippets: list[dict[str, str]] = []
     metadata = record.get("metadata") or {}
     base_sha = metadata.get("base_sha") or record.get("base_sha")
     if base_sha and files_changed:
         try:
-            # ponytail: tighter than the eval path (10 files x 500 lines) —
-            # the gold patch must survive the training context window, so
-            # file contents get 5 files x 150 lines (~8-11K tokens worst case).
-            context_snippets = _file_snippets(
-                repo, base_sha, files_changed[:20], max_files=5, max_lines=150
+            # Snippet caps (5 files x 150 lines) come from the shared
+            # contract: the gold patch must survive the training context
+            # window, and eval uses the same bound.
+            context_snippets = contract_file_snippets(
+                repo,
+                base_sha,
+                contract_snippet_candidates(context_files, test_files_capped, issue_body),
             )
         except Exception as exc:
             logger.warning("Failed to fetch file contents for %s: %s", issue_id, exc)
 
-    user_content = prompt_loader.render(
-        "user",
+    system_prompt, user_content = render_system_and_user(
+        prompt_loader,
         issue_title=issue_id,
         issue_body=issue_body,
         repo_name=repo,
         repo_domain=repo_domain,
-        context_files=files_changed[:20],  # cap context files
-        test_files=test_files[:10],
+        context_files=context_files,
+        test_files=test_files_capped,
         context_snippets=context_snippets,
-    )
-    system_prompt = prompt_loader.render(
-        "system",
-        task_description="Fix the bug described in the issue by generating a correct patch.",
-        language="Python",
-        style_guide="Follow PEP 8 and the repository's existing code style.",
     )
     prompt_only = prompt_loader.render_chat(
         system_prompt=system_prompt,
@@ -174,6 +184,30 @@ def format_training_prompt(record: dict[str, Any], prompt_loader: PromptLoader) 
     return full_text
 
 
+def _log_tokenization_histograms(  # noqa: PLR0913, PLR0917
+    split_name: str,
+    prompt_lens: list[int],
+    completion_lens: list[int],
+    dropped: int,
+    truncated_dropped: int,
+    max_length: int,
+) -> None:
+    """Log prompt/completion length means + drop counters for a split."""
+    if not prompt_lens:
+        return
+    logger.info(
+        "Tokenization histograms split '%s': n=%d prompt_mean=%.1f completion_mean=%.1f "
+        "dropped_prompt=%d dropped_truncated=%d (max_length=%d)",
+        split_name,
+        len(prompt_lens),
+        sum(prompt_lens) / len(prompt_lens),
+        sum(completion_lens) / len(completion_lens) if completion_lens else 0.0,
+        dropped,
+        truncated_dropped,
+        max_length,
+    )
+
+
 def tokenize_split(
     records: list[dict[str, Any]],
     tokenizer: Any,
@@ -186,11 +220,20 @@ def tokenize_split(
     For causal LM training with SFTTrainer, we need to mask the prompt
     portion of labels to -100 so loss is only computed on the assistant response.
 
+    Prompt and completion are tokenized with identical ``add_special_tokens=True``
+    so BOS counts match; ``prompt_end`` is the exact prompt prefix length in the
+    full sequence. Examples whose prompt alone fills the window — or whose
+    prompt+completion exceeds ``max_length`` — are dropped (never truncated, so
+    the gold-tail target is never silently cut). Padding is left to the
+    trainer's data collator, which masks pad tokens to -100; stored rows use
+    ``padding=False`` and contain no pad tokens.
+
     Args:
         records: List of issue records as dicts.
         tokenizer: HF tokenizer for the model.
         prompt_loader: For rendering prompts.
-        max_length: Maximum sequence length (from ``models.yaml.context_window``).
+        max_length: Maximum sequence length (aligned with the trainer's
+            ``max_seq_length``, not ``models.yaml`` ``context_window``).
         split_name: Split name for logging.
 
     Returns:
@@ -200,26 +243,38 @@ def tokenize_split(
     prompt_ends: list[int] = []  # token index where prompt ends (response starts)
     errors = 0
     dropped = 0  # examples whose prompt alone fills the window (no room for the gold patch)
+    truncated_dropped = 0  # prompt fits but prompt+completion exceeds max_length
+    prompt_lens: list[int] = []
+    completion_lens: list[int] = []
 
     for i, rec in enumerate(records):
         try:
             text, prompt_only = _format_parts(rec, prompt_loader)
 
-            # Tokenize the prompt-only text to find where the response starts.
-            # Truncate to max_length: if the prompt alone fills the window the
-            # gold-patch target would be truncated away (all -100 labels), so
-            # drop the example instead of training on empty targets.
-            prompt_tokens = tokenizer(
+            # Identical tokenization settings for both sides so BOS/EOS counts
+            # match; no truncation here — oversize is dropped below, never cut.
+            prompt_ids = tokenizer(
                 prompt_only,
-                add_special_tokens=False,
-                max_length=max_length,
-                truncation=True,
+                add_special_tokens=True,
+                truncation=False,
             )["input_ids"]
-            if len(prompt_tokens) >= max_length:
+            full_ids = tokenizer(
+                text,
+                add_special_tokens=True,
+                truncation=False,
+            )["input_ids"]
+            prompt_len = len(prompt_ids)
+            full_len = len(full_ids)
+            if prompt_len >= max_length:
                 dropped += 1
                 continue
+            if full_len > max_length:
+                truncated_dropped += 1
+                continue
             texts.append(text)
-            prompt_ends.append(len(prompt_tokens))
+            prompt_ends.append(prompt_len)
+            prompt_lens.append(prompt_len)
+            completion_lens.append(full_len - prompt_len)
 
         except Exception as exc:
             errors += 1
@@ -249,30 +304,47 @@ def tokenize_split(
             max_length,
         )
 
+    if truncated_dropped:
+        logger.warning(
+            "Tokenization: dropped %d/%d records in split '%s' "
+            "(prompt+completion exceeds max_length=%d, completion never truncated)",
+            truncated_dropped,
+            len(records),
+            split_name,
+            max_length,
+        )
+
+    _log_tokenization_histograms(
+        split_name, prompt_lens, completion_lens, dropped, truncated_dropped, max_length
+    )
+
     if not texts:
         logger.error("No valid texts for split '%s'", split_name)
         return Dataset.from_list([])
 
-    # Tokenize all texts
+    # Tokenize all texts (no truncation: oversize was dropped above)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
     tokenized = tokenizer(
         texts,
-        truncation=True,
+        add_special_tokens=True,
+        truncation=False,
         max_length=max_length,
         padding=False,
         return_attention_mask=True,
         return_tensors=None,  # return python lists
     )
 
-    # Build labels with prompt masking (-100 for prompt tokens)
+    # Build labels with prompt masking (-100 for prompt tokens).
+    # No pad tokens exist here (padding=False); the trainer collator pads
+    # batches and masks those pads to -100, so stored labels stay exact.
     labels = []
     for i, input_ids in enumerate(tokenized["input_ids"]):
         prompt_end = prompt_ends[i] if i < len(prompt_ends) else 0
         # Mask prompt tokens with -100
         label = [-100] * prompt_end + input_ids[prompt_end:]
-        # Ensure same length
+        # Ensure same length (pad positions, if any, stay -100)
         if len(label) != len(input_ids):
             label = label[: len(input_ids)] + [-100] * max(0, len(input_ids) - len(label))
         labels.append(label)
@@ -286,12 +358,15 @@ def tokenize_split(
 
     dataset = Dataset.from_dict(data)
     logger.info(
-        "Tokenized '%s' split: %d records → %d examples (max_length=%d, errors=%d)",
+        "Tokenized '%s' split: %d records → %d examples "
+        "(max_length=%d, errors=%d, dropped_prompt=%d, dropped_truncated=%d)",
         split_name,
         len(records),
         len(dataset),
         max_length,
         errors,
+        dropped,
+        truncated_dropped,
     )
     return dataset
 
@@ -304,6 +379,8 @@ def tokenize_pipeline(  # noqa: PLR0913, PLR0917
     prompt_template_dir: str | Path | None = None,
     config: DataPipelineConfig | None = None,
     run_id: str | None = None,
+    variant: str = "baseline_14b",
+    gpu_type: str | None = None,
 ) -> DatasetDict:
     """Run the full tokenization pipeline: JSONL → .arrow shards.
 
@@ -312,9 +389,12 @@ def tokenize_pipeline(  # noqa: PLR0913, PLR0917
             (``train.jsonl``, ``val.jsonl``, ``test.jsonl``, ``golden.jsonl``).
         output_dir: Where to save the ``DatasetDict``.
         model_name: Key from ``models.yaml`` used to select tokenizer.
-        max_length: Override max sequence length. If ``None``, reads from
-            ``models.yaml`` context_window for the given model.
+        max_length: Override max sequence length. If ``None``, uses the
+            trainer's effective ``max_seq_length`` for ``variant``/``gpu_type``
+            (capped by the model's ``context_window``) — never bare 32k.
         prompt_template_dir: Override prompt template directory.
+        variant: QLoRA variant key used to resolve the trainer max length.
+        gpu_type: Optional GPU spec (e.g. ``"A10G:1"``) for the 2048 override.
 
     Returns:
         The saved ``DatasetDict``.
@@ -322,12 +402,19 @@ def tokenize_pipeline(  # noqa: PLR0913, PLR0917
     data_path = Path(data_dir)
     out_path = Path(output_dir)
 
-    # Resolve tokenizer and max_length
-    from training.qlora_config import _get_model_config
+    # Resolve tokenizer and max_length (aligned with trainer, not bare context_window)
+    from training.qlora_config import _get_model_config, resolve_train_max_seq_length
 
     model_cfg = _get_model_config(model_name)
     hf_id: str = model_cfg["hf_id"]
-    ctx_length = max_length or int(model_cfg.get("context_window", 32768))
+    if max_length is not None:
+        ctx_length = int(max_length)
+    else:
+        try:
+            train_max = resolve_train_max_seq_length(variant=variant, gpu_type=gpu_type)
+        except Exception:
+            train_max = 4096
+        ctx_length = min(int(model_cfg.get("context_window", 32768)), int(train_max))
 
     logger.info(
         "Tokenizing for model %s (hf_id=%s, max_length=%d)",
@@ -414,11 +501,13 @@ def load_tokenized_shards(
     return ds
 
 
-def tokenize_dataset(
+def tokenize_dataset(  # noqa: PLR0913, PLR0917
     run_id: str | None = None,
     model_name: str = _default_model_name(),
     max_seq_length: int | None = None,
     config: DataPipelineConfig | None = None,
+    variant: str = "baseline_14b",
+    gpu_type: str | None = None,
 ) -> dict[str, Any]:
     """Tokenize a completed dataset run.
 
@@ -427,9 +516,12 @@ def tokenize_dataset(
     Args:
         run_id: The run ID of the dataset to tokenize. If None, uses the latest run.
         model_name: Model name from models.yaml (default: registry default key).
-        max_seq_length: Maximum sequence length for tokenization; None reads
-            the model's ``context_window`` from the registry.
+        max_seq_length: Maximum sequence length for tokenization; None uses the
+            trainer's effective ``max_seq_length`` (variant/gpu_type, capped by
+            the model context window) — never bare 32k.
         config: Optional pipeline config for GCS upload.
+        variant: QLoRA variant key used to resolve the trainer max length.
+        gpu_type: Optional GPU spec for the trainer max-length override.
 
     Returns:
         Dict with tokenization results and output path.
@@ -461,9 +553,11 @@ def tokenize_dataset(
         data_dir=data_dir,
         output_dir=output_dir,
         model_name=model_name,
-        max_length=max_seq_length,  # None → context_window from the registry
+        max_length=max_seq_length,  # None → trainer max_seq_length, capped by context_window
         config=config,
         run_id=run_id,
+        variant=variant,
+        gpu_type=gpu_type,
     )
 
     return {

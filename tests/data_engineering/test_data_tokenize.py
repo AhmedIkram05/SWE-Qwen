@@ -118,7 +118,7 @@ class TestTokenizeSplit:
     def test_basic(
         self, tokenizer: Any, prompt_loader: PromptLoader, sample_record: dict[str, Any]
     ) -> None:
-        ds = tokenize_split([sample_record], tokenizer, prompt_loader, max_length=512)
+        ds = tokenize_split([sample_record], tokenizer, prompt_loader, max_length=1024)
         assert isinstance(ds, Dataset)
         assert len(ds) == 1
         row = ds[0]
@@ -133,7 +133,7 @@ class TestTokenizeSplit:
     def test_multiple_records(
         self, tokenizer: Any, prompt_loader: PromptLoader, sample_records: list[dict[str, Any]]
     ) -> None:
-        ds = tokenize_split(sample_records, tokenizer, prompt_loader, max_length=512)
+        ds = tokenize_split(sample_records, tokenizer, prompt_loader, max_length=1024)
         assert len(ds) == 2
         for row in ds:
             assert -100 in row["labels"]
@@ -601,3 +601,85 @@ class TestTrainingPromptFileContents:
         text = format_training_prompt(sample_record, prompt_loader)
         assert calls == []
         assert "### File Contents" not in text
+
+
+# ── P0-2 tokenize↔trainer alignment contract ─────────────────────────────────
+
+
+class TestTokenizeAlignmentContract:
+    """BOS-aligned prompt mask, drop-not-truncate oversize, histogram logging.
+
+    Pins the P0-2 fix: prompt and completion are tokenized identically
+    (``add_special_tokens=True``) so the loss-mask boundary is exact, and
+    oversize examples are dropped (never truncated) so the gold tail is
+    never silently cut.
+    """
+
+    def test_mask_boundary_is_bos_aligned(
+        self, tokenizer: Any, prompt_loader: PromptLoader, sample_record: dict[str, Any]
+    ) -> None:
+        from data_engineering.tokenize import _format_parts
+
+        full, prompt_only = _format_parts(sample_record, prompt_loader)
+        prompt_len = len(
+            tokenizer(prompt_only, add_special_tokens=True, truncation=False)["input_ids"]
+        )
+        ds = tokenize_split([sample_record], tokenizer, prompt_loader, max_length=4096)
+        assert len(ds) == 1
+        labels = ds[0]["labels"]
+        input_ids = ds[0]["input_ids"]
+        # Prompt region fully masked.
+        assert all(l == -100 for l in labels[:prompt_len])
+        # First completion token carries loss (exact BOS-aligned boundary).
+        assert labels[prompt_len] != -100
+        # No truncation: stored length equals the full tokenized length.
+        assert len(input_ids) == len(
+            tokenizer(full, add_special_tokens=True, truncation=False)["input_ids"]
+        )
+
+    def test_oversize_completion_dropped_not_truncated(
+        self,
+        tokenizer: Any,
+        prompt_loader: PromptLoader,
+        sample_record: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from data_engineering.tokenize import _format_parts
+
+        full, prompt_only = _format_parts(sample_record, prompt_loader)
+        full_len = len(tokenizer(full, add_special_tokens=True, truncation=False)["input_ids"])
+        # Pick a budget that fits the prompt but not the full sequence.
+        prompt_len = len(
+            tokenizer(prompt_only, add_special_tokens=True, truncation=False)["input_ids"]
+        )
+        assert prompt_len < full_len
+        caplog.set_level(logging.WARNING)
+        ds = tokenize_split([sample_record], tokenizer, prompt_loader, max_length=full_len - 1)
+        # Dropped entirely — never a truncated completion row.
+        assert len(ds) == 0
+        assert "prompt+completion exceeds max_length" in caplog.text
+
+    def test_prompt_fills_window_dropped(
+        self, tokenizer: Any, prompt_loader: PromptLoader, sample_record: dict[str, Any]
+    ) -> None:
+        from data_engineering.tokenize import _format_parts
+
+        _, prompt_only = _format_parts(sample_record, prompt_loader)
+        prompt_len = len(
+            tokenizer(prompt_only, add_special_tokens=True, truncation=False)["input_ids"]
+        )
+        ds = tokenize_split([sample_record], tokenizer, prompt_loader, max_length=prompt_len)
+        assert len(ds) == 0
+
+    def test_histograms_logged(
+        self,
+        tokenizer: Any,
+        prompt_loader: PromptLoader,
+        sample_records: list[dict[str, Any]],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.INFO)
+        tokenize_split(sample_records, tokenizer, prompt_loader, max_length=4096)
+        assert "Tokenization histograms" in caplog.text
+        assert "prompt_mean=" in caplog.text
+        assert "completion_mean=" in caplog.text

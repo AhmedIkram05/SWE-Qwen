@@ -60,7 +60,8 @@ from promotion.rules import (
 
 pytestmark = pytest.mark.unit
 
-# Champion from seed_champion.py (2026-08-06): F2P 0.169, P2P 0.912.
+# Arbitrary gate-test fixture rates (not a claim about the seeded champion;
+# the seed values live in scripts/seed_champion.py / assets/results.txt).
 CHAMPION_F2P = 0.169
 CHAMPION_P2P = 0.912
 
@@ -615,10 +616,11 @@ class TestSeedChampion:
         code, out = self._run(tmp_path, mocker)
         assert code == 0
         data = json.loads(out.read_text(encoding="utf-8"))
-        assert data["variant"] == "higher_lr_14b"
-        assert data["model_ref"] == "qwen3-14b:higher_lr_14b"
-        assert data["f2p_rate"] == 0.169
-        assert data["p2p_rate"] == 0.912
+        # P0-4: the seed matches assets/results.txt (n=100 golden champion).
+        assert data["variant"] == "higher_rank_14b"
+        assert data["model_ref"] == "qwen3-14b:higher_rank_14b"
+        assert data["f2p_rate"] == 0.172
+        assert data["p2p_rate"] == 0.901
         assert data["dataset_run_id"] == "expanded-repos"
         assert data["tier"] == "full"
         assert data["seed"] == 42
