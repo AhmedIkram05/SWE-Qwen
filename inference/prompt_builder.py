@@ -25,6 +25,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from data_engineering.diff_utils import parse_files
+
 if TYPE_CHECKING:
     from evaluation.config import EvalConfig
     from evaluation.schema import EvalInput
@@ -35,8 +37,6 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PROMPTS_DIR = _REPO_ROOT / "training" / "prompts"
 
 DEFAULT_TEMPLATE = "chat"
-
-_DIFF_FILE_RE = re.compile(r"^diff --git a/\S+ b/(\S+)", re.MULTILINE)
 
 
 # ── Eval-side patch bridge ─────────────────────────────────────────────────
@@ -149,10 +149,8 @@ def chat_wrap(hf_id: str, system_prompt: str, user_text: str) -> str:
 
 
 def _files_from_diff(patch: str) -> list[str]:
-    """Extract the changed file paths (``b/`` side) from a unified diff."""
-    if not patch:
-        return []
-    return [match.group(1) for match in _DIFF_FILE_RE.finditer(patch)]
+    """Extract the changed file paths from a unified diff (shared parser)."""
+    return parse_files(patch)
 
 
 # SWE-bench problem statements often name the files they touch (``django/

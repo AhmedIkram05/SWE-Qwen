@@ -34,7 +34,6 @@ import modal
 import inference.prompt_builder as _prompt_builder
 
 DEFAULT_TEMPLATE = _prompt_builder.DEFAULT_TEMPLATE
-_DIFF_FILE_RE = _prompt_builder._DIFF_FILE_RE
 _GOLDEN_INDEX = _prompt_builder._GOLDEN_INDEX
 _GOLDEN_PATH = _prompt_builder._GOLDEN_PATH
 _GOLDEN_SOURCE = _prompt_builder._GOLDEN_SOURCE
@@ -181,35 +180,87 @@ def _get_llm(
 # resolve_adapter_path) moved to inference.prompt_builder (re-exported above).
 
 
-def extract_patch(text: str) -> str:
-    """Extract a unified diff from model output.
+def _normalize_patch_prefixes(patch: str) -> str:
+    """Normalize ---/+++ headers to a/b prefixes; strip whitespace; trailing newline.
 
-    Handles reasoning text before the diff, multiple code blocks, and fence variants.
+    Only header-position lines (before the first ``@@`` hunk of a file
+    section) are rewritten: a ``--- `` line inside a hunk body is deleted
+    content (a removed line starting with ``-- ``) and must be left alone.
     """
+    out: list[str] = []
+    in_header = True  # before the first @@ hunk of the current file section
+    for line in patch.strip().splitlines():
+        s = line.strip()
+        if s.startswith("diff --git"):
+            in_header = True
+        elif s.startswith("@@"):
+            in_header = False
+        elif in_header and s.startswith("--- "):
+            rest = s[4:].strip()
+            if rest and rest != "/dev/null" and not rest.startswith(("a/", '"a/')):
+                s = "--- a/" + rest.lstrip("/")
+        elif in_header and s.startswith("+++ "):
+            rest = s[4:].strip()
+            if rest and rest != "/dev/null" and not rest.startswith(("b/", '"b/')):
+                s = "+++ b/" + rest.lstrip("/")
+        out.append(s)
+    text = "\n".join(out).strip()
+    return text + "\n" if text else ""
+
+
+def extract_patch_with_flag(text: str) -> tuple[str, bool]:
+    """Extract a unified diff, returning (patch, extraction_failed).
+
+    Fail-loud: no diff found -> ("", True). Strips fences/whitespace and
+    normalizes a/b prefixes. Never passes raw reasoning text through.
+    """
+    if not text or not text.strip():
+        return "", True
     # Try ```diff fenced blocks — take LAST (model often reasons first, diff last)
     diffs: list[str] = re.findall(r"```diff\s*\n(.*?)```", text, re.DOTALL)
-    if diffs:
-        patch = diffs[-1].strip()
-        if patch:
-            patch = patch + "\n"
-            if patch.startswith("diff --git") or patch.startswith("---") or patch.startswith("+++"):
-                return patch
-    # Try any fenced block — take LAST
+    for raw in reversed(diffs):
+        patch = raw.strip()
+        if patch.startswith(("diff --git", "---", "+++", "@@")):
+            norm = _normalize_patch_prefixes(patch)
+            if norm:
+                return norm, False
+    # Try any fenced block — take LAST that looks like a diff
     blocks: list[str] = re.findall(r"```\w*\s*\n(.*?)```", text, re.DOTALL)
-    if blocks:
-        patch = blocks[-1].strip()
-        if patch:
-            patch = patch + "\n"
-            if patch.startswith("diff --git") or patch.startswith("---") or patch.startswith("+++"):
-                return patch
+    for raw in reversed(blocks):
+        patch = raw.strip()
+        if patch.startswith(("diff --git", "---", "+++", "@@")):
+            norm = _normalize_patch_prefixes(patch)
+            if norm:
+                return norm, False
     # No fences: scan for diff --git anywhere, take from there
     idx = text.rfind("diff --git")
     if idx >= 0:
-        patch = text[idx:].strip()
-        return patch + "\n" if patch else ""
-    # Last resort: return as-is (with trailing newline)
-    patch = text.strip()
-    return patch + "\n" if patch else ""
+        norm = _normalize_patch_prefixes(text[idx:])
+        if norm:
+            return norm, False
+    # Bare ---/+++/@@ without diff --git (common LLM shape)
+    lines = text.strip().splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if line.strip().startswith(("--- ", "+++ ", "@@ "))),
+        -1,
+    )
+    if start >= 0:
+        norm = _normalize_patch_prefixes("\n".join(lines[start:]))
+        if norm and ("--- " in norm or "+++ " in norm or "@@ " in norm):
+            return norm, False
+    return "", True
+
+
+def extract_patch(text: str) -> str:
+    """Extract a unified diff from model output (fail-loud: "" when none found)."""
+    patch, failed = extract_patch_with_flag(text)
+    if failed:
+        logger.warning(
+            "extract_patch failed: no diff found len=%d sample=%r",
+            len(text),
+            text[:500],
+        )
+    return patch
 
 
 # ── Lazy-registered inference functions (one per GPU config) ──────────────
@@ -369,7 +420,24 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
         else None
     )
     outputs = llm.generate(prompts, sampling_params, lora_request=lora_req)
-    return [extract_patch(output.outputs[0].text) for output in outputs]
+    patches: list[str] = []
+    failed = 0
+    for output in outputs:
+        raw = output.outputs[0].text
+        patch, extraction_failed = extract_patch_with_flag(raw)
+        if extraction_failed:
+            failed += 1
+            logger.warning(
+                "batch extraction failed (%d/%d): len=%d sample=%r",
+                failed,
+                len(outputs),
+                len(raw),
+                raw[:500],
+            )
+        patches.append(patch)
+    if failed:
+        logger.error("extract_patch failed for %d/%d generations", failed, len(outputs))
+    return patches
 
 
 # Testing backward-compat: .local() calls the body directly (no Modal container)

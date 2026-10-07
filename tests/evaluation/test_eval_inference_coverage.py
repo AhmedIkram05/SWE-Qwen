@@ -22,6 +22,7 @@ from evaluation.inference import (
     _files_from_diff,
     _get_llm,
     extract_patch,
+    extract_patch_with_flag,
     generate_patches_batch,
     render_patch_prompt,
     resolve_adapter_path,
@@ -155,20 +156,55 @@ class TestExtractPatch:
         text = "diff --git a/one b/one\nnoise\ndiff --git a/two b/two\n@@ -1 +1 @@\n"
         assert extract_patch(text) == "diff --git a/two b/two\n@@ -1 +1 @@\n"
 
-    def test_diff_fence_with_non_diff_body_returns_whole(self):
-        # ```diff fence whose body is not diff-like: no fallback match, no bare
-        # "diff --git" → the entire (stripped) text is returned as-is.
+    def test_diff_fence_with_non_diff_body_returns_empty(self):
+        # ```diff fence whose body is not diff-like: no other branch matches
+        # either, so extraction fails loudly ("" + flag) instead of passing
+        # raw text through.
         text = "hello\n```diff\nnot a real diff\n```\nworld"
-        assert extract_patch(text) == text.strip() + "\n"
+        assert extract_patch(text) == ""
+        assert extract_patch_with_flag(text) == ("", True)
 
-    def test_no_diff_anywhere_returns_stripped(self):
-        assert extract_patch("  just some words  ") == "just some words\n"
+    def test_no_diff_anywhere_fails_loud(self):
+        assert extract_patch("  just some words  ") == ""
+        assert extract_patch_with_flag("  just some words  ") == ("", True)
 
     def test_empty(self):
         assert extract_patch("") == ""
+        assert extract_patch_with_flag("") == ("", True)
 
     def test_whitespace(self):
         assert extract_patch("   \n  ") == ""
+        assert extract_patch_with_flag("   \n  ") == ("", True)
+
+    def test_diff_found_flag_false(self):
+        text = "reasoning\n```diff\ndiff --git a/x.py b/x.py\n@@ -1 +1 @@\n```\n"
+        patch, failed = extract_patch_with_flag(text)
+        assert failed is False
+        assert patch.startswith("diff --git a/x.py b/x.py")
+
+    def test_bare_headers_normalized_to_ab(self):
+        text = "```diff\n--- src/foo.py\n+++ src/foo.py\n@@ -1 +1 @@\n-x\n+y\n```"
+        patch, failed = extract_patch_with_flag(text)
+        assert failed is False
+        assert patch == "--- a/src/foo.py\n+++ b/src/foo.py\n@@ -1 +1 @@\n-x\n+y\n"
+
+    def test_hunk_body_minus_minus_lines_not_rewritten(self):
+        # A removed line whose content starts with "-- " appears as "--- " in
+        # the hunk body; normalization must only touch header-position lines.
+        text = (
+            "```diff\n--- src/foo.py\n+++ src/foo.py\n"
+            "@@ -1,2 +1,1 @@\n keep\n--- old comment\n-x\n```"
+        )
+        patch, failed = extract_patch_with_flag(text)
+        assert failed is False
+        assert "--- a/src/foo.py" in patch
+        assert "--- old comment" in patch  # hunk body line left untouched
+
+    def test_bare_diff_without_fences(self):
+        text = "I made the change:\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+        patch, failed = extract_patch_with_flag(text)
+        assert failed is False
+        assert patch == "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
 
 
 # ── _files_from_diff ───────────────────────────────────────────────────────

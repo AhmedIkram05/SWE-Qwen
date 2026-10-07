@@ -67,6 +67,31 @@ class TestParseHelpers:
         result = _parse_unified_diff("this is not a diff at all")
         assert result == []
 
+    def test_parse_unified_diff_invalid_logs_loudly(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Non-diff input must log an ERROR with count + sample, not silently pass."""
+        with caplog.at_level("ERROR", logger="data_engineering.swebench_ingest"):
+            result = _parse_unified_diff("this is not a diff at all")
+        assert result == []
+        assert any("unidiff" in r.message for r in caplog.records if r.levelno >= 40)
+        sample = [r.message for r in caplog.records if r.levelno >= 40][0]
+        assert "not a diff" in sample  # sample of the offending input is logged
+
+    def test_parse_unified_diff_truncated_hunk_logs_loudly(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A hunk whose body is shorter than its header raises in unidiff; must log ERROR."""
+        diff = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1,5 +1,5 @@\n a\n"
+        with caplog.at_level("ERROR", logger="data_engineering.swebench_ingest"):
+            result = _parse_unified_diff(diff)
+        assert result == []
+        assert any(r.levelno >= 40 and "unidiff" in r.message for r in caplog.records)
+
+    def test_parse_unified_diff_empty_is_silent(self, caplog: pytest.LogCaptureFixture) -> None:
+        """An empty diff is not a failure — no error log, no quarantine."""
+        with caplog.at_level("ERROR", logger="data_engineering.swebench_ingest"):
+            assert _parse_unified_diff("") == []
+        assert not [r for r in caplog.records if r.levelno >= 40 and "unidiff" in r.message]
+
 
 class TestSWEBenchConstants:
     """Tests for SWE-bench constants."""
@@ -167,6 +192,24 @@ class TestSWEBenchToIssueRecord:
         assert hunk.file == "django/views.py"
         assert hunk.old_start == 1
         assert hunk.new_start == 1
+
+    def test_quarantine_flag_on_unidiff_failure(self, sample_example):
+        # Looks like a diff (passes the patch_diff schema validator) but
+        # unidiff cannot parse it (truncated hunk) -> quarantine flag + [].
+        sample_example["patch"] = (
+            "diff --git a/django/views.py b/django/views.py\n"
+            "--- a/django/views.py\n"
+            "+++ b/django/views.py\n"
+            "@@ -1,5 +1,5 @@\n"
+            " a\n"
+        )
+        record = swebench_to_issue_record(sample_example, "web-api")
+        assert record.parsed_hunks == []
+        assert record.metadata["quarantine_unidiff_failed"] is True
+
+    def test_quarantine_flag_false_on_valid_patch(self, sample_example):
+        record = swebench_to_issue_record(sample_example, "web-api")
+        assert record.metadata["quarantine_unidiff_failed"] is False
 
     def test_empty_fail_to_pass(self):
         example = {
