@@ -174,6 +174,14 @@ training_image = (
 models_volume = modal.Volume.from_name("swe-qwen-models", create_if_missing=True)
 
 
+# ── Per-run output isolation (P0-4) ───────────────────────────────────────────
+# Shared ``/models/qlora-output`` across variants caused stale
+# ``checkpoint-108`` contamination (proven in logs). Every variant-run gets
+# its own ``{base}/{variant}-{run_name}`` directory, cleaned at start unless
+# resuming. Resolution/cleanup helpers live in ``training.qlora_trainer``
+# (shared with the local CLI path) and are imported inside ``train_qlora``.
+
+
 # ── Training function ─────────────────────────────────────────────────────────
 
 
@@ -220,7 +228,9 @@ def train_qlora(  # noqa: PLR0913, PLR0917
         variant: Key from ``qlora_variants.yaml`` (e.g. ``"efficient_14b"``).
         run_id: Phase 3 pipeline run ID, Determines which tokenized dataset to use.
         data_dir: Ignored — tokenized data is always downloaded from GCS.
-        output_dir: Path within volume for checkpoints.
+        output_dir: Base path within volume for checkpoints. Resolved to
+            per-variant-run ``{base}/{variant}-{run_name or run_id}`` (P0-4:
+            shared base caused stale checkpoint-108 contamination).
         run_name: W&B run name (auto-generated if ``None``).
         resume: Checkpoint path or W&B artifact ref for resume.
         wandb_project: W&B project name.
@@ -252,7 +262,11 @@ def train_qlora(  # noqa: PLR0913, PLR0917
     data_dir = _download_gcs_public(_tokenized_prefix(run_id), _download_dir)
 
     from training.qlora_config import build_model_and_peft, resolve_gpu_type
-    from training.qlora_trainer import QLoRATrainer
+    from training.qlora_trainer import (
+        QLoRATrainer,
+        prepare_run_output_dir,
+        resolve_run_output_dir,
+    )
 
     # Auto-resolve GPU type if not provided
     if gpu_type is None:
@@ -275,6 +289,14 @@ def train_qlora(  # noqa: PLR0913, PLR0917
         gpu_type=gpu_type,
     )
 
+    # P0-4: isolate checkpoints per variant-run; clean stale unless resuming.
+    output_dir = str(
+        prepare_run_output_dir(
+            resolve_run_output_dir(output_dir, variant, run_name, run_id),
+            resume,
+        )
+    )
+
     trainer = QLoRATrainer(
         model_name=model_name,
         variant=variant,
@@ -284,6 +306,7 @@ def train_qlora(  # noqa: PLR0913, PLR0917
         wandb_entity=wandb_entity,
         run_name=run_name,
         resume_from_checkpoint=resume,
+        run_id=run_id,
         gpu_type=gpu_type,
         model=model,
         tokenizer=tokenizer,
