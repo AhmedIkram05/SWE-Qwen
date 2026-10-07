@@ -36,7 +36,9 @@ variants:
       gradient_checkpointing: true
       dataloader_num_workers: 2
       remove_unused_columns: false
-      packing: true
+      # False for pre-tokenized input_ids/labels: packing concatenates
+      # examples across -100 prompt boundaries and corrupts the loss mask.
+      packing: false
       max_seq_length: 4096
       dataloader_pin_memory: false
 

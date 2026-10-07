@@ -29,7 +29,17 @@ def default_tokenize_model() -> str:
 
 
 def default_tokenize_max_length() -> int:
-    """Registry ``context_window`` of the default model, literal last resort."""
+    """Trainer's effective ``max_seq_length``, literal last resort.
+
+    Aligned with ``training.qlora_config.resolve_train_max_seq_length`` (capped
+    by the model context window) so we never tokenize 32k then train 4k/2k.
+    """
+    try:
+        from training.qlora_config import resolve_train_max_seq_length
+
+        return resolve_train_max_seq_length()
+    except Exception:
+        pass
     try:
         return load_models()[default_tokenize_model()].context_window
     except (KeyError, OSError, yaml.YAMLError, ValidationError):
@@ -89,6 +99,8 @@ class DataPipelineConfig(BaseSettings):
         Env/init values win (already in ``model_fields_set``). A readable
         registry without ``tokenize_model`` raises — literals apply only when
         the registry is missing or unreadable (no silent family fallback).
+        ``tokenize_max_length`` defaults to the trainer's effective
+        ``max_seq_length`` (capped by the model context window), never bare 32k.
         """
         try:
             models = load_models()
@@ -105,7 +117,12 @@ class DataPipelineConfig(BaseSettings):
                 f"available: {sorted(models)}"
             )
         if "tokenize_max_length" not in self.model_fields_set:
-            self.tokenize_max_length = spec.context_window
+            try:
+                from training.qlora_config import resolve_train_max_seq_length
+
+                self.tokenize_max_length = min(spec.context_window, resolve_train_max_seq_length())
+            except Exception:
+                self.tokenize_max_length = min(spec.context_window, _LEGACY_MAX_LENGTH)
         return self
 
     # Stage control
