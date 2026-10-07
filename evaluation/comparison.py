@@ -18,7 +18,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from evaluation.config import EvalConfig
-from evaluation.metrics import aggregate_metrics
+from evaluation.metrics import aggregate_metrics, is_instance_resolved
 from evaluation.schema import EvalResult, EvalRun, F2PMetrics
 from evaluation.stats import mcnamar_p, paired_bootstrap_ci, wilson_ci
 from scripts.f2p_proxy import compute_proxy_f2p_scores, select_champion
@@ -168,6 +168,13 @@ def compare_and_report(metrics: dict[str, F2PMetrics], proxy_champion: str | Non
     - ``[champion]`` — current rank-1 candidate clearing both gates,
     - ``[rejected: p2p<90%]`` / ``[rejected: f2p<15%]`` — gate failures.
 
+    Fairness (P0-5): ``f2p_95ci`` bounds instance-resolve
+    (``resolve_count / total``, strict ``F2P==1.0``) via Wilson — NOT the
+    mean partial-credit ``f2p_rate``. Binomial CI on a mean is invalid;
+    partial 0.5s are not Bernoulli trials. ``apply_rate``
+    (applied/total) vs ``resolve_rate`` vs ``cond_resolve``
+    (resolved|applied) splits apply-fail from wrong-patch.
+
     Args:
         metrics: Per-model metrics keyed by ``"model_name:variant"``.
         proxy_champion: Variant name selected by the P4 proxy (matched
@@ -185,14 +192,15 @@ def compare_and_report(metrics: dict[str, F2PMetrics], proxy_champion: str | Non
     champion = max(passing, key=lambda key: metrics[key].f2p_rate) if passing else None
 
     lines = [
-        "| model | variant | total | f2p_rate | f2p_95ci | p2p_rate | avg_latency | flaky_rate | note |",  # noqa: E501
-        "|---|---|---|---|---|---|---|---|---|",
+        "| model | variant | total | f2p_rate | f2p_95ci | p2p_rate | avg_latency | flaky_rate | apply_rate | resolve_rate | cond_resolve | note |",  # noqa: E501
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for key, m in ranked:
         model, _, variant = key.partition(":")
-        # f2p_rate is the mean partial credit; bound the SAME statistic the
-        # table displays (f2p_count counts instances with ANY pass).
-        lo, hi = wilson_ci(round(m.f2p_rate * m.total_examples), m.total_examples)
+        # P0-5: the CI bounds instance-resolve (strict F2P==1.0), NOT the
+        # mean partial-credit f2p_rate — a binomial CI on a mean is invalid
+        # (partial 0.5s are not Bernoulli trials).
+        lo, hi = wilson_ci(m.resolve_count, m.total_examples)
         notes = []
         if proxy_champion is not None and (
             key == proxy_champion or key.endswith(f":{proxy_champion}")
@@ -207,19 +215,55 @@ def compare_and_report(metrics: dict[str, F2PMetrics], proxy_champion: str | Non
         lines.append(
             f"| {model} | {variant} | {m.total_examples} | {m.f2p_rate:.2%} | {lo:.1%}-{hi:.1%} "
             f"| {m.p2p_rate:.2%} | {m.avg_latency:.2f} | {m.flaky_test_rate:.2%} "
+            f"| {m.apply_rate:.2%} | {m.resolve_rate:.2%} | {m.conditional_resolve_rate:.2%} "
             f"| {' '.join(notes)} |"
         )
     return "\n".join(lines)
 
 
+def _mcnemar_line(
+    label: str,
+    a_scores: dict[str, float],
+    b_scores: dict[str, float],
+) -> str | None:
+    """One McNemar + paired-bootstrap line for shared instances, or None when
+    the two sides share no instance (nothing to pair)."""
+    shared = [i for i in a_scores if i in b_scores]
+    if not shared:
+        return None
+    b01 = sum(1 for i in shared if a_scores[i] < b_scores[i])  # a lost, b won
+    b10 = sum(1 for i in shared if a_scores[i] > b_scores[i])  # a won, b lost
+    p = mcnamar_p(b01, b10)
+    lo, hi, diff = paired_bootstrap_ci([a_scores[i] for i in shared], [b_scores[i] for i in shared])
+    return (
+        f"- {label}: resolve diff {diff:+.2%} "
+        f"(bootstrap 95% CI {lo:+.2%} to {hi:+.2%}), "
+        f"McNemar p={p:.4f}{'' if p < 0.05 else ' (n.s.)'} (n={len(shared)})"  # noqa: PLR2004
+    )
+
+
 def paired_significance(a: EvalRun, b: EvalRun) -> str:
     """McNemar + paired-bootstrap significance between two runs.
 
-    Per-instance F2P outcomes (0/1) are keyed by ``model:variant`` first,
-    then instance ID, and the SAME variant is paired across runs — this is
-    what makes runs comparable (e.g. prompt A/B runs both evaluating
-    ``baseline_14b`` on the same seed-42 subset). Variants evaluated in
-    only one run are ignored. One line per shared variant.
+    Per-instance outcomes are the STRICT instance-resolve predicate
+    (``is_instance_resolved``: error-free and ``F2P == 1.0`` — partial credit
+    is not a binary outcome for McNemar/bootstrap), keyed by
+    ``model:variant`` first, then instance ID. Blank instance IDs are never
+    paired. Two pairings are reported:
+
+    - **same-variant** — the same ``model:variant`` evaluated in both runs
+      (e.g. prompt A/B runs of one variant on the seed-42 subset):
+      repeat-run variance.
+    - **cross-variant** — the same model under two DIFFERENT variants,
+      paired on identical instances (e.g. ``baseline_14b`` vs
+      ``higher_rank_14b`` in separate runs of the same tier): the
+      variant-vs-variant comparison needed to call a fine-tune a win.
+
+    Fairness preconditions: sampling params (temperature/top_p/max_tokens)
+    and prompt wrapping must be identical across the two runs, and batch
+    sizes should match — eager (probe/smoke <32 prompts) vs compiled vLLM
+    engines can add small decode variance (see
+    ``evaluation.inference._generate_patches_batch_body``).
 
     Returns a short markdown block.
     """
@@ -227,34 +271,55 @@ def paired_significance(a: EvalRun, b: EvalRun) -> str:
     b_vars: dict[str, dict[str, float]] = defaultdict(dict)
     for r in a.results:
         if r.instance_id:
-            a_vars[f"{r.model_name}:{r.variant}"][r.instance_id] = 1.0 if r.f2p > 0 else 0.0
+            a_vars[f"{r.model_name}:{r.variant}"][r.instance_id] = (
+                1.0 if is_instance_resolved(r) else 0.0
+            )
     for r in b.results:
         if r.instance_id:
-            b_vars[f"{r.model_name}:{r.variant}"][r.instance_id] = 1.0 if r.f2p > 0 else 0.0
-    shared_variants = sorted(set(a_vars) & set(b_vars))
-    if not shared_variants:
-        return (
-            "_no variant evaluated in both runs — paired significance skipped "
+            b_vars[f"{r.model_name}:{r.variant}"][r.instance_id] = (
+                1.0 if is_instance_resolved(r) else 0.0
+            )
+
+    lines: list[str] = []
+    same_variants = sorted(set(a_vars) & set(b_vars))
+    if same_variants:
+        same_lines = [
+            line
+            for line in (
+                _mcnemar_line(variant, a_vars[variant], b_vars[variant])
+                for variant in same_variants
+            )
+            if line
+        ]
+        lines.extend(
+            same_lines
+            or ["_same-variant runs have no overlapping instances — same-variant pairing skipped_"]
+        )
+    else:
+        lines.append(
+            "_no variant evaluated in both runs — same-variant pairing skipped "
             "(compare runs that share a variant name, e.g. prompt A/B on one variant)_"
         )
 
-    lines: list[str] = []
-    for variant in shared_variants:
-        a_f2p, b_f2p = a_vars[variant], b_vars[variant]
-        shared = [i for i in a_f2p if i in b_f2p]
-        if not shared:
-            continue
-        b01 = sum(1 for i in shared if a_f2p[i] < b_f2p[i])  # a lost, b won
-        b10 = sum(1 for i in shared if a_f2p[i] > b_f2p[i])  # a won, b lost
-        p = mcnamar_p(b01, b10)
-        lo, hi, diff = paired_bootstrap_ci([a_f2p[i] for i in shared], [b_f2p[i] for i in shared])
-        lines.append(
-            f"- {variant}: F2P diff {diff:+.2%} "
-            f"(bootstrap 95% CI {lo:+.2%} to {hi:+.2%}), "
-            f"McNemar p={p:.4f}{'' if p < 0.05 else ' (n.s.)'} (n={len(shared)})"  # noqa: PLR2004
+    cross_pairs = sorted(
+        (va, vb)
+        for va in a_vars
+        for vb in b_vars
+        if va != vb and va.partition(":")[0] == vb.partition(":")[0]
+    )
+    if cross_pairs:
+        cross_lines = [
+            line
+            for line in (
+                _mcnemar_line(f"{va} vs {vb}", a_vars[va], b_vars[vb]) for va, vb in cross_pairs
+            )
+            if line
+        ]
+        lines.extend(
+            cross_lines
+            or ["_cross-variant pairs share no instances — cross-variant pairing skipped_"]
         )
-    if not lines:
-        return "_shared variants have no overlapping instances — paired significance skipped_"
+
     return f"paired significance ({a.run_id} vs {b.run_id}):\n" + "\n".join(lines)
 
 

@@ -227,6 +227,7 @@ def _generate_patches(  # noqa: PLR0913, PLR0917
     examples: list[EvalInput],
     max_new_tokens: int = 8192,
     dataset_run_id: str | None = None,
+    prompt_wrap: str = "raw",
 ) -> list[str]:
     """Generate patches for *examples* via ``evaluation.inference``.
 
@@ -238,6 +239,8 @@ def _generate_patches(  # noqa: PLR0913, PLR0917
         max_new_tokens: Maximum completion length (per-tier C2 config).
         dataset_run_id: Pipeline run id; forwarded so the container fetches
             the few-shot golden from that run's GCS artifacts.
+        prompt_wrap: Unified prompt wrapping for all variants in the batch
+            (``"raw"`` default, training-matching; ``"chat"`` ablation).
     """
     from evaluation.inference import app as _inference_app
     from evaluation.inference import generate_patches_batch
@@ -267,6 +270,7 @@ def _generate_patches(  # noqa: PLR0913, PLR0917
                 chunk,
                 max_new_tokens=max_new_tokens,
                 dataset_run_id=dataset_run_id,
+                prompt_wrap=prompt_wrap,
             )
         )
     return patches

@@ -268,22 +268,35 @@ class TestPairedSignificance:
         assert "McNemar p=" in out
         assert "(n=2)" in out
 
-    def test_disjoint_variants_skipped(self):
+    def test_disjoint_variants_no_same_variant_pairing(self):
+        # Different variants: no same-variant pairing, but P0-5 cross-variant
+        # pairing on the shared instance IS reported.
         a = _run("run-a", [_result("inst-1")])
         b = _run("run-b", [_result("inst-1", variant="other_14b")])
-        assert "no variant evaluated in both runs" in self._paired(a, b)
+        out = self._paired(a, b)
+        assert "no variant evaluated in both runs" in out
+        assert "qwen3-14b:baseline_14b vs qwen3-14b:other_14b" in out
+        assert "McNemar p=" in out
+        assert "(n=1)" in out
 
     def test_shared_variant_disjoint_instances(self):
         a = _run("run-a", [_result("inst-1")])
         b = _run("run-b", [_result("inst-2")])
         assert "no overlapping instances" in self._paired(a, b)
 
-    def test_not_self_comparison_across_variants(self):
-        # Two runs with different variants must NOT pair against each other.
+    def test_cross_variant_pairing_head_to_head(self):
+        # P0-5: two runs with different variants DO pair against each other
+        # (cross-variant head-to-head on the same instances).
         a = _run("run-a", [_result("inst-1", variant="baseline_14b", f2p=1.0)])
         b = _run("run-b", [_result("inst-1", variant="higher_rank_14b", f2p=0.0)])
         out = self._paired(a, b)
-        assert "no variant evaluated in both runs" in out
+        needle = "qwen3-14b:baseline_14b vs qwen3-14b:higher_rank_14b"
+        line = [l for l in out.splitlines() if needle in l]
+        assert len(line) == 1
+        assert "McNemar p=" in line[0]
+        assert "(n=1)" in line[0]
+        # a resolved, b did not: one discordant pair (a won, b lost).
+        assert "resolve diff +100.00%" in line[0]
 
 
 # ── extract_model_metrics dedupe ─────────────────────────────────────────────
