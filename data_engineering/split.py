@@ -5,6 +5,7 @@ Key constraint: each repo appears in EXACTLY one split (no data leakage).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import random
 from collections import defaultdict
@@ -15,18 +16,52 @@ from data_engineering.schema import IssueRecord, Splits
 
 logger = logging.getLogger(__name__)
 
+# Pinned split seed. A fresh pipeline run uses a random run_id (uuid), and a
+# run_id-derived seed would reshuffle the split every run — train/val/test
+# would not be reproducible across pipeline re-runs. The seed stays pinned;
+# a run_id-derived seed is used only when the user explicitly opts in via
+# ``run_id_override`` (stable across resumes).
+DEFAULT_SPLIT_SEED = 42
+
+
+def resolve_split_seed(config: DataPipelineConfig, run_id: str) -> int:
+    """Split seed for a pipeline run: pinned, or run_id-derived under override.
+
+    Without ``run_id_override`` the run_id is a fresh random uuid per run, so
+    deriving the seed from it makes every re-run produce a different split.
+    With an explicit ``run_id_override`` the id is stable across resumes and
+    a derived seed is reproducible, so it is allowed.
+    """
+    if config.run_id_override:
+        return int.from_bytes(hashlib.sha256(run_id.encode()).digest()[:4], "little")
+    return DEFAULT_SPLIT_SEED
+
+
+def split_summary(splits: Splits) -> dict[str, dict[str, int]]:
+    """Per-split audit table: repo, example, and domain counts."""
+    return {
+        name: {
+            "repos": len({r.repo for r in recs}),
+            "examples": len(recs),
+            "domains": len({r.repo_domain for r in recs if r.repo_domain}),
+        }
+        for name, recs in (("train", splits.train), ("val", splits.val), ("test", splits.test))
+    }
+
 
 def stratified_split(
     records: list[IssueRecord],
     config: DataPipelineConfig,
-    seed: int = 42,
+    seed: int = DEFAULT_SPLIT_SEED,
 ) -> Splits:
     """Split records by repo into train/val/test.
 
     Args:
         records: Cleaned deduplicated records.
         config: Pipeline config with ratio settings.
-        seed: Random seed for reproducible splits (used hash of seed + run_id).
+        seed: Random seed for reproducible splits. Pinned via
+            ``resolve_split_seed`` (``run_id`` never seeds the split unless
+            ``run_id_override`` is set).
 
     Returns:
         Splits with train/val/test. All non-empty.
@@ -71,6 +106,7 @@ def stratified_split(
         len(splits.val),
         len(splits.test),
     )
+    logger.info("Split summary (repos/examples/domains): %s", split_summary(splits))
 
     return splits
 

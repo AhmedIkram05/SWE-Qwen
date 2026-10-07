@@ -490,3 +490,26 @@ def resolve_adapter_path(variant: str, config: EvalConfig | None = None) -> str 
             exc_info=True,
         )
         return None
+
+
+# ── Prompt hash logging ─────────────────────────────────────────────────────
+# Audit helper for the train/eval parity contract (P0-7): log a stable
+# fingerprint of a rendered prompt so training-side and eval-side prompts can
+# be compared run-to-run without storing the full text.
+
+
+def prompt_hash(text: str) -> str:
+    """Stable 16-hex SHA-256 fingerprint of a rendered prompt string."""
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def log_prompt_hash(label: str, text: str) -> str:
+    """Log the prompt hash for *label* (e.g. ``"train"`` / ``"eval"``).
+
+    Returns the hash so callers can assert or record it.
+    """
+    digest = prompt_hash(text)
+    logger.info("prompt_hash %s sha256=%s", label, digest)
+    return digest
