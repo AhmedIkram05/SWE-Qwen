@@ -1,8 +1,4 @@
-# ── QLoRA Variant Configs ─────────────────────────────────────────────────────
-# PHASE 4 PIVOT: 3 mandatory 14B-optimized comparison variants for qwen3-14b on A10G 24GB.
-# Original 30B variants (baseline, higher_rank, higher_lr) deprecated — see DEPRECATED section below.
-# Variants inherit unspecified values from the `baseline_14b` template.
-# Used by training/qlora_config.py to produce (LoraConfig, TrainingArguments).
+# QLoRA Variant Configs
 
 variants:
   baseline_14b:
@@ -91,3 +87,16 @@ variants:
       max_seq_length: 4096
       num_train_epochs: 2
       # inherits: warmup_ratio, lr_scheduler_type, weight_decay, max_grad_norm, bf16, optim, logging_steps, save_strategy, save_steps, eval_strategy, eval_steps, save_total_limit, load_best_model_at_end, metric_for_best_model, greater_is_better, report_to, ddp_find_unused_parameters, gradient_checkpointing, dataloader_num_workers, remove_unused_columns, packing, dataloader_pin_memory
+
+  # Production candidate (audit P1-6/P1-8): higher rank + higher LR + more epochs.
+  # A/B'd against the recorded champion higher_rank_14b; promote to baseline template if it wins.
+  strong_14b:
+    lora:
+      r: 64
+      lora_alpha: 128
+      # lora_dropout inherits from baseline_14b (0.0 — needed for Unsloth fast patching)
+      # target_modules, bias, task_type inherit from baseline_14b
+    training:
+      learning_rate: 1.0e-4
+      num_train_epochs: 3
+      # all other training args inherit from baseline_14b
