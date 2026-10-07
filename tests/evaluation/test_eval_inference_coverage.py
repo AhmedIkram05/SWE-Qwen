@@ -223,8 +223,9 @@ class TestRenderPatchPrompt:
         ex = _example()
         prompt = render_patch_prompt(ex, template_name="system")
         assert "You are an expert Python developer" in prompt
-        assert "Fix the bug described in the issue below." in prompt
-        assert "existing code style and test conventions" in prompt
+        # Contract defaults (= training strings) when metadata is empty.
+        assert "Fix the bug described in the issue by generating a correct patch." in prompt
+        assert "Follow PEP 8 and the repository's existing code style." in prompt
 
     def test_user_template(self):
         prompt = render_patch_prompt(_example(), template_name="user")
@@ -318,12 +319,15 @@ class TestRenderPatchPrompt:
         assert "### Example Patches" in prompt
         assert "diff --git a/x.py b/x.py" in prompt
 
-    def test_golden_default_wired(self, monkeypatch):
+    def test_no_golden_auto_injection(self, monkeypatch):
         import evaluation.inference as inf
 
-        monkeypatch.setattr(inf, "_golden_patches", lambda *a, **k: ["fake-gold-diff"])
+        def boom(*a, **k):
+            raise AssertionError("golden must not be auto-injected (FEWSHOT_POLICY=none)")
+
+        monkeypatch.setattr(inf, "_golden_patches", boom)
         prompt = render_patch_prompt(_example())
-        assert "fake-gold-diff" in prompt
+        assert "Example Patches" not in prompt
 
     def test_golden_loader_filters_repo_and_instance(self, tmp_path, monkeypatch):
         import json

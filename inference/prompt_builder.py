@@ -36,6 +36,147 @@ _PROMPTS_DIR = _REPO_ROOT / "training" / "prompts"
 
 DEFAULT_TEMPLATE = "chat"
 
+
+# ── Train/eval prompt parity contract (P0-1) ────────────────────────────────
+# Single source of truth for the training prompt (data_engineering/tokenize.py:
+# _format_parts) and the eval prompt (render_patch_prompt below). Both call
+# render_system_and_user() / contract_file_snippets() with identical args so
+# train and eval can never drift again.
+#
+# Decisions (no retrain, no Modal):
+# - Snippet caps: 5 files x 150 lines (the training bound; fits the context
+#   window with the gold patch intact). Eval previously used 10 x 500.
+# - Few-shot: none by default (FEWSHOT_POLICY). render_patch_prompt() treats
+#   example_patches=None as an empty list and never auto-injects golden
+#   patches; callers that want few-shot must call golden_patches() explicitly
+#   and pass the list in. Training never passes few-shot (bare-diff target).
+# - Fenced policy: bare. Training targets are raw patch_diff (no fences), so
+#   training/prompts/user.j2 instructs "raw patch text, no fences".
+#   evaluation.inference.extract_patch still strips ```diff fences, so legacy
+#   fenced outputs remain parseable.
+# - /no_think parity: BOTH SKIP. Neither builder inserts /no_think; the gate
+#   lives only in the inference-time wrappers (apply_no_think_raw for the LoRA
+#   raw-continuation path, no_think_wrap/chat_wrap for the base-model chat
+#   path), keyed off the registry prompt_behavior.no_think flag. Tokenized
+#   training data stays canonical bare text; wrapping is applied identically
+#   to train-shaped and eval-shaped prompts at generation time.
+SYSTEM_TASK = "Fix the bug described in the issue by generating a correct patch."
+SYSTEM_STYLE = "Follow PEP 8 and the repository's existing code style."
+SYSTEM_LANGUAGE_DEFAULT = "Python"
+SNIPPET_MAX_FILES = 5
+SNIPPET_MAX_LINES = 150
+CONTEXT_FILES_MAX = 20
+TEST_FILES_MAX = 10
+FEWSHOT_POLICY = "none"
+FENCED_POLICY = "bare"
+NO_THINK_POLICY = "inference_wrapper_only"
+
+PROMPT_CONTRACT: dict[str, Any] = {
+    "system_task": SYSTEM_TASK,
+    "system_style": SYSTEM_STYLE,
+    "system_language_default": SYSTEM_LANGUAGE_DEFAULT,
+    "snippet_max_files": SNIPPET_MAX_FILES,
+    "snippet_max_lines": SNIPPET_MAX_LINES,
+    "context_files_max": CONTEXT_FILES_MAX,
+    "test_files_max": TEST_FILES_MAX,
+    "fewshot_policy": FEWSHOT_POLICY,
+    "fenced_policy": FENCED_POLICY,
+    "no_think_policy": NO_THINK_POLICY,
+}
+
+
+def contract_system_kwargs(metadata: dict[str, Any] | None = None) -> dict[str, str]:
+    """Resolve system-prompt kwargs from contract defaults plus metadata overrides."""
+    meta = metadata or {}
+    return {
+        "language": str(meta.get("language") or SYSTEM_LANGUAGE_DEFAULT),
+        "task_description": str(meta.get("task_description") or SYSTEM_TASK),
+        "style_guide": str(meta.get("style_guide") or SYSTEM_STYLE),
+    }
+
+
+def contract_example_patches(explicit: list[str] | None = None) -> list[str]:
+    """Few-shot patches under the contract (default none, never auto-golden)."""
+    if explicit is None:
+        return []
+    return list(explicit)
+
+
+def contract_file_snippets(
+    repo: str,
+    base_sha: str,
+    paths: list[str],
+) -> list[dict[str, str]]:
+    """Fetch file snippets with contract caps, resolving via the _eval bridge."""
+    state = _eval()
+    snippets = state._file_snippets(
+        repo,
+        base_sha,
+        paths,
+        max_files=SNIPPET_MAX_FILES,
+        max_lines=SNIPPET_MAX_LINES,
+    )
+    return [dict(s) for s in snippets]
+
+
+def contract_snippet_candidates(
+    context_files: list[str],
+    test_files: list[str],
+    issue_body: str = "",
+) -> list[str]:
+    """Snippet candidate paths under the contract.
+
+    Context files first, then test files; when no context files are known,
+    seed from the ``.py`` paths named in the issue body. Both the train
+    builder and the eval builder must seed candidates this same way.
+    """
+    candidates = list(context_files)
+    if not candidates:
+        candidates = _PATH_RE.findall(issue_body or "")
+    candidates += list(test_files)
+    return candidates
+
+
+def render_system_and_user(  # noqa: PLR0913
+    loader: Any,
+    *,
+    issue_title: str,
+    issue_body: str,
+    repo_name: str,
+    repo_domain: str,
+    context_files: list[str],
+    test_files: list[str],
+    context_snippets: list[dict[str, str]],
+    language: str = SYSTEM_LANGUAGE_DEFAULT,
+    task_description: str = SYSTEM_TASK,
+    style_guide: str = SYSTEM_STYLE,
+    example_patches: list[str] | None = None,
+) -> tuple[str, str]:
+    """Render (system_prompt, user_content) via the shared templates.
+
+    The single helper both train (_format_parts) and eval (render_patch_prompt)
+    call with identical args. Few-shot defaults to none per FEWSHOT_POLICY.
+    """
+    system_prompt = loader.render(
+        "system",
+        language=language,
+        task_description=task_description,
+        style_guide=style_guide,
+    )
+    user_content = loader.render(
+        "user",
+        issue_title=issue_title,
+        issue_body=issue_body,
+        repo_name=repo_name,
+        repo_domain=repo_domain,
+        context_files=context_files,
+        test_files=test_files,
+        context_snippets=context_snippets,
+        example_patches=contract_example_patches(example_patches),
+    )
+    return system_prompt, user_content
+
+
 _DIFF_FILE_RE = re.compile(r"^diff --git a/\S+ b/(\S+)", re.MULTILINE)
 
 
@@ -312,6 +453,12 @@ def render_patch_prompt(
 ) -> str:
     """Render the inference prompt for one eval example.
 
+    Builds the prompt through the shared parity contract
+    (``contract_system_kwargs`` / ``contract_snippet_candidates`` /
+    ``contract_file_snippets`` / ``render_system_and_user``) so it stays
+    identical in shape to the training prompt
+    (``data_engineering.tokenize._format_parts``).
+
     Args:
         example: Eval input (issue, repo, test names, test patch).
         template_name: One of ``chat`` (default), ``system``, ``user``,
@@ -321,9 +468,12 @@ def render_patch_prompt(
         include_file_contents: When True, fetch the candidate files'
             contents at ``base_sha`` from GitHub raw and embed them in the
             prompt (the model fabricates diffs without seeing real code).
+            The eval harness always passes True, mirroring the training
+            prompt; snippet caps come from the contract (5 files x 150).
         example_patches: Gold patch diffs to show as few-shot format
-            examples.  Defaults to same-repo examples from the run's GCS
-            golden (``_ensure_golden``; best-effort; [] when unavailable).
+            examples.  Per FEWSHOT_POLICY ("none"), None means an empty
+            list — training never passes few-shot, so eval does not either.
+            Pass an explicit list (e.g. from ``golden_patches()``) to opt in.
 
     Returns:
         The rendered prompt string.
@@ -331,43 +481,24 @@ def render_patch_prompt(
     from training.prompt_loader import PromptLoader
 
     loader = PromptLoader(template_dir=template_dir or _PROMPTS_DIR)
-    metadata: dict[str, Any] = example.metadata or {}
-    language = str(metadata.get("language") or "Python")
-    task_description = str(
-        metadata.get("task_description") or "Fix the bug described in the issue below."
-    )
-    style_guide = str(
-        metadata.get("style_guide")
-        or "Follow the repository's existing code style and test conventions."
-    )
-    context_files: list[str] = [str(f) for f in metadata.get("context_files", [])]
-    test_files = _files_from_diff(example.test_patch)
+    system_kwargs = contract_system_kwargs(example.metadata)
+    context_files: list[str] = [str(f) for f in (example.metadata or {}).get("context_files", [])][
+        :CONTEXT_FILES_MAX
+    ]
+    test_files = _files_from_diff(example.test_patch)[:TEST_FILES_MAX]
 
     context_snippets: list[dict[str, str]] = []
     if include_file_contents and template_name in ("chat", "user"):
-        # ponytail: context_files is never populated today, so seed candidates
-        # from the test patch + file paths mentioned in the issue body.
-        candidates = list(context_files)
-        if not candidates:
-            candidates = _PATH_RE.findall(example.issue_body or "")
-        candidates += test_files
-        context_snippets = _file_snippets(example.repo, example.base_sha, candidates)
-
-    if example_patches is None and template_name in ("chat", "user"):
-        state = _eval()
-        example_patches = state._golden_patches(
-            example.repo, exclude_instance_id=example.instance_id
+        candidates = contract_snippet_candidates(
+            context_files, test_files, example.issue_body or ""
         )
+        context_snippets = contract_file_snippets(example.repo, example.base_sha, candidates)
+
+    patches = contract_example_patches(example_patches)
 
     if template_name == "chat":
-        system_prompt = loader.render(
-            "system",
-            language=language,
-            task_description=task_description,
-            style_guide=style_guide,
-        )
-        user_prompt = loader.render(
-            "user",
+        system_prompt, user_prompt = render_system_and_user(
+            loader,
             issue_title=example.instance_id,
             issue_body=example.issue_body,
             repo_name=example.repo,
@@ -375,7 +506,8 @@ def render_patch_prompt(
             context_files=context_files,
             test_files=test_files,
             context_snippets=context_snippets,
-            example_patches=example_patches or [],
+            **system_kwargs,
+            example_patches=patches,
         )
         return loader.render_chat(
             system_prompt=system_prompt,
@@ -383,16 +515,11 @@ def render_patch_prompt(
         )
 
     if template_name == "system":
-        return loader.render(
-            "system",
-            language=language,
-            task_description=task_description,
-            style_guide=style_guide,
-        )
+        return loader.render("system", **system_kwargs)
 
     if template_name == "user":
-        return loader.render(
-            "user",
+        _, user_prompt = render_system_and_user(
+            loader,
             issue_title=example.instance_id,
             issue_body=example.issue_body,
             repo_name=example.repo,
@@ -400,8 +527,10 @@ def render_patch_prompt(
             context_files=context_files,
             test_files=test_files,
             context_snippets=context_snippets,
-            example_patches=example_patches or [],
+            **system_kwargs,
+            example_patches=patches,
         )
+        return user_prompt
 
     if template_name == "assistant":
         logger.warning(

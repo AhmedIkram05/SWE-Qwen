@@ -268,11 +268,16 @@ class TestGoldenPatches:
 
 
 class TestRenderPatchPrompt:
-    def test_chat_uses_golden_patches(self, monkeypatch, example):
-        monkeypatch.setattr(prompt_builder, "_golden_patches", lambda *a, **k: ["GOLD1", "GOLD2"])
+    def test_chat_no_golden_by_default(self, monkeypatch, example):
+        # FEWSHOT_POLICY=none: the default must not touch the golden index
+        # (training never passes few-shot, so eval must not either).
+        def boom(*a, **k):
+            raise AssertionError("golden must not be auto-injected (FEWSHOT_POLICY=none)")
+
+        monkeypatch.setattr(prompt_builder, "_golden_patches", boom)
         out = prompt_builder.render_patch_prompt(example)
         assert example.issue_body in out
-        assert "GOLD1" in out
+        assert "Example Patches" not in out
         assert "### Test Files" in out
         assert "- `tests/test_models.py`" in out
 
@@ -321,7 +326,8 @@ class TestRenderPatchPrompt:
     def test_system_template(self, example):
         out = prompt_builder.render_patch_prompt(example, template_name="system")
         assert "You are an expert Python developer" in out
-        assert "Follow the repository's existing code style" in out
+        # Contract default style guide (= training string).
+        assert "Follow PEP 8 and the repository's existing code style." in out
 
     def test_user_template(self, example):
         out = prompt_builder.render_patch_prompt(example, template_name="user")
