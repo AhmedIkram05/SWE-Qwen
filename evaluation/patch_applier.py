@@ -16,12 +16,12 @@ from pathlib import Path
 
 from unidiff.patch import PatchedFile, PatchSet
 
+from data_engineering.diff_utils import diff_git_paths, parse_files
 from evaluation.schema import PatchApplicationResult
 
 logger = logging.getLogger(__name__)
 
 _GIT_TIMEOUT_SECONDS = 600  # Match test_runner.py timeout for consistency
-_DEV_NULL = "/dev/null"
 
 
 def _run_git(repo_path: Path, args: list[str], stdin: str | None = None) -> str:
@@ -62,17 +62,8 @@ def _error_message(exc: Exception) -> str:
 
 
 def _files_from_patch(patch: str) -> list[str]:
-    """Extract touched file paths from unified diff ``+++`` headers."""
-    files: list[str] = []
-    for line in patch.splitlines():
-        if not line.startswith("+++ "):
-            continue
-        path = line[4:].strip()
-        if path.startswith(("a/", "b/")):
-            path = path[2:]
-        if path and path != _DEV_NULL and path not in files:
-            files.append(path)
-    return files
+    """Extract touched file paths from a unified diff (shared parser)."""
+    return parse_files(patch)
 
 
 def _find_target(repo_path: Path, patch_path: str) -> Path | None:
@@ -433,18 +424,63 @@ def _apply_file_change(target: Path, pfile: PatchedFile) -> None:
         raise exception_container[0]
 
 
+def _inject_missing_headers(patch: str) -> str:
+    """Inject a missing ``---``/``+++`` pair before the first ``@@`` hunk.
+
+    Applied per file section (lines starting at ``diff --git``). Sections
+    whose headers already exist — including new/deleted files with
+    mode/index lines — are left byte-identical.
+    """
+    sections: list[list[str]] = []
+    current: list[str] = []
+    for line in patch.splitlines(keepends=True):
+        if line.startswith("diff --git"):
+            if current:
+                sections.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        sections.append(current)
+
+    fixed: list[str] = []
+    for section in sections:
+        paths = diff_git_paths(section[0])
+        if paths is not None and any(ln.startswith("@@") for ln in section):
+            old, new = paths
+            has_old = any(ln.startswith("--- ") for ln in section)
+            has_new = any(ln.startswith("+++ ") for ln in section)
+            if not has_old or not has_new:
+                for i, ln in enumerate(section):
+                    if ln.startswith("@@"):
+                        if not has_new:
+                            section.insert(i, f"+++ b/{new}\n")
+                        if not has_old:
+                            section.insert(i, f"--- a/{old}\n")
+                        break
+        fixed.extend(section)
+    return "".join(fixed)
+
+
 def _repair_hunk_headers(patch: str) -> str:
-    """Recompute ``@@`` hunk line counts from the hunk bodies.
+    """Recompute ``@@`` hunk line counts and inject missing file headers.
 
     Small models frequently emit ``@@ -l,o +l,n @@`` headers whose counts
     don't match the actual hunk content (e.g. ``+102,14`` for an 11-line
     hunk). Both ``git apply`` ("corrupt patch") and unidiff ("Hunk is
     shorter than expected") reject these outright even when the hunk
     content is otherwise correct. Counting the real lines and rewriting
-    the header fixes the most common patch-apply failure.
+    the header fixes the most common patch-apply failure. Sections that
+    have a ``diff --git`` line but a missing ``---``/``+++`` pair get the
+    pair injected (see :func:`_inject_missing_headers`). No-op for
+    well-formed patches, including new/deleted files whose headers
+    already exist.
     """
     import re
 
+    patch = _inject_missing_headers(patch)
+
+    # ── recompute hunk line counts from the bodies ───────────────────────
     header_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
     out: list[str] = []
     hunk_ctx: list[str] = []  # body lines collected since the last @@ header
@@ -523,9 +559,12 @@ def apply_patch(  # noqa: PLR0911
 ) -> PatchApplicationResult:
     """Main entry: ``git apply``, then GNU ``patch --fuzz=5``, then unidiff.
 
-    If all fail and the patch looks malformed (hunk headers with
-    miscounted line numbers — a common LLM output error), the headers are
-    recomputed from the hunk bodies and all three paths are retried once.
+    Hunk headers are repaired (line-count recompute + missing
+    ``---``/``+++`` injection) BEFORE the first ``git apply``: miscounted
+    counts and header-less sections are the most common LLM patch failure
+    modes, and repairing up front avoids burning all three apply paths on
+    a patch we already know how to fix. The repair is a no-op for
+    well-formed patches.
 
     Args:
         repo_path: Working directory (git repo preferred).
@@ -538,6 +577,11 @@ def apply_patch(  # noqa: PLR0911
         The successful result (git, gnu patch or unidiff), or
         ``method_used="failed"`` when all attempts fail.
     """
+    repaired = _repair_hunk_headers(patch)
+    if repaired != patch:
+        logger.warning("repaired patch before first apply (hunk counts / missing headers)")
+        patch = repaired
+
     result = apply_patch_git(repo_path, patch, base_sha, skip_checkout=skip_checkout)
     if result.success:
         return _validate_applied(repo_path, result)
@@ -549,36 +593,6 @@ def apply_patch(  # noqa: PLR0911
     fallback = _validate_applied(repo_path, apply_patch_unidiff(repo_path, patch))
     if fallback.success:
         return fallback
-
-    # LLM patches frequently have miscounted hunk headers; recompute and retry.
-    repaired = _repair_hunk_headers(patch)
-    if repaired != patch:
-        logger.warning(
-            "patch apply failed on all paths; repaired hunk headers and retrying "
-            "(git err: %s; gnu err: %s; unidiff err: %s)",
-            result.error,
-            fuzzed.error,
-            fallback.error,
-        )
-        result2 = _validate_applied(
-            repo_path, apply_patch_git(repo_path, repaired, base_sha, skip_checkout=skip_checkout)
-        )
-        if result2.success:
-            return result2
-        fuzzed2 = _validate_applied(repo_path, apply_patch_gnu(repo_path, repaired))
-        if fuzzed2.success:
-            return fuzzed2
-        fallback2 = _validate_applied(repo_path, apply_patch_unidiff(repo_path, repaired))
-        if fallback2.success:
-            return fallback2
-        return PatchApplicationResult(
-            success=False,
-            method_used="failed",
-            error=(
-                f"git apply: {result.error}; gnu patch: {fuzzed.error}; unidiff: {fallback.error}; "
-                f"repaired: git: {result2.error}; gnu: {fuzzed2.error}; unidiff: {fallback2.error}"
-            ),
-        )
     return PatchApplicationResult(
         success=False,
         method_used="failed",

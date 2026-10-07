@@ -365,6 +365,47 @@ class TestUnidiffExtra:
         patch = "@@ broken header @@\n context line\n"
         assert pa._repair_hunk_headers(patch) == patch
 
+    def test_repair_injects_missing_headers_before_first_hunk(self) -> None:
+        patch = (
+            "diff --git a/foo.py b/foo.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def f():\n"
+            "-    return 1\n"
+            "+    return 2\n"
+        )
+        assert pa._repair_hunk_headers(patch) == (
+            "diff --git a/foo.py b/foo.py\n"
+            "--- a/foo.py\n"
+            "+++ b/foo.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def f():\n"
+            "-    return 1\n"
+            "+    return 2\n"
+        )
+
+    def test_repair_injects_partial_headers_without_duplicating(self) -> None:
+        patch = "diff --git a/foo.py b/foo.py\n--- a/foo.py\n@@ -1 +1 @@\n-a\n+b\n"
+        fixed = pa._repair_hunk_headers(patch)
+        assert fixed.count("--- a/foo.py") == 1  # not duplicated
+        assert fixed.count("+++ b/foo.py") == 1  # injected
+        assert fixed.index("+++ b/foo.py") < fixed.index("@@ -1 +1 @@")
+
+    def test_repair_noop_on_wellformed_new_file_patch(self) -> None:
+        # New-file sections with mode/index lines and real headers must stay
+        # byte-identical — no duplicate header injection between diff --git
+        # and the mode/index lines.
+        patch = (
+            "diff --git a/fresh.py b/fresh.py\n"
+            "new file mode 100644\n"
+            "index 0000000..abc1234\n"
+            "--- /dev/null\n"
+            "+++ b/fresh.py\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+def f():\n"
+            "+    return 1\n"
+        )
+        assert pa._repair_hunk_headers(patch) == patch
+
 
 # ── _validate_applied ──────────────────────────────────────────────────────
 
@@ -419,7 +460,7 @@ class TestApplyPatchChain:
         result = pa.apply_patch(Path(), GIT_DIFF, "x" * 40)
         assert result.success
 
-    def test_repaired_headers_retry_all_fail(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_repair_runs_before_first_apply_all_fail(self, monkeypatch: pytest.MonkeyPatch) -> None:
         failed = pa.PatchApplicationResult(
             success=False, method_used="failed", error="git apply --check: boom"
         )
@@ -429,24 +470,51 @@ class TestApplyPatchChain:
         failed_uni = pa.PatchApplicationResult(
             success=False, method_used="unidiff_fallback", error="unidiff apply: nope"
         )
+        seen: dict[str, list[str]] = {"git": [], "gnu": [], "uni": []}
 
-        def _fake_git(repo: Path, patch: str, base: str, **k: object) -> pa.PatchApplicationResult:
-            return failed
-
-        def _fake_gnu(repo: Path, patch: str) -> pa.PatchApplicationResult:
-            return failed_gnu
-
-        def _fake_uni(repo: Path, patch: str) -> pa.PatchApplicationResult:
-            return failed_uni
-
-        monkeypatch.setattr(pa, "apply_patch_git", _fake_git)
-        monkeypatch.setattr(pa, "apply_patch_gnu", _fake_gnu)
-        monkeypatch.setattr(pa, "apply_patch_unidiff", _fake_uni)
+        monkeypatch.setattr(
+            pa, "apply_patch_git", lambda r, p, b, **k: (seen["git"].append(p), failed)[1]
+        )
+        monkeypatch.setattr(
+            pa, "apply_patch_gnu", lambda r, p: (seen["gnu"].append(p), failed_gnu)[1]
+        )
+        monkeypatch.setattr(
+            pa, "apply_patch_unidiff", lambda r, p: (seen["uni"].append(p), failed_uni)[1]
+        )
         monkeypatch.setattr(pa, "_validate_applied", lambda _r, res: res)
-        monkeypatch.setattr(pa, "_repair_hunk_headers", lambda _p: GIT_DIFF + "\nchanged")
+        monkeypatch.setattr(pa, "_repair_hunk_headers", lambda p: p + "\n#repaired")
         result = pa.apply_patch(Path(), GIT_DIFF, "x" * 40)
         assert not result.success
-        assert "repaired: git:" in _error(result)
+        # Repair ran BEFORE the first git apply: every path received the
+        # repaired patch exactly once (no raw-patch attempt, no retry round).
+        expected = GIT_DIFF + "\n#repaired"
+        assert seen["git"] == [expected]
+        assert seen["gnu"] == [expected]
+        assert seen["uni"] == [expected]
+
+    def test_apply_patch_repairs_bad_counts_before_first_git_apply(self, git_repo: Path) -> None:
+        base_sha = _rev_parse(git_repo)
+        bad = GIT_DIFF.replace("@@ -1,2 +1,2 @@", "@@ -1,99 +1,99 @@")
+        result = pa.apply_patch(git_repo, bad, base_sha)
+        assert result.success, result.error
+        # First git apply already succeeded — repair happened up front, not
+        # after three failed attempts.
+        assert result.method_used == "git_apply"
+
+    def test_apply_patch_injects_missing_headers_before_first_git_apply(
+        self, git_repo: Path
+    ) -> None:
+        base_sha = _rev_parse(git_repo)
+        headerless = (
+            "diff --git a/greeting.py b/greeting.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def greet(name):\n"
+            '-    return f"Hello {name}"\n'
+            '+    return f"Hello {name}!"\n'
+        )
+        result = pa.apply_patch(git_repo, headerless, base_sha)
+        assert result.success, result.error
+        assert result.method_used == "git_apply"
 
     @pytest.mark.parametrize(
         ("gain", "method"),

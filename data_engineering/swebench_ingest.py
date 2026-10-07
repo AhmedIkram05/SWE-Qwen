@@ -14,9 +14,12 @@ from datasets import load_dataset
 from pydantic import BaseModel
 
 from data_engineering.config import DataPipelineConfig
+from data_engineering.diff_utils import parse_files
 from data_engineering.schema import IssueRecord, ParsedHunk, TestResults
 
 logger = logging.getLogger(__name__)
+
+_UNIDIFF_FAIL_COUNT = 0
 
 # ── SWE-bench Python repos (expanded to cover all Python repos in train split) ────────────
 
@@ -211,24 +214,19 @@ def _parse_test_list(test_str: str) -> list[str]:
 
 
 def _parse_files_from_patch(patch: str) -> list[str]:
-    """Extract file paths from a unified diff patch."""
-    files: list[str] = []
-    for line in patch.splitlines():
-        if line.startswith("--- a/") or line.startswith("+++ b/"):
-            path = line[6:].strip()
-            if path not in files:
-                files.append(path)
-    return files
+    """Extract file paths from a unified diff patch (shared parser)."""
+    return parse_files(patch)
 
 
 def _parse_unified_diff(diff_str: str) -> list[ParsedHunk]:
     """Parse a unified diff string into a list of ParsedHunk.
 
-    Tries unidiff first; falls back to empty list on parse failure
-    (some SWE-bench patches have formatting quirks).
+    Fail-loud: unidiff failures log count + sample instead of silently
+    returning []. Callers quarantine via metadata (see swebench_to_issue_record).
     """
     from unidiff.patch import PatchSet
 
+    global _UNIDIFF_FAIL_COUNT  # noqa: PLW0603
     try:
         patch_set = PatchSet(diff_str)
         hunks: list[ParsedHunk] = []
@@ -244,9 +242,23 @@ def _parse_unified_diff(diff_str: str) -> list[ParsedHunk]:
                         diff_lines=[str(line) for line in hunk],
                     )
                 )
+        if not hunks and diff_str.strip():
+            _UNIDIFF_FAIL_COUNT += 1
+            logger.error(
+                "unidiff parsed 0 hunks from non-empty diff (#%d): len=%d sample=%r",
+                _UNIDIFF_FAIL_COUNT,
+                len(diff_str),
+                diff_str[:500],
+            )
         return hunks  # noqa: TRY300 -- early return deliberate; except path returns []
     except Exception:
-        logger.warning("unidiff parse failed, returning empty hunks")
+        _UNIDIFF_FAIL_COUNT += 1
+        logger.exception(
+            "unidiff parse failed (#%d): len=%d sample=%r",
+            _UNIDIFF_FAIL_COUNT,
+            len(diff_str),
+            diff_str[:500],
+        )
         return []
 
 
@@ -333,12 +345,22 @@ def swebench_to_issue_record(
     all_files = _parse_files_from_patch(example.get("patch", ""))
 
     hints = example.get("hints_text") or ""
+    patch_text = example.get("patch", "")
+    parsed = _parse_unified_diff(patch_text)
+    quarantined = bool(patch_text.strip()) and not parsed
+    if quarantined:
+        logger.error(
+            "quarantining %s: unidiff failed, parsed_hunks=[] len=%d sample=%r",
+            example.get("instance_id", "?"),
+            len(patch_text),
+            patch_text[:500],
+        )
     return IssueRecord(
         issue_id=example["instance_id"],
         repo=example["repo"],
         issue_body=example["problem_statement"],
         patch_diff=example["patch"],
-        parsed_hunks=_parse_unified_diff(example["patch"]),
+        parsed_hunks=parsed,
         test_results=TestResults(
             failed=_parse_test_list(example.get("FAIL_TO_PASS", "")),
             passed=_parse_test_list(example.get("PASS_TO_PASS", "")),
@@ -366,6 +388,7 @@ def swebench_to_issue_record(
             # filter and sample instances with no official eval image.
             "is_verified": source_split == "verified",
             "instance_id": example["instance_id"],
+            "quarantine_unidiff_failed": quarantined,
         },
     )
 
