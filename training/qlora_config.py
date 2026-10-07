@@ -87,9 +87,13 @@ def _get_variant_config(variant: str) -> dict[str, Any]:
 # GIGAGPU benchmarking (RTX 4090 24GB, same VRAM as A10G):
 #   Qwen 14B QLoRA, seq=2048, batch=8, rank=32 → 17.4 GB peak
 # A10G uses same 24GB VRAM but ~60% of 4090 memory bandwidth (~600 vs 1008 GB/s).
+# NOTE: packing stays False on the pre-tokenized path. The shards from
+# data_engineering/tokenize.py already carry input_ids/labels with -100 prompt
+# masks; packing would concatenate examples across those boundaries and let
+# loss bleed across examples.
 GPU_MEMORY_OVERRIDES: dict[str, dict[str, Any]] = {
     "A10G:1": {
-        "packing": True,  # Sequence packing for GPU efficiency
+        "packing": False,
         "max_seq_length": 2048,  # A10G 24GB max safe context
         "per_device_train_batch_size": 6,  # Batch fits: 17.4 GB < 24 GB ceiling
         "gradient_accumulation_steps": 3,  # Effective batch = 6 × 3 = 18
@@ -97,7 +101,7 @@ GPU_MEMORY_OVERRIDES: dict[str, dict[str, Any]] = {
         "gradient_checkpointing": True,
     },
     "A100:1": {
-        "packing": True,
+        "packing": False,
         "max_seq_length": 8192,
         "per_device_train_batch_size": 8,
         "gradient_accumulation_steps": 2,  # Effective batch = 8 × 2 = 16
@@ -105,7 +109,7 @@ GPU_MEMORY_OVERRIDES: dict[str, dict[str, Any]] = {
         "gradient_checkpointing": True,
     },
     "A100-80GB": {
-        "packing": True,
+        "packing": False,
         "max_seq_length": 8192,
         "per_device_train_batch_size": 8,
         "gradient_accumulation_steps": 2,
@@ -113,7 +117,7 @@ GPU_MEMORY_OVERRIDES: dict[str, dict[str, Any]] = {
         "gradient_checkpointing": True,
     },
     "H100:1": {
-        "packing": True,
+        "packing": False,
         "max_seq_length": 32768,
         "per_device_train_batch_size": 8,
         "gradient_accumulation_steps": 2,
@@ -121,6 +125,25 @@ GPU_MEMORY_OVERRIDES: dict[str, dict[str, Any]] = {
         "gradient_checkpointing": True,
     },
 }
+
+
+def resolve_train_max_seq_length(
+    variant: str = "baseline_14b",
+    gpu_type: str | None = None,
+) -> int:
+    """Effective trainer ``max_seq_length`` for *variant* + *gpu_type*.
+
+    Single source of truth for tokenization alignment: ``tokenize_pipeline``
+    defaults to this (not ``models.yaml`` ``context_window``) so we never
+    tokenize 32k then silently truncate to 4k/2k in the trainer.
+    """
+    var_cfg = _get_variant_config(variant)
+    max_seq = int(var_cfg.get("training", {}).get("max_seq_length", 4096))
+    if gpu_type and gpu_type in GPU_MEMORY_OVERRIDES:
+        gpu_max = GPU_MEMORY_OVERRIDES[gpu_type].get("max_seq_length")
+        if gpu_max is not None:
+            max_seq = int(gpu_max)
+    return max_seq
 
 
 def build_qlora_config(
@@ -168,7 +191,11 @@ def build_qlora_config(
         train_params.update(gpu_overrides)
 
     # Remove params that aren't SFTConfig kwargs
-    packing = train_params.pop("packing", True)
+    # Pre-tokenized input_ids/labels carry -100 prompt masks; packing would
+    # concatenate examples across those boundaries, so force it off even if
+    # a variant yaml still says true.
+    train_params.pop("packing", False)
+    packing = False
     max_seq_length = train_params.pop("max_seq_length", 32768)
 
     # Pop bf16/fp16 — transformers v5 validates these at init time against
