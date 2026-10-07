@@ -9,7 +9,7 @@ import logging
 import random
 from collections import defaultdict
 
-from data_engineering.clean import F2P_KEYWORD_PATTERN, _has_f2p_keywords
+from data_engineering.clean import _has_f2p_keywords
 from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import IssueRecord, Splits
 
@@ -85,34 +85,31 @@ def extract_golden(
     Uses the V1 F2P proxy: ``test_files_changed`` non-empty AND F2P keywords
     in commit messages/PR description.
 
-    ``source_split="verified+test+dev"`` instead sources from records whose
-    ingest provenance is one of the official SWE-bench F2P splits
-    (verified/test/dev — all carry FAIL_TO_PASS ground truth), skipping the
-    F2P keyword heuristic.
+    ``source_split="verified+test+dev"`` filters the repo-isolated
+    ``splits.test`` to records whose ingest provenance is one of the
+    official SWE-bench F2P splits (verified/test/dev — all carry
+    FAIL_TO_PASS ground truth), skipping the F2P keyword heuristic.
+    It NEVER sources from train/val — golden repos are always ⊆ test repos.
 
     Args:
         splits: Pipeline splits (train/val/test).
         min_size: Minimum number of golden examples required.
         source_split: Which split to source from (``"test"``, ``"all"``, or
-            ``"verified+test+dev"``).
+            ``"verified+test+dev"`` — the latter is test-split-only).
 
     Returns:
         List of golden-eval-qualified records.
     """
+    _log_split_isolation(splits, source_split)
     if source_split == "verified+test+dev":
         source = [
             rec
-            for rec in splits.train + splits.val + splits.test
+            for rec in splits.test
             if rec.metadata.get("source_split") in {"verified", "test", "dev"}
         ]
         # All three official splits have FAIL_TO_PASS by construction.
         golden = [rec for rec in source if rec.test_files_changed]
-        logger.info(
-            "Golden set: %d examples from official SWE-bench F2P splits "
-            "(verified+test+dev, min_target=%d)",
-            len(golden),
-            min_size,
-        )
+        _log_golden_isolation(splits, golden, source_split, min_size)
         if len(golden) < min_size:
             logger.warning(
                 "Golden set has %d examples (min %d requested).",
@@ -135,6 +132,7 @@ def extract_golden(
             golden.append(rec)
 
     n_golden = len(golden)
+    _log_golden_isolation(splits, golden, source_split, min_size)
     if n_golden < min_size:
         logger.warning(
             "Golden set has %d examples (min %d requested). "
@@ -142,11 +140,51 @@ def extract_golden(
             n_golden,
             min_size,
         )
+    return golden
 
+
+def _log_split_isolation(splits: Splits, source_split: str) -> None:
+    """Log per-split repo/example counts before golden extraction (loud)."""
+    train_repos = {r.repo for r in splits.train}
+    val_repos = {r.repo for r in splits.val}
+    test_repos = {r.repo for r in splits.test}
     logger.info(
-        "Golden set: %d examples from '%s' split (min_target=%d)",
-        n_golden,
+        "Golden isolation check (source_split=%r): "
+        "train=%d repos/%d examples, val=%d repos/%d examples, "
+        "test=%d repos/%d examples",
+        source_split,
+        len(train_repos),
+        len(splits.train),
+        len(val_repos),
+        len(splits.val),
+        len(test_repos),
+        len(splits.test),
+    )
+
+
+def _log_golden_isolation(
+    splits: Splits,
+    golden: list[IssueRecord],
+    source_split: str,
+    min_size: int,
+) -> None:
+    """Log golden repo provenance; error loudly on any train/val leakage."""
+    test_repos = {r.repo for r in splits.test}
+    train_repos = {r.repo for r in splits.train}
+    golden_repos = sorted({r.repo for r in golden})
+    logger.info(
+        "Golden set: %d examples from '%s' split (min_target=%d); golden source repos (%d): %s",
+        len(golden),
         source_split,
         min_size,
+        len(golden_repos),
+        golden_repos,
     )
-    return golden
+    leaked = set(golden_repos) & train_repos
+    if leaked or not set(golden_repos) <= test_repos:
+        logger.error(
+            "GOLDEN ISOLATION VIOLATION: golden repos %s not ⊆ test repos %s (train overlap: %s)",
+            golden_repos,
+            sorted(test_repos),
+            sorted(leaked),
+        )

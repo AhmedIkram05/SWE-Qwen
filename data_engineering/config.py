@@ -70,7 +70,10 @@ class DataPipelineConfig(BaseSettings):
     wandb_entity: str | None = None  # optional, defaults to user default
 
     # Splits
-    golden_source_split: str = "verified+test+dev"  # official SWE-bench F2P splits
+    # Golden eval must stay repo-isolated: source from the held-out test
+    # split only. "verified+test+dev" is accepted by extract_golden as a
+    # provenance filter *within* the test split (never train/val).
+    golden_source_split: str = "test"
     train_ratio: float = 0.8
     val_ratio: float = 0.1
     test_ratio: float = 0.1

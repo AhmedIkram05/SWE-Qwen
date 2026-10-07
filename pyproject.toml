@@ -158,7 +158,6 @@ ignore = [
 "evaluation/cli.py" = ["B008", "PLR0913", "PLR0917"]
 "registry/cli.py" = ["B008", "PLR0913", "PLR0917"]
 "data_engineering/card.py" = ["E501"]
-"data_engineering/split.py" = ["E402", "F401"]
 "data_engineering/run_pipeline.py" = ["SIM103", "PLW2901", "TRY401", "PLR0912", "PLR0915", "TRY003", "F841", "SIM105"]
 
 [tool.ruff.format]

@@ -104,7 +104,7 @@ Silent promotions (within noise) are rejected by design — a "win" that can't c
 
 Why `golden` is sacred:
 
-1. **Never touched by training.** The golden set is carved *before* tokenization (`golden.py`) from **verified** SWE-bench instances + test/dev slices, and is disjoint from train/val.
+1. **Never touched by training.** The golden set is carved *before* tokenization (`golden.py`) from the repo-isolated **test** split (verified/test/dev SWE-bench provenance filtered within it; default `golden_source_split="test"`), and is disjoint from train/val by construction.
 2. **Run-scoped.** Binds to a dataset `run_id` (`EVAL_DATASET_RUN_ID`); evaluation can never silently pick up a "better" oracle that makes results harder to compare.
 3. **Fixed prompts.** Prompt templates live in `training/prompts/` and are shared with inference (`prompt_builder.py`) — an eval result is attributable to the model, not an ad-hoc prompt.
 4. **Full audit.** Every run is a `EvalRun` in W&B (`swe-qwen` project) with per-example logging (patch + status), aggregate metrics, and `cost_usd`; a `compare` writes a markdown table and optionally promotes to the `eval-champion` registry collection.
