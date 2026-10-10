@@ -46,6 +46,12 @@ env:
 jobs:
   init-wandb:
     name: Init Weights & Biases Project
+    # Dependabot skip: GitHub withholds secrets (WANDB_API_KEY, MODAL_*, GCP_*)
+    # from dependabot-triggered runs, so this pin step and the GPU gate below
+    # can never authenticate on those PRs — they'd fail on every dependabot
+    # bump that touches pyproject/uv.lock. Same actor gate as cd.yml's
+    # terraform-plan. eval-gate follows via `needs`.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
