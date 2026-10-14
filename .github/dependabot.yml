@@ -1,38 +1,52 @@
 # Dependabot: PR-based dependency updates (no auto-merge — every bump is
 # reviewed and passes CI + the eval gate before landing).
+# Unified Monday-morning schedule: weekly, Monday 09:00 Europe/London.
 version: 2
 updates:
-  # Python deps (pyproject.toml + uv.lock). A bump touches uv.lock, which is
-  # in both ci and eval.yml path filters, so the eval gate fires deliberately.
-  - package-ecosystem: "pip"
+  # Python deps (pyproject.toml + uv.lock). `uv` updates the manifest and
+  # lockfile together. A bump touches uv.lock, which is in both ci and
+  # eval.yml path filters, so the eval gate fires deliberately.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/London"
     target-branch: "main"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     labels:
       - "dependencies"
-    # Collapse minor/patch bumps into one PR per run so the GPU eval gate
-    # fires once, not once per package. Major versions stay individual PRs.
+      - "python"
+    commit-message:
+      prefix: "chore"
     ignore:
       # torch is hard-pinned ==2.13.0: every vllm since 0.26 pins torch (2.11.0
       # / 2.13.0), so a torch bump makes `uv sync` unsatisfiable until a vllm
       # release tracks it. Remove this once vllm accepts torch 2.14+.
       - dependency-name: "torch"
         versions: [">=2.14, <3"]
+    # Collapse minor/patch bumps into one PR per run so the GPU eval gate
+    # fires once, not once per package. Major versions stay individual PRs.
     groups:
-      python-minor-patch:
-        applies-to: "version-updates"
-        update-types:
-          - "minor"
-          - "patch"
+      minor-patch:
+        update-types: ["minor", "patch"]
 
-  # GitHub Actions (workflow versions). Also weekly, merged via review.
+  # GitHub Actions (workflow versions).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/London"
     target-branch: "main"
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore"
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
