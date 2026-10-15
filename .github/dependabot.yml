@@ -3,10 +3,10 @@
 # Unified Monday-morning schedule: weekly, Monday 09:00 Europe/London.
 version: 2
 updates:
-  # Python deps (pyproject.toml + uv.lock). `uv` updates the manifest and
-  # lockfile together. A bump touches uv.lock, which is in both ci and
-  # eval.yml path filters, so the eval gate fires deliberately.
-  - package-ecosystem: "uv"
+  # Python deps (pyproject.toml). Uses the `pip` ecosystem rather than `uv`:
+  # this project supports a wide Python/platform matrix that uv's resolver
+  # cannot satisfy inside Dependabot (it errors across the marker splits).
+  - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
