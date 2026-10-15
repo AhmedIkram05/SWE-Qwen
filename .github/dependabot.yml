@@ -26,6 +26,13 @@ updates:
       # release tracks it. Remove this once vllm accepts torch 2.14+.
       - dependency-name: "torch"
         versions: [">=2.14, <3"]
+      # transformers 5.15.0 removed TrainingArguments.warmup_ratio (verified:
+      # present in 5.14.0, gone in 5.15.0). This repo uses it in
+      # training/callbacks.py, splats it from config/qlora_variants.yaml into
+      # SFTConfig, and relies on it in test fixtures. Migrate warmup_ratio ->
+      # warmup_steps (float ratio) first; then remove this entry.
+      - dependency-name: "transformers"
+        versions: [">=5.15.0, <5.20.0"]
     # Collapse minor/patch bumps into one PR per run so the GPU eval gate
     # fires once, not once per package. Major versions stay individual PRs.
     groups:
