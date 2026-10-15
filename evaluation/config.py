@@ -61,9 +61,7 @@ class EvalConfig(BaseSettings):
     # client ("'Connection' object has no attribute '_transport'" on every
     # result). 16 keeps wall time similar — test containers idle on pip install.
     max_parallel: int = 16  # parallel test jobs (swebench + fallback paths)
-    use_swebench_images: bool = (
-        True  # official per-repo swebench images; clone/install fallback  # noqa: E501
-    )
+    use_swebench_images: bool = True  # official per-repo swebench images; clone/install fallback
     # Ground-truth verification mode: "all" = every instance,
     # "once_per_repo" = first instance per repo verifies, rest skip
     # "none" = skip entirely (dev iteration only, risk of silent env drift).
