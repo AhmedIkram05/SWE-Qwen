@@ -8,10 +8,13 @@ single source of truth. Both build paths below are mechanical from it.
 
 ## 1. PANELS spec
 
-Every `PanelSpec` has a registered metric key (`observability/metrics.py`), a
-type (`line` / `bar` / `custom`; `run-table` is reserved, unused), a title,
-and optionally a `target` (horizontal reference line, e.g. the S9 10 s
-cold-start limit) and `aggregate` (cross-run aggregation override).
+The spec defines **26 panels across the four dashboards** — Training 5,
+Evaluation 6, Serving 8, Infrastructure/Cost 7 — drawn from `METRIC_REGISTRY`'s
+8 domains / 56 entries (`observability/metrics.py`). Every `PanelSpec` has a
+registered metric key, a type (`line` / `bar` / `custom`; `run-table` is
+reserved, unused), a title, and optionally a `target` (horizontal reference
+line, e.g. the cold-start SLO target from `observability/slo.py`) and
+`aggregate` (cross-run aggregation override).
 
 ### Training
 | Metric | Type | Title | Notes |
@@ -37,7 +40,7 @@ cold-start limit) and `aggregate` (cross-run aggregation override).
 | --- | --- | --- | --- |
 | `serve/request_count` | line | Request Count | |
 | `serve/error_rate` | line | Error Rate | |
-| `serve/ttfb_p50_ms` | line | TTFB p50 (ms) | S3 SLO target 500 ms — alert threshold 2000 ms p95 |
+| `serve/ttfb_p50_ms` | line | TTFB p50 (ms) | SLO target 25,000 ms — `SLO_TARGETS["ttfb_p50_ms"]` in `observability/slo.py`; alert threshold 2000 ms p95 |
 | `serve/ttfb_p95_ms` | line | TTFB p95 (ms) | |
 | `serve/latency_p50_ms` | line | Latency p50 (ms) | |
 | `serve/tokens_per_sec` | line | Tokens per Second | |
@@ -51,7 +54,7 @@ cold-start limit) and `aggregate` (cross-run aggregation override).
 | `cost/gpu_seconds` | bar | GPU-Seconds (cumulative across runs) | `aggregate="sum"` |
 | `cost/rate_per_hour` | line | GPU Rate (USD/hour) | auditable alongside every cost number |
 | `eval/cost_per_fix` | bar | Cost per Fix (USD) | same key as the Evaluation panel |
-| `serve/cold_start_s` | line | Cold Start vs S9 Target (10s) | `target=10.0` → the S9 10 s line |
+| `serve/cold_start_s` | line | Cold Start vs SLO Target | `target` = `SLO_TARGETS["cold_start_s"]` (180) — `dashboards.py` imports it from `observability/slo.py`, single source of truth |
 | `deploy/status` | custom | Deploy Status | one point per cd.yml run |
 | `deploy/duration_s` | line | Deploy Duration (s) | |
 
@@ -67,17 +70,17 @@ uv run --extra dashboards python scripts/build_dashboards.py --project swe-qwen 
 
 1. **Seed run** — `seed_dashboards.py` logs one synthetic run
    (`dashboard-seed`, tagged `seed`, deterministic RNG seed 42) that emits
-   *every* registered key over `--steps` steps, including the hierarchical
-   eval keys under their real shape (`eval/qwen3-14b/baseline_14b/template_v1/...`)
-   and a planted deploy failure at step 30 (the red dot). Panels need
-   real-shaped curves to be useful; once the seed has served its purpose it
-   can be archived or deleted.
+   *every* registered key over `--steps` steps (default 60), including the
+   hierarchical eval keys under their real shape
+   (`eval/{model}/baseline_14b/template_v1/...`) and a planted deploy failure
+   once per 45-step cycle (the red dot). Panels need real-shaped curves to be
+   useful; once the seed has served its purpose it can be archived or deleted.
 2. **Build** — `build_dashboards.py` validates the spec
    (`assert_panels_registered()`), then creates one Workspace per dashboard
    (`Training`, `Evaluation`, `Serving`, `Infrastructure-Cost`) via
    `wandb_workspaces.workspaces.Workspace(...).save()`. Panel mapping is
    mechanical: `line` → `wr.LinePlot` (+ `custom_expressions=[str(target)]`
-   when the spec carries a target line, e.g. the S9 10 s cold-start limit),
+   when the spec carries a target line, e.g. the 180 s cold-start SLO target),
    `bar` → `wr.BarPlot` (`groupby_aggfunc` from `aggregate`), `custom` →
    `wr.ScalarChart`. Requires `wandb login` (or `WANDB_API_KEY`).
 
@@ -117,8 +120,9 @@ Built 2026-08-07 from `PANELS` via `build_dashboards.py` (seed run
   dataset run — eval `total_cost_usd` divided by the count of results with
   `f2p > 0.0`, zero-passes guarded so it can never be div-by-zero.
 - **Serving** — real-time flush-loop aggregates (default every 60 s):
-  `serve/ttfb_p50_ms` is the median time to first byte and the S3 SLO line
-  (500 ms); error rate above 0.10 or TTFB p95 above 2000 ms fires the email
+  `serve/ttfb_p50_ms` is the median time to first byte, rendered against the
+  25,000 ms SLO target (`SLO_TARGETS["ttfb_p50_ms"]`); error rate above 0.10
+  or TTFB p95 above 2000 ms fires the email
   alert. `serve/gpu_util` only renders when `nvidia-smi` is reachable (None on
   local macOS). Cost is uptime × rate.
 - **Infrastructure/Cost** — `cost/cost_usd` and `cost/gpu_seconds` accumulate
@@ -126,8 +130,8 @@ Built 2026-08-07 from `PANELS` via `build_dashboards.py` (seed run
   `cost/rate_per_hour` shows the assumed rate for auditability. `deploy/status`
   is a point per cd.yml run: green for success, red for failure — the
   `if: always()` step guarantees failed deploys appear too. `serve/cold_start_s`
-  trends against the S9 10 s target line (the SLO layer consumes the same
-  target). Cost-per-fix appears here as the cross-cutting economic panel.
+  trends against the 180 s SLO target line — `dashboards.py` imports it from
+  `observability/slo.py`, so panel and SLO layer share one source of truth. Cost-per-fix appears here as the cross-cutting economic panel.
 
 ## 5. Drift protection
 
