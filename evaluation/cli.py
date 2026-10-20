@@ -3,8 +3,8 @@
 Usage::
 
     # Default: SWE-bench Verified sample (50) across the three P4 variants.
-    # Golden is capped at tier_sizes["full"]=50 — a bare `run` can never
-    # trigger the full 2820-example golden set.
+    # A bare `run` is cheap by design; `--mode full` is the explicit opt-in
+    # to the whole golden pool.
     python -m evaluation.cli run
 
     # Explicit probe: one variant, a handful of instances
@@ -90,8 +90,8 @@ def _default_baseline_hf_id() -> str:
 _DEFAULT_MODELS = _default_models()
 
 # --mode presets: deterministic seed-42 subsets (see config.tier_seed).
-# smoke/dev/final evaluate the SWE-bench Verified split; full = capped golden
-# set (tier_sizes["full"] = 50 — never the whole 2820-example set).
+# smoke/dev/final evaluate the SWE-bench Verified split; full = the whole
+# golden pool (explicit opt-in via `--mode full`).
 _TIER_SPLITS = {
     "smoke": "swebench_verified",
     "dev": "swebench_verified",
@@ -283,11 +283,11 @@ def compare(
 
 
 def _cap_golden_all(sample: int, config: EvalConfig, *, split: str | None = None) -> int:
-    """Never run the whole golden set: cap sample=0 at tier_sizes['full'].
+    """Cap an implicit ``--sample 0`` at tier_sizes['full'].
 
-    A bare ``run``/``run-golden``/``--sample 0`` used to dispatch 2820
-    examples × 3 variants (~$30+). The full golden set is out of scope by
-    design; an explicit positive sample always wins.
+    ``--sample 0`` means "the whole pool"; clamping it to the largest tier
+    keeps an accidental bare run from dispatching an unbounded bill. An
+    explicit positive ``--sample N`` always wins.
     """
     if sample == 0 and (split is None or split == "golden"):
         logger.warning(
