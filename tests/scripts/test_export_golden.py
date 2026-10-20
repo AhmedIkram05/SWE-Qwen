@@ -60,6 +60,8 @@ class TestMain:
                 str(out),
                 "--swe-bench-dir",
                 str(tmp_path / "swe_bench"),
+                "--splits",
+                "verified,test",
             ],
         )
         mod.main()
