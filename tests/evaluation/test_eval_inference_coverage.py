@@ -279,11 +279,11 @@ class TestRenderPatchPrompt:
         assert "You are an expert Python developer" in prompt
         assert "Style Guide" in prompt
 
-    def test_assistant_template_warns(self, caplog):
-        with caplog.at_level("WARNING", logger="evaluation.inference"):
-            prompt = render_patch_prompt(_example(), template_name="assistant")
-        assert "assistant template is a training-target template" in caplog.text
-        assert "### Code Changes" in prompt
+    def test_assistant_template_is_gone(self):
+        # assistant.j2 was removed as vestigial: it was only ever rendered
+        # with empty sections, so requesting it is now an unknown template.
+        with pytest.raises(ValueError, match="unknown prompt template"):
+            render_patch_prompt(_example(), template_name="assistant")
 
     def test_custom_template_dir(self, tmp_path):
         (tmp_path / "system.j2").write_text("SYS {{ language }}")
