@@ -577,3 +577,10 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
 # script (local dev; stub unless SERVING_STUB=0).
 configure_logging()
 app = create_app(_default_engine(), ServeConfig())
+
+
+def main() -> None:  # pragma: no cover - process entry point
+    """Console-script entry point: serve the app with uvicorn."""
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)
