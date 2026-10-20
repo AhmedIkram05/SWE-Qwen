@@ -39,18 +39,6 @@ variable "model_bucket_name" {
   default     = ""
 }
 
-variable "terraform_state_bucket" {
-  description = "GCS bucket for Terraform state (created separately)"
-  type        = string
-  default     = "swe-qwen-terraform-state"
-}
-
-variable "allowed_gcp_domains" {
-  description = "Allowed GCP domains for organization policies"
-  type        = list(string)
-  default     = []
-}
-
 variable "enable_workload_identity" {
   description = "Enable Workload Identity Federation for GitHub Actions"
   type        = bool
