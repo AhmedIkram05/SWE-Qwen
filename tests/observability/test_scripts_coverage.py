@@ -17,6 +17,7 @@ import pytest
 
 from observability.dashboards import PANELS, PanelSpec
 from observability.metrics import METRIC_REGISTRY, assert_registered
+from observability.slo import SLO_TARGETS
 from scripts import build_dashboards, log_deploy, seed_dashboards
 
 pytestmark = pytest.mark.unit
@@ -316,8 +317,11 @@ def test_build_success(monkeypatch, capsys, fake_ws_modules):
     by_kind: dict[str, list[dict[str, Any]]] = {}
     for kind, kwargs in panel_calls:
         by_kind.setdefault(kind, []).append(kwargs)
-    # S9 10s cold-start target renders as a custom_expressions line
-    assert any(kwargs.get("custom_expressions") == ["10.0"] for kwargs in by_kind["LinePlot"])
+    # Cold-start SLO target renders as a custom_expressions line
+    assert any(
+        kwargs.get("custom_expressions") == [str(SLO_TARGETS["cold_start_s"])]
+        for kwargs in by_kind["LinePlot"]
+    )
     # cumulative cost panels aggregate across runs with groupby_aggfunc="sum"
     assert any(kwargs.get("groupby_aggfunc") == "sum" for kwargs in by_kind["BarPlot"])
     assert any(kwargs["title"] == "Deploy Status" for kwargs in by_kind["ScalarChart"])

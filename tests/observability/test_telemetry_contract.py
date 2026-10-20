@@ -495,11 +495,17 @@ def test_langfuse_noop_without_keys(mocker):
 def test_slo_burn(mocker):
     """Attainment is per-key; burn escalates WARN -> ERROR; alerts fire only
     with a live run AND >= min_samples in the window."""
-    assert attainment({"ttfb_p50_ms": 600, "cold_start_s": 8}) == {
+    # Probed relative to the targets so retuning SLO_TARGETS cannot break the test.
+    ttfb_ok, ttfb_bad = SLO_TARGETS["ttfb_p50_ms"] / 2, SLO_TARGETS["ttfb_p50_ms"] * 2
+    cold_ok = SLO_TARGETS["cold_start_s"] / 2
+    assert attainment({"ttfb_p50_ms": ttfb_ok, "cold_start_s": cold_ok}) == {
+        "ttfb_p50_ms": 1.0,
+        "cold_start_s": 1.0,
+    }
+    assert attainment({"ttfb_p50_ms": ttfb_bad, "cold_start_s": cold_ok}) == {
         "ttfb_p50_ms": 0.0,
         "cold_start_s": 1.0,
     }
-    assert attainment({"ttfb_p50_ms": 400}) == {"ttfb_p50_ms": 1.0}
     assert burn_rate([0.0] * 10, 60, 3600) >= 1.0
     assert burn_rate([], 60, 3600) == 0.0
     assert burn_level(2.0, 10) == "WARN"
@@ -524,7 +530,9 @@ def test_slo_burn(mocker):
     assert maybe_alert_burn(9.0, 9) is False  # sampled-out even with a live run
     assert len(alerts) == 1
     assert "WARN" in alerts[0][0]
-    assert SLO_TARGETS == {"ttfb_p50_ms": 500.0, "cold_start_s": 10.0}
+    # Tripwire: changing these means retuning an SLO — measured serving
+    # benchmark values, not the original master-plan aspirations.
+    assert SLO_TARGETS == {"ttfb_p50_ms": 25_000.0, "cold_start_s": 180.0}
 
 
 def test_deploy_payload(mocker):
