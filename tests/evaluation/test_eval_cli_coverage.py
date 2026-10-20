@@ -125,7 +125,7 @@ def _runner() -> CliRunner:
 class TestRunCommand:
     def test_default_run_swebench_sample_50(self, stub_harness):
         # Bare `run` must be cheap: swebench_verified, 50 samples, never the
-        # full 2820-example golden set (regression: Aug 2026 $30 accident).
+        # whole golden pool (regression: Aug 2026 unbounded-eval accident).
         result = _runner().invoke(cli_app, ["run"])
         assert result.exit_code == 0, result.output
         assert "run_id: stub-run" in result.output
@@ -439,7 +439,7 @@ class TestDispatch:
         assert _StubHarness.calls[0][4] == "resume-1"
 
     def test_golden_sample_zero_capped(self, monkeypatch, tmp_path):
-        # sample=0 on golden must never mean "all 2820" — capped at tier_sizes["full"].
+        # sample=0 on golden is clamped to tier_sizes["full"], never unbounded.
         monkeypatch.setattr("evaluation.harness.EvaluationHarness", _StubHarness)
         _StubHarness.calls = []
         cfg = _cfg(tmp_path)

@@ -68,15 +68,18 @@ def _source_repos_table(
     return "\n".join(lines)
 
 
-def _swebench_splits_summary() -> str:
-    """Return SWE-bench split summary for dataset card."""
-    return """| Split | Examples | Test Patches | F2P Verified |
+def _swebench_splits_summary(stats: PipelineStats) -> str:
+    """SWE-bench upstream split sizes, with this run's actual totals."""
+    return f"""| Split | Examples | Test Patches | F2P Verified |
 |-------|----------|--------------|--------------|
 | Verified | 500 | 500 | 500 |
 | Test | 2,294 | 2,294 | 2,294 |
 | Dev | 225 | 225 | 225 |
-| Train (Python) | ~7,863 | 0 | 0 |
-| **Total** | **~10,882** | **3,019** | **3,019** |"""
+| Train (Python) | — | 0 | 0 |
+| **This run ingested** | **{stats.total_raw:,}** | — | — |
+| **This run validated** | **{stats.total_validated:,}** | — | — |
+| **This run cleaned** | **{stats.total_cleaned:,}** | — | — |
+| **This run tokenized inputs** | **{stats.train_count:,}** train / {stats.val_count:,} val / {stats.test_count:,} test / {stats.golden_count:,} golden | — | — |"""
 
 
 def generate_dataset_card(
@@ -89,7 +92,7 @@ def generate_dataset_card(
     """Generate a dataset card markdown string.
 
     Args:
-        manifest: Empty dict for SWE-bench (kept for API compatibility).
+        manifest: Lineage manifest (stage counts + content digests).
         stats: Pipeline statistics.
         run_id: Unique pipeline run ID.
         git_sha: Git commit SHA for version traceability.
@@ -110,13 +113,13 @@ def generate_dataset_card(
 
 - **Dataset:** `SWE-bench/SWE-bench` + `SWE-bench/SWE-bench_Verified`
 - **Version:** 2025-04-29 (pinned)
-- **Python Repos:** 18 (from Verified + Test + Dev)
+- **Python Repos:** 46 (Verified + Test + Dev + Train-Python, version 2025-04-29)
 - **License:** Apache-2.0 (SWE-bench)
 - **Reproducibility:** Deterministic download from Hugging Face
 
 ### SWE-bench Splits
 
-{_swebench_splits_summary()}
+{_swebench_splits_summary(stats)}
 
 ### SWE-bench Repositories
 

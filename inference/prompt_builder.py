@@ -529,12 +529,6 @@ def render_patch_prompt(
         )
         return user_prompt
 
-    if template_name == "assistant":
-        logger.warning(
-            "assistant template is a training-target template; rendering with empty sections"
-        )
-        return loader.render("assistant", analysis="", plan="", code_changes="")
-
     raise ValueError(
         f"unknown prompt template {template_name!r}; available: {loader.available_templates}"
     )

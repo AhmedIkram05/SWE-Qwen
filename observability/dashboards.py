@@ -15,6 +15,8 @@ wildcard stands for the harness segment shape, so it renders as
 from dataclasses import dataclass
 from typing import Literal
 
+from observability.slo import SLO_TARGETS
+
 # The four panel types the plan allows. Only "line", "bar" and "custom" are in
 # use; "run-table" is reserved (no spec currently needs it).
 _PANEL_TYPES = ("line", "bar", "run-table", "custom")
@@ -28,7 +30,7 @@ AggFunc = Literal["mean", "min", "max", "median", "sum", "samples"]
 class PanelSpec:
     """One panel: a registered metric key + how to render it.
 
-    ``target`` marks a horizontal target line (e.g. the S9 10s cold-start
+    ``target`` marks a horizontal target line (e.g. the cold-start SLO
     limit); ``aggregate`` overrides the cross-run aggregation for bar/custom
     panels (e.g. ``"sum"`` for cumulative cost across runs).
     """
@@ -82,12 +84,12 @@ PANELS: dict[str, list[PanelSpec]] = {
         ),
         PanelSpec("cost/rate_per_hour", "line", "GPU Rate (USD/hour)"),
         PanelSpec("eval/cost_per_fix", "bar", "Cost per Fix (USD)"),
-        # S9 target: cold start < 10s (plan §5.6) — rendered as a target line.
+        # Cold-start SLO — rendered as a target line (single source: slo.py).
         PanelSpec(
             "serve/cold_start_s",
             "line",
             "Cold Start vs S9 Target (10s)",
-            target=10.0,
+            target=SLO_TARGETS["cold_start_s"],
         ),
         PanelSpec("deploy/status", "custom", "Deploy Status"),
         PanelSpec("deploy/duration_s", "line", "Deploy Duration (s)"),

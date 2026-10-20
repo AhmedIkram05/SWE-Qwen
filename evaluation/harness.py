@@ -1476,14 +1476,16 @@ class EvaluationHarness:
             )
 
         # Determine max_new_tokens from tier config by matching sample size.
-        # Sorted by size ascending so the smallest enclosing tier wins.
+        # Tiers ascend by size so the smallest enclosing tier wins; sample <= 0
+        # means "everything", which is the full tier.
         max_new_tokens = 8192
-        if sample == 0 or sample >= 1500:  # noqa: PLR2004
-            max_new_tokens = self.config.tier_max_new_tokens.get("full", 2048)
+        tiers = sorted(self.config.tier_sizes.items(), key=lambda x: x[1])
+        if sample <= 0:
+            max_new_tokens = self.config.tier_max_new_tokens.get("full", 8192)
         else:
-            for _tier, _size in sorted(self.config.tier_sizes.items(), key=lambda x: x[1]):
+            for _tier, _size in tiers:
                 if _size > 0 and sample <= _size:
-                    max_new_tokens = self.config.tier_max_new_tokens.get(_tier, 1024)
+                    max_new_tokens = self.config.tier_max_new_tokens.get(_tier, 2048)
                     break
 
         # T1: run all (model, variant, template) combos in parallel.

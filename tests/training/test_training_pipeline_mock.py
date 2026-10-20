@@ -22,7 +22,6 @@ class TestPromptLoader:
         assert "chat" in loader.available_templates
         assert "system" in loader.available_templates
         assert "user" in loader.available_templates
-        assert "assistant" in loader.available_templates
 
     def test_render_chat_template(self):
         """Chat template renders without error."""

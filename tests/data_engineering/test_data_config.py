@@ -21,12 +21,8 @@ class TestDataPipelineConfig:
         monkeypatch.setenv("DATA_PIPELINE_BIGQUERY_ENABLED", "false")
         monkeypatch.setenv("DATA_PIPELINE_BIGQUERY_PROJECT", "")
         cfg = DataPipelineConfig()
-        assert cfg.batch_size == 50
         assert cfg.max_patch_lines == 500
         assert cfg.min_golden_examples == 100
-        assert cfg.parallel_workers == 1
-        assert cfg.max_issues_per_repo == 2000
-        assert cfg.max_events_per_issue == 100
         assert cfg.gcs_bucket == ""
         assert str(cfg.output_dir) == "data"
         assert cfg.wandb_project == "swe-qwen-data"
@@ -48,17 +44,15 @@ class TestDataPipelineConfig:
 
     def test_env_var_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """DATA_PIPELINE_* env vars should override defaults."""
-        monkeypatch.setenv("DATA_PIPELINE_BATCH_SIZE", "100")
+        monkeypatch.setenv("DATA_PIPELINE_MIN_GOLDEN_EXAMPLES", "250")
         monkeypatch.setenv("DATA_PIPELINE_WANDB_PROJECT", "custom-project")
-        monkeypatch.setenv("DATA_PIPELINE_PARALLEL_WORKERS", "8")
         monkeypatch.setenv("DATA_PIPELINE_TRAIN_RATIO", "0.7")
         monkeypatch.setenv("DATA_PIPELINE_BIGQUERY_ENABLED", "true")
         monkeypatch.setenv("DATA_PIPELINE_RUN_NAME", "test-run")
 
         cfg = DataPipelineConfig()
-        assert cfg.batch_size == 100
+        assert cfg.min_golden_examples == 250
         assert cfg.wandb_project == "custom-project"
-        assert cfg.parallel_workers == 8
         assert cfg.train_ratio == 0.7
         assert cfg.bigquery_enabled is True
         assert cfg.run_name == "test-run"

@@ -3,16 +3,21 @@
 The eval harness reads ``golden_data_path`` (default
 ``gs://swe-qwen-datasets/datasets/{run_id}/golden.jsonl``), but no run ever
 uploaded a golden.jsonl to GCS — the archive only ships the stages that were
-non-empty in that run. This script regenerates the golden set (the project
-definition: official SWE-bench verified+test+dev records with F2P ground
-truth, i.e. ``test_files_changed`` non-empty) and writes it to a local file
-so the eval can run without GCS:
+non-empty in that run. This script regenerates a golden set (official SWE-bench
+records carrying F2P ground truth, i.e. ``test_files_changed`` non-empty) and
+writes it to a local file so the eval can run without GCS:
 
     python -m scripts.export_golden --out data/golden.jsonl
     EVAL_GOLDEN_DATA_PATH=$PWD/data/golden.jsonl python -m evaluation.cli run ...
 
 Records are ``IssueRecord.model_dump_json()`` lines — the exact shape
 ``EvalInput.from_swebench_record`` consumes (metadata.is_verified included).
+
+Note this is a **bootstrap path, not a substitute for the pipeline**. It reads
+raw HF splits directly and therefore cannot apply the repo-stratified split, so
+it defaults to the same provenance the pipeline uses for isolation
+(``test`` only) rather than the older verified+test+dev union. Pass
+``--splits`` to widen deliberately.
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ from observability.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
-GOLDEN_SPLITS = ("verified", "test", "dev")  # all carry FAIL_TO_PASS ground truth
+GOLDEN_SPLITS = ("test",)  # pipeline default provenance for isolation (see module docstring)
 
 
 def main() -> None:
@@ -40,13 +45,19 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, default=Path("data/golden.jsonl"))
     ap.add_argument("--swe-bench-dir", type=Path, default=Path("data/swe_bench"))
+    ap.add_argument(
+        "--splits",
+        default=",".join(GOLDEN_SPLITS),
+        help="Comma-separated HF provenance splits to draw golden records from",
+    )
     args = ap.parse_args()
 
+    splits_to_use = tuple(s.strip() for s in args.splits.split(",") if s.strip())
     config = DataPipelineConfig(swe_bench_dir=args.swe_bench_dir, output_dir=Path("data"))
     splits = load_swebench_splits(config)
 
     records = []
-    for split_name in GOLDEN_SPLITS:
+    for split_name in splits_to_use:
         for ex in splits.get(split_name, []):
             repo = ex["repo"]
             if repo not in SWE_BENCH_PYTHON_REPOS or not (ex.get("patch") or "").strip():

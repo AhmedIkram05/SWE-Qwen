@@ -1,6 +1,6 @@
 # SWE-Qwen
 
-> A registry-driven and config-swappable LLMOps platform (any Hugging Face causal LM plugs in via `model add` - Qwen3-14B run end-to-end) that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **3 QLoRA variants on per-model Modal GPU(s)**, evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (20-instance smoke CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **4 GitHub Actions workflows**.
+w> A registry-driven and config-swappable LLMOps platform (any Hugging Face causal LM plugs in via `model add` - Qwen3-14B run end-to-end) that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **QLoRA variants on per-model Modal GPUs** (3 evaluated from 5 configured), evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (20-instance smoke CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **4-condition statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **5 GitHub Actions workflows** (CI/CD, eval gate, promotion, CodeQL).
 
 <p align="center">
 <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&labelColor=000000&logo=python"></a>
@@ -28,13 +28,14 @@
   <a href="https://github.com/AhmedIkram05/SWE-Qwen/actions/workflows/cd.yml"><img src="https://github.com/AhmedIkram05/SWE-Qwen/actions/workflows/cd.yml/badge.svg" /></a>
   <a href="https://github.com/AhmedIkram05/SWE-Qwen/actions/workflows/eval.yml"><img src="https://github.com/AhmedIkram05/SWE-Qwen/actions/workflows/eval.yml/badge.svg" /></a>
   <a href="https://github.com/AhmedIkram05/SWE-Qwen/actions/workflows/promote.yml"><img src="https://github.com/AhmedIkram05/SWE-Qwen/actions/workflows/promote.yml/badge.svg" /></a>
+  <a href="https://github.com/AhmedIkram05/SWE-Qwen/actions/workflows/codeql.yml"><img src="https://github.com/AhmedIkram05/SWE-Qwen/actions/workflows/codeql.yml/badge.svg" /></a>
   <a href="https://codecov.io/gh/AhmedIkram05/SWE-Qwen"><img src="https://img.shields.io/codecov/c/github/AhmedIkram05/SWE-Qwen" /></a>
 </p>
 
 <p align="center">
   <img src="assets/media/data-pipeline-volume.png" width="700" alt="One data-pipeline run · 20,477 issues in → tokenized out" />
   <br/>
-  <em>One real data-pipeline run: 20,477 raw SWE-bench records → 17,456 cleaned → 15,011 / 1,556 / 889 train / val / test → 2,313 golden set bypassing training → 14,833 tokenized training examples.</em>
+  <em>One real data-pipeline run: 20,477 raw SWE-bench records → 17,456 cleaned → 15,011 / 1,556 / 889 train / val / test → 2,313 held out for evaluation → 14,833 tokenized training examples.</em>
 </p>
 
 SWE-Qwen is an **automated software-issue-resolution platform**: it ingests real GitHub issues + gold patch PRs from SWE-bench, cleans them into a high-signal training corpus, fine-tunes open-weight LLMs with QLoRA, and measures success the only way that matters - **does the generated patch actually flip failing tests to passing inside the real repository?** Every layer is reproducible, observable, and CI-gated.
@@ -45,24 +46,25 @@ SWE-Qwen is an **automated software-issue-resolution platform**: it ingests real
 flowchart TB
     subgraph DATA["DATA ENGINEERING · data_engineering/"]
         direction LR
-        ING["Ingest<br/>20,477 raw instances<br/>402 SWE-bench repos"]
+        ING["Ingest<br/>20,477 raw instances<br/>46 SWE-bench repos"]
         VAL["Validate<br/>20,470 ✓ · 7 rejected"]
         CLEAN["Clean<br/>17,456 ✓ · 3,014 dropped"]
         SPLIT["Split by repo<br/>15,011 train · 1,556 val · 889 test<br/>46 repos (37/5/4)"]
-        GOLD["Golden set<br/>2,313 held out<br/>never touches training"]
-        TOK["Tokenize<br/>registry tokenizer · ctx window<br/>14,833 train examples"]
+        GOLD["Golden set<br/>2,313 held out"]
+        TOK["Tokenize<br/>registry tokenizer · drop-not-truncate<br/>14,833 train examples"]
         ING --> VAL --> CLEAN --> SPLIT --> GOLD
         CLEAN --> TOK
     end
     subgraph TRAIN["QLORA TRAINING · training/ · per-model Modal GPU"]
         direction LR
-        BASE["baseline_14b<br/>r16 · α32 · lr2e-5 · 2×8"]
-        RANK["higher_rank_14b<br/>r32 · α64 · lr2e-5 · 1×16"]
-        LR["higher_lr_14b<br/>r16 · α32 · lr5e-5 · 2×8"]
+        BASE["baseline_14b<br/>r16 · α32 · lr2e-5"]
+        RANK["higher_rank_14b<br/>r32 · α64 · lr2e-5<br/>★ champion"]
+        LR["higher_lr_14b<br/>r16 · α32 · lr5e-5"]
+        MORE["+2 configs<br/>efficient · strong (staged)"]
     end
     subgraph EVAL["EXECUTION-BASED EVALUATION · evaluation/"]
         direction LR
-        SAMPLE["Sample 100 golden<br/>seed 42"]
+        SAMPLE["Sample 100 held-out<br/>seed 42"]
         DOCKER["Materialize repo<br/>official SWE-bench image"]
         PATCH["Generate patch<br/>LoRA variant"]
         TEST["Run FAIL_TO_PASS + PASS_TO_PASS<br/>30 s/test · flaky retries"]
@@ -74,12 +76,12 @@ flowchart TB
         API["FastAPI<br/>POST /v1/chat/completions<br/>SSE streaming"]
         VLLM["vLLM + per-model quant<br/>per-request LoRA swap"]
     end
-    OBS["OBSERVABILITY · observability/<br/>Weights & Biases · Langfuse (10% trace) · GCP Logging"]
+    OBS["OBSERVABILITY · observability/<br/>Weights & Biases · Langfuse · structured logs"]
     DATA --> TRAIN
     TOK --> TRAIN
     TRAIN --> SAMPLE
     TRAIN --> API
-    EVAL --> PROMO1["Promotion gate<br/>F2P ≥ 15% · CI lower bound > 0<br/>champion vs challenger"]
+    EVAL --> PROMO1["Promotion gate · 4 conditions<br/>F2P ≥ 15% · P2P ≥ 90%<br/>margin +5pt · CI lower bound > 0"]
     PROMO1 --> API
     API --> OBS
     EVAL --> OBS
@@ -92,7 +94,7 @@ flowchart TB
     classDef srv fill:#10b981,color:#fff,stroke:#065f46
     classDef obs fill:#ef4444,color:#fff,stroke:#991b1b
     class ING,VAL,CLEAN,SPLIT,GOLD,TOK proc
-    class BASE,RANK,LR ml
+    class BASE,RANK,LR,MORE ml
     class SAMPLE,DOCKER,PATCH,TEST,STATS evl
     class API,VLLM srv
     class OBS,PROMO1 obs
@@ -101,57 +103,58 @@ flowchart TB
 
 ### End-to-end flow
 
-`github issues + PR patches → schema-validated IssueRecords → quality-cleaned corpus → repo-stratified splits → QLoRA fine-tuning (3 variants, per-model GPU) → golden-set execution-based evaluation → statistical compare → champion LoRA adapter → OpenAI-compatible serverless inference → per-request adapter inference → Langfuse + W&B telemetry`
+`github issues + PR patches → schema-validated IssueRecords → quality-cleaned corpus → repo-stratified splits → QLoRA fine-tuning (3 evaluated variants, per-model GPU) → held-out execution-based evaluation → statistical compare → champion LoRA adapter → OpenAI-compatible serverless inference → per-request adapter inference → W&B + Langfuse telemetry`
 
-Every stage is a first-class, independently runnable step with typed schemas (`pydantic`), deterministic seeds, artifact versioning (W&B + GCS), and CI gates (4 workflows).
+Every stage is a first-class, independently runnable step with typed schemas (`pydantic`), deterministic seeds, artifact versioning (W&B + GCS), and CI gates (5 workflows).
 
 ## Every Piece, in One Line
 
 | Layer | What it does | Scale / evidence |
 | ----- | ------------ | ---------------- |
-| `data_engineering/` | 6-stage typed pipeline: ingest → validate → clean → split → golden → tokenize (`pydantic` `IssueRecord` schemas, GCS) | 20,477 → 17,456 → 15,011/1,556/889 + 2,313 golden + 14,833 tokenized |
-| `training/` | QLoRA (Unsloth, TRL+PEFT+bitsandbytes fallback) on per-model Modal GPU, image-as-code (no Dockerfile) | 3 variants (`baseline_14b`, `higher_rank_14b`, `higher_lr_14b`), ~3-4 h each |
-| `evaluation/` | Execution-based harness inside official SWE-bench Docker images | F2P + P2P, 30 s/test, flaky retries, 100-instance golden sample, ~$30 compare |
-| `promotion/` | Statistical champion/challenger gate | 4 conditions (F2P≥15%, P2P≥90%, bootstrap CI LB>0, P2P drop≤2pt), dry-run `RUN_MODAL_EVAL=false` |
+| `registry/` | `model add <hf_id>` wires any HF causal LM into every stage - 4 validation probes, gitignored user overlay deep-merged over the tracked config | 4 models registered; one command, no code edits |
+| `data_engineering/` | 9-stage typed pipeline: ingest → validate → clean → split → golden → version → archive → card → tokenize (`pydantic` `IssueRecord` schemas, GCS) | 20,477 → 17,456 → 15,011/1,556/889 + 2,313 held out + 14,833 tokenized |
+| `training/` | QLoRA (Unsloth, TRL+PEFT+bitsandbytes fallback) on per-model Modal GPU, image-as-code (no Dockerfile) | 3 variants trained + evaluated of 5 configured, ~1.2 h each on the recorded run |
+| `evaluation/` | Execution-based harness inside official SWE-bench Docker images | F2P + P2P, 30 s/test, flaky retries, 100-instance held-out sample, paired statistics |
+| `promotion/` | Statistical champion/challenger gate | 4 conditions (F2P≥15%, P2P≥90%, margin ≥ +5pt, bootstrap CI LB>0), audit trail + W&B decision record |
 | `inference/` | OpenAI-compatible FastAPI + SSE, vLLM (pre-quantized AWQ/FP8 or plain bf16 per model), per-request LoRA swap | `POST /v1/chat/completions`, $0.00 idle (scale-to-zero) |
-| `observability/` | W&B (2 projects) + Langfuse (10% trace) + GCP Logging, dashboards-as-code | every train/eval/serve event attributable |
+| `observability/` | W&B (2 projects, 26-panel dashboards-as-code) + Langfuse (errors 100%, successes 10%) + JSON structured logs | every train/eval/serve event attributable |
 | `infra/terraform` | GCS buckets + IAM workload-identity pool, 100% IaC | WIF OIDC, no service-account keys on the project |
 
 ## Why It's Interesting
 
 | What | Why a reviewer should care |
 | ---- | -------------------------- |
-| **7.0× with receipts** | The champion scores **17.20% F2P vs the base model's 2.46%** on the same 100-instance golden set - and the claim is statistically defended: 95% Wilson CI 11.1-25.8%, McNemar p ≈ 6e-05, paired-bootstrap CI lower bound > 0. Promotion requires the confidence interval to clear the bar, not the point estimate. |
+| **7.0× with receipts** | The champion scores **17.20% F2P vs the base model's 2.46%** on the same 100-instance held-out set - and the claim is statistically defended: 95% Wilson CI 11.1-25.8%, McNemar p ≈ 6e-05, paired-bootstrap CI lower bound > 0. Promotion requires the confidence interval to clear the bar, not the point estimate. |
 | **$0.00 idle + per-request adapters** | One scale-to-zero server hosts all 3 LoRA variants: the first request per model pulls its 1.4 GB adapter from W&B into cache with zero engine restarts. Bursty GPU workloads cost nothing between bursts. |
-| **Execution over proxies** | A patch is only "correct" if it flips the real failing tests inside the real repo: official SWE-bench Docker images, FAIL_TO_PASS + PASS_TO_PASS, 3 patch-apply strategies with the winning `method_used` recorded, flaky retries capped at 2. No unit-test proxies, no leaderboard games. |
-| **You can't self-certify** | `eval.yml` runs evaluation on PRs with read-only repo access and only `main` may write baselines; `promote.yml` re-runs the paired comparison before flipping the champion. A green personal scoreboard is impossible by construction. |
+| **Execution over proxies** | A patch is only "correct" if it flips the real failing tests inside the real repo: official SWE-bench Docker images, FAIL_TO_PASS + PASS_TO_PASS, hunk-header repair + 3 patch-apply strategies with the winning `method_used` recorded, flaky retries capped at 2. No unit-test proxies, no leaderboard games. |
+| **You can't self-certify** | `eval.yml` runs evaluation on PRs with read-only repo access and only `main` may write baselines; `promote.yml` re-runs the paired comparison before flipping the champion - and only a *successful* deploy publishes the champion record. CodeQL scans Python + workflow code weekly. A green personal scoreboard is impossible by construction. |
+| **Tests are part of the pitch** | 1,753 offline tests (~4 min), 90% coverage gate in CI, mypy across 8 packages, and *contract tests* that pin cross-stage invariants: tokenize-length ≤ training window, exact loss masks, train/eval prompt parity, and an AST walk proving every W&B metric is registry-registered. |
 
 ## Key Metrics at a Glance
 
 | Category | Metric | Value |
 | -------- | ------ | ----- |
-| **Dataset** | Raw SWE-bench instances ingested | **20,477** across 402 repos |
+| **Dataset** | Raw SWE-bench instances ingested | **20,477** across 46 repos (4 HF splits, version pinned) |
 | | Records that passed schema validation | 20,470 (7 rejected) |
-| | High-quality corpus after cleaning | **17,456** (3,014 dropped) |
-| | Train / val / test split (repo-stratified) | **15,011 / 1,556 / 889** (46 repos · 37/5/4) |
-| | Golden set (bypassed training) | **2,313** from verified + test + dev |
-| | Tokenized training examples (Qwen3-14B @ 8,192; tokenizer + context now registry-driven) | 14,833 |
-| | Cleaned-out noise | 12 binary, 1,212 non-Python, 1,149 oversized patches, 726 duplicates |
-| **Training** | QLoRA variants fine-tuned (A100-80GB) | 3 (`baseline_14b`, `higher_rank_14b`, `higher_lr_14b`) |
+| | High-quality corpus after cleaning | **17,456** (3,014 dropped: binary, non-Python, oversized, duplicates) |
+| | Train / val / test split (repo-stratified, seed 42) | **15,011 / 1,556 / 889** (46 repos · 37/5/4) |
+| | Held-out eval set | **2,313** |
+| | Tokenized training examples (registry tokenizer, drop-not-truncate) | 14,833 |
+| **Training** | QLoRA variants (A100-80GB) | **3 trained + evaluated** of 5 configured (`efficient_14b` debug · `strong_14b` staged) |
 | | Adapter checkpoints shipped to W&B | `model-{key}-{variant}` × 3 (this run: `model-qwen3-14b-{variant}`) |
 | | Train loss / runtime (higher_rank_14b, 1 epoch) | 0.5843 final · 4,214 s (~1.2 h) |
-| **Evaluation** | Execution-based harness (real SWE-bench containers) | 2,313 golden pool · 100-sample released run |
+| **Evaluation** | Execution-based harness (real SWE-bench containers) | 2,313-instance held-out pool · 100-sample released run |
 | | Final F2P - champion (`higher_rank_14b`) vs base Qwen3-14B | **17.20%** vs 2.46% (**7.0×**, 95% CI 11.1-25.8%) |
 | | Final P2P / avg latency (champion) | 90.10% · 8.92 s/instance |
-| | Cost ceiling for a full compare | **$30** for 2 runs × 4 models (100 golden instances) |
+| | Cost accounting | recorded per run (`cost_usd`: GPU-min + test-vCPU) - bursty GPU work only |
 | **Serving** | OpenAI-compatible endpoint | `POST /v1/chat/completions` |
 | | Adapter switching | Per-request LoRA, zero engine restarts |
 | | Idle cost | $0.00 (scale-to-zero) |
-| **Quality** | Test suite (offline) | **1539 tests passed (1541 collected: 1 skipped, 1 deselected)** in ~3 min |
-| | Lint / type-check | `ruff check` clean · `mypy` clean across 8 packages incl. `registry` (75 files) |
-| | Infrastructure as code | 100% Terraform (storage + IAM + project roots) |
+| **Quality** | Test suite (offline) | **1753 tests passed (1755 collected: 1 skipped, 1 deselected)** in ~4 min |
+| | Lint / type-check | `ruff check` clean · `mypy` clean across 8 packages (76 files) |
+| | Infrastructure as code | 100% Terraform (storage + IAM modules, 13 GCP APIs) |
 
-> **Final results** On the **100-instance golden set**, the promoted **`higher_rank_14b`** champion scores **17.20% F2P (95% Wilson CI 11.1-25.8%)** with **90.10% P2P** at **8.92 s/instance** - up from the base Qwen3-14B's **2.46% F2P / 28.54% P2P** (**7.0× F2P gain**, +61.6pt P2P, McNemar p ≈ 6e-05, paired-bootstrap 95% CI lower bound > 0). Full table verbatim in [assets/results.txt](assets/results.txt); methodology in [docs/evaluation.md](docs/evaluation.md). The champion adapter ships on the Hugging Face Hub: **[`ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b`](https://huggingface.co/ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b)**.
+> **Final results** On the **100-instance held-out set**, the promoted **`higher_rank_14b`** champion scores **17.20% F2P (95% Wilson CI 11.1-25.8%)** with **90.10% P2P** at **8.92 s/instance** - up from the base Qwen3-14B's **2.46% F2P / 28.54% P2P** (**7.0× F2P gain**, +61.6pt P2P, McNemar p ≈ 6e-05, paired-bootstrap 95% CI lower bound > 0). Full table verbatim in [assets/results.txt](assets/results.txt); methodology in [docs/evaluation.md](docs/evaluation.md). The champion adapter ships on the Hugging Face Hub: **[`ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b`](https://huggingface.co/ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b)**.
 
 ## Demos (the system, run)
 
@@ -160,15 +163,15 @@ Everything below was captured against **live systems** - the real GCS bucket, th
 ### Evaluation results
 
 <p align="center">
-  <img src="assets/media/eval-f2p-p2p.png" width="700" alt="Execution-based eval · F2P / P2P from assets/results.txt" />
-  <br/><em>Source of truth: <code>assets/results.txt</code> - <code>evaluation.cli compare</code> output (100 golden instances per variant, est. cost $30).
+  <img src="assets/media/eval-f2p-p2p.png" width="700" alt="Execution-based eval · F2P / P2P with 95% Wilson CIs" />
+  <br/><em>Source of truth: <code>assets/results.txt</code> - <code>evaluation.cli compare --run_ids run_baseline,run_golden</code> output (100 held-out instances per variant, seed 42). Wilson 95% CIs on the binary resolve statistic.</em>
 </p>
 
 ### Training curves
 
 <p align="center">
   <img src="assets/media/training-loss-curve.png" width="700" alt="Real loss curve from Modal training log" />
-  <br/><em>Real training loss + learning rate extracted from `logs/modal-higher_rank_14b-20260806-030415.log` - QLoRA on Modal A100-80GB, the champion variant, final loss 0.5843 after 1 epoch.</em>
+  <br/><em>Real training loss + learning rate extracted from `logs/modal-higher_rank_14b-20260806-030415.log` - QLoRA on Modal A100-80GB, the champion variant, final loss 0.5843 after 1 epoch (4,214 s ≈ 1.2 h).</em>
 </p>
 
 <p align="center">
@@ -191,27 +194,22 @@ Everything below was captured against **live systems** - the real GCS bucket, th
 ### Data pipeline run
 
 <p align="center">
-  <img src="assets/media/cli-data-pipeline.png" width="700" alt="python -m data_engineering.cli --help" />
-  <br/><em>`python -m data_engineering.cli --help` - one command runs the whole pipeline; model, tokenizer and length defaults resolve from the registry.</em>
-</p>
-
-<p align="center">
   <img src="assets/media/data-pipeline-run.png" width="700" alt="real pipeline run transcript" />
-  <br/><em>The actual run (run id `expanded-repos`, `assets/data-eng.txt`): 20,477 ingested → 20,470 validated (7 rejected) → 17,456 cleaned → 15,011/1,556/889 split + 2,313 golden → 14,833 tokenized - W&B artifacts, manifest hash, and the GCS round-trip in one transcript.</em>
+  <br/><em>The recorded run (run id `expanded-repos`, `assets/data-eng.txt`): 20,477 ingested → 20,470 validated (7 rejected) → 17,456 cleaned → 15,011/1,556/889 split + 2,313 held out → 14,833 tokenized - W&B artifact versions and GCS keys in one transcript.</em>
 </p>
 
 ### Every subsystem is one command
 
 <p align="center">
-  <img src="assets/media/cli-suite.gif" width="560" alt="cli-suite · evaluation.cli --help → training.qlora_train --help → model --help" />
-  <br/><em>Evaluation, training and the model registry (`model add` / `model list`) each expose a single Typer CLI - the pipeline, the training and the eval all run off the same repo, same configs.</em>
+  <img src="assets/media/cli-tour.gif" width="700" alt="CLI tour · data_engineering.cli → evaluation.cli → training.qlora_train → model add → model list" />
+  <br/><em>One tour of every CLI in the pipeline: the 9-stage data pipeline (<code>run</code> / <code>tokenize</code> / <code>config</code>), the six-subcommand evaluation harness (<code>run</code> · <code>run-golden</code> · <code>run-swebench</code> · <code>run-prompt-ab</code> · <code>run-baseline</code> · <code>compare</code>), the training CLI, and the model registry (<code>model add</code> / <code>model list</code>) - model, tokenizer and length defaults resolve from the registry everywhere.</em>
 </p>
 
-### CI/CD gates (4 workflows)
+### CI/CD gates (5 workflows)
 
 <p align="center">
-  <img src="assets/media/cicd-tour.gif" width="700" alt="CI/CD tour · ci.yml → cd.yml → eval.yml → promote.yml" />
-  <br/><em>CI runs tests on every PR, CD bakes + pushes the trained artifact, <code>eval.yml</code> derives the smoke gate models from the champion record with read-only access, and <code>promote.yml</code> (with <code>candidate_model</code> input) re-runs the paired champion/challenger comparison before flipping the registry - you can't self-certify.</em>
+  <img src="assets/media/cicd-tour.gif" width="700" alt="CI/CD tour · ci.yml → cd.yml → eval.yml → promote.yml → codeql.yml" />
+  <br/><em>CI runs tests on every PR, CD applies Terraform + deploys the serving endpoint, <code>eval.yml</code> derives the smoke gate models from the champion record with read-only access, and <code>promote.yml</code> re-runs the paired champion/challenger comparison before flipping the registry - you can't self-certify.</em>
 </p>
 
 ### Infra proof (Modal + GCS)
@@ -224,13 +222,18 @@ Everything below was captured against **live systems** - the real GCS bucket, th
 ### Quality & observability receipts
 
 <p align="center">
-  <img src="assets/media/pytest-summary.png" width="700" alt="pytest summary · 1539 tests passed (1541 collected)" />
-  <br/><em>Offline test suite: 1539 tests passed (1541 collected: 1 skipped, 1 deselected) in ~3 min.</em>
+  <img src="assets/media/pytest-summary.png" width="700" alt="pytest summary · 1753 passed, 1 skipped, 1 deselected" />
+  <br/><em>The offline test suite: <strong>1753 tests passed, 1 skipped, 1 deselected</strong> (1755 collected) in 4:19.</em>
+</p>
+
+<p align="center">
+  <img src="assets/media/quality-gates.png" width="700" alt="quality gates: ruff · ruff format · mypy · pytest" />
+  <br/><em>All four quality gates on the current tree: <code>ruff check</code> clean · <code>ruff format</code> clean (184 files) · <code>mypy</code> clean (76 source files) · <strong>1753 tests passed, 1 skipped, 1 deselected</strong> in 4:19.</em>
 </p>
 
 <p align="center">
   <img src="assets/media/langfuse.png" width="700" alt="Langfuse trace dashboard" />
-  <br/><em>Langfuse: 10% trace sampling of every train / eval / serve event.</em>
+  <br/><em>Langfuse: serving traces every error and samples successes at 10%; evaluation logs one trace per completed example.</em>
 </p>
 
 <p align="center">
@@ -244,15 +247,15 @@ Everything in this README corresponds to at least one artifact still on the live
 
 | Stage | Object / Event | Real artifact |
 | ----- | -------------- | ------------- |
-| `21:32:46` | Ingest wrote `raw.jsonl` | `796,629,716` B in `datasets/expanded-repos/swebench/` |
-| `21:35:19` | Validation wrote `validated.jsonl` | `796,618,866` B (7 schema errors → `validation_errors.jsonl`, 848 B) |
-| `21:36:04` | Cleaning wrote `cleaned.jsonl` | `223,394,448` B (3,014 dropped) |
+| `21:32:46` | Ingest wrote `raw.jsonl` | 796,629,716 B |
+| `21:35:19` | Validation wrote `validated.jsonl` | 796,618,866 B (7 schema errors → `validation_errors.jsonl`, 848 B) |
+| `21:36:04` | Cleaning wrote `cleaned.jsonl` | 223,394,448 B (3,014 dropped) |
 | after | Split wrote `train/val/test` | 184.2 MB / 25.6 MB / 13.6 MB |
-| after | `golden.jsonl` | 48,983,535 B (2,313 instances) |
+| after | `golden.jsonl` | 48,983,535 B (2,313 instances held out) |
 | `07-31 → 08-06 00:33` | Tokenized train splits → arrow files | 25 MB + 374 MB + 327 MB in `tokenized/expanded-repos/` |
-| `2026-08-06` | QLoRA training logs | `logs/modal-higher_rank_14b-20260806-030415.log` → loss 0.5843, 1 epoch |
+| `2026-08-06` | QLoRA training logs | `logs/modal-higher_rank_14b-20260806-030415.log` → loss 0.5843, 1 epoch, 4,214 s |
 | `2026-08-06 01:38` | StubEngine pulled LoRA artifact from W&B | 1,399.16 MB · 40 files · `./artifacts/` |
-| live | `compare run_baseline,run_golden` (100-instance golden sample) | `assets/results.txt` - est. cost **$30** |
+| live | `compare run_baseline,run_golden` (100-instance held-out sample) | `assets/results.txt` |
 | live | Modal volumes | `serve-model-cache` (08-06 17:07), `eval-repo-cache`, `eval-test-cache`, `eval-model-cache`, `swe-qwen-data`, `swe-qwen-models` |
 | live | GCS bucket totals | 437 dataset run dirs + 322 tokenized run dirs |
 
@@ -263,7 +266,8 @@ In short: the corpus <u>was built</u>, <u>three adapters were trained and shippe
 | Decision | Alternatives considered | Why this won |
 | -------- | ----------------------- | ------------ |
 | **Execution over unit-test proxies** | Reward-model scoring, unit-test eval harnesses | The only score that matters is patching the repo and running the real tests - everything else is a proxy |
-| **QLoRA + Unsloth over full fine-tuning** | Full 14B fine-tune (8×A100s), PEFT-only | 1.76% of params trained 4-bit NF4; A100-80GB instead of 8×A100s; 3 variants for the cost of 1 |
+| **QLoRA + Unsloth over full fine-tuning** | Full 14B fine-tune (8×A100s), PEFT-only | ~1% of params trained 4-bit NF4; A100-80GB instead of 8×A100s; 3 variants for the cost of 1 |
+| **Packing off, exact loss masks** | SFT packing for throughput | Packing concatenates examples across `-100` prompt boundaries and corrupts the loss mask; correctness beat throughput (pinned by a contract test) |
 | **Modal over VMs/Dockerfiles** | Raw GCP VMs, custom Dockerfiles | Image-as-code + scale-to-zero + per-request GPU is the cheapest correct abstraction for bursty train/test/serve |
 | **GCS backbone + W&B registry** | Modal CloudBucketMount, local disks | Public-read GCS sidesteps Modal's CloudBucketMount HMAC limit (`iam.disableServiceAccountKeyCreation` on the project) |
 | **CI-gated evaluation** | Quarterly manual evals | `eval.yml` + `promote.yml` answer "did the model regress?" on every PR, not quarterly |
@@ -273,7 +277,7 @@ Phase-by-phase engineering plans (ADRs and vision docs): [docs/planning/](docs/p
 
 ## Deep Dives
 
-Component deep dives (data engineering, QLoRA training, the evaluation harness, promotion & registry, inference serving, observability, testing strategy, Terraform infra, CI/CD, security model) live in **[docs/deep-dives.md](docs/deep-dives.md)**.
+Component deep dives (model registry, data engineering, QLoRA training, the evaluation harness, promotion & registry, inference serving, observability, testing strategy, Terraform infra, CI/CD, security model) live in **[docs/deep-dives.md](docs/deep-dives.md)**.
 
 ## Quick Start
 
@@ -292,7 +296,7 @@ git clone git@github.com:AhmedIkram05/SWE-Qwen.git && cd SWE-Qwen
 uv sync --extra dev --extra training --extra eval --extra inference
 
 # 2. Configure
-cp .env.example .env            # add MODAL_TOKEN_ID, WANDB_API_KEY, GITHUB_TOKEN, GCP_PROJECT_ID
+cp .env.example .env            # add MODAL_TOKEN_ID, WANDB_API_KEY, GCP_PROJECT_ID, LANGFUSE_*
 source .venv/bin/activate
 
 # 3. Provision infra (needs gcloud auth) - or skip: bucket already has public data
@@ -314,12 +318,12 @@ model list
 # 5. Build the dataset (tokenizer + context default from the registry)
 python -m data_engineering.cli run --run-id expanded-repos
 
-# 6. Train 3 QLoRA variants on Modal (per-model GPU)
+# 6. Train QLoRA variants on Modal (per-model GPU)
 modal run training/modal_train.py::train_qlora --model-name qwen3-14b --variant baseline_14b --run-id expanded-repos
 modal run training/modal_train.py::train_qlora --model-name qwen3-14b --variant higher_rank_14b --run-id expanded-repos
 modal run training/modal_train.py::train_qlora --model-name qwen3-14b --variant higher_lr_14b --run-id expanded-repos
 # ...or one shot:
-python scripts/run_3config_comparison.py --run-id expanded-repos --max-train-samples 3000   # --force-retrain
+python scripts/run_3config_comparison.py --run-id expanded-repos   # + --max-train-samples for smoke loops
 
 # 7. Evaluate (baseline + variants on the same seeded sample)
 export EVAL_DATASET_RUN_ID=expanded-repos
@@ -327,8 +331,8 @@ python -m evaluation.cli run --split golden --sample 100 --models qwen3-14b:base
 python -m evaluation.cli run --split golden --sample 100 \
   --models qwen3-14b:baseline_14b,qwen3-14b:higher_rank_14b,qwen3-14b:higher_lr_14b --resume run_golden
 
-# 8. Compare (statistics + optional promotion)
-python -m evaluation.cli compare --run_ids run_baseline,run_golden --promote-to-registry
+# 8. Compare (statistics; champion promotion is attempted best-effort automatically)
+python -m evaluation.cli compare --run_ids run_baseline,run_golden
 
 # 9. Serve the champion (OpenAI-compatible, scale-to-zero)
 modal serve inference.modal_serve
@@ -345,15 +349,17 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 | -------- | ----------- | ------- |
 | `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` | Modal auth | - |
 | `WANDB_API_KEY` | Weights & Biases | - |
-| `GITHUB_TOKEN` | GitHub (registry/CI) | - |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | Langfuse tracing (silent no-op if unset) | cloud.langfuse.com |
 | `GCP_PROJECT_ID` / `GCP_REGION` | Terraform / GCS | - |
 | `EVAL_DATASET_RUN_ID` | eval golden-set pointer | `expanded-repos` |
+| `OBSERVABILITY_RATE_PER_HOUR` | GPU $/hr override for cost attribution | config rates table |
+| `PROMOTE_MIN_F2P_GAIN` / `PROMOTE_MAX_P2P_REGRESSION` | promotion margin / P2P ceiling | +5pt / −2pt (floors are fixed by design) |
 | `SERVING_STUB` | `0` → vLLM, else stub engine | stub |
 | `SERVING_BASE_MODEL` | registry model key to serve | registry `default: true` key (`qwen3-14b`) |
 | `SERVING_GPU` | Modal GPU spec override | registry `gpu_mapping` / `A10G:1` |
 | `SERVING_DEFAULT_VARIANT` | default LoRA variant | registry `default_variant` |
 
-GitHub Actions secrets: `GCP_WIF_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GCP_PROJECT_ID`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `WANDB_API_KEY`, `GITHUB_TOKEN`. Training config lives in `config/qlora_variants.yaml` + `config/models.yaml` (plus the gitignored `config/models.user.yaml` overlay written by `model add`); `registry/` is the single loader every stage reads through.
+GitHub Actions secrets: `GCP_WIF_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GCP_PROJECT_ID`, `GCP_REGION`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `WANDB_API_KEY`, `HF_TOKEN`, `MODAL_SERVE_TOKEN`, `CODECOV_TOKEN`. Training config lives in `config/qlora_variants.yaml` + `config/models.yaml` (plus the gitignored `config/models.user.yaml` overlay written by `model add`); `registry/` is the single loader every stage reads through.
 
 ### Tests
 
@@ -368,7 +374,7 @@ pytest -m "not requires_credentials"
 ```bash
 terraform -chdir=infra/terraform apply   # GCS buckets + WIF pool
 modal deploy inference.modal_serve       # scale-to-zero serving endpoint (SERVING_BASE_MODEL / SERVING_GPU via repo vars, see cd.yml)
-gh workflow run promote.yml              # re-run the paired champion/challenger gate
+gh workflow run promote.yml -f candidate_variant=higher_rank_14b   # re-run the paired champion/challenger gate
 ```
 
 ## Documentation
@@ -378,11 +384,11 @@ gh workflow run promote.yml              # re-run the paired champion/challenger
 | [docs/api.md](docs/api.md) | OpenAI-compatible endpoints, request/response schemas, SSE, errors, model resolution |
 | [docs/experiments.md](docs/experiments.md) | Full loop: dataset → train → eval → compare → promote → serve |
 | [docs/dataset.md](docs/dataset.md) | Pipeline stages, schema, quality gates, reproducibility |
-| [docs/evaluation.md](docs/evaluation.md) | F2P/P2P methodology, statistics, golden-set protocol |
+| [docs/evaluation.md](docs/evaluation.md) | F2P/P2P methodology, statistics, held-out-set protocol |
 | [docs/benchmarks.md](docs/benchmarks.md) | **Final benchmark report** - measured F2P/P2P/latency/cost, champion selection |
 | [docs/observability/architecture.md](docs/observability/architecture.md) | System architecture, telemetry flows, dashboards layout |
 | [docs/observability/dashboards.md](docs/observability/dashboards.md) | Dashboards-as-code: `scripts/build_dashboards.py` + `scripts/seed_dashboards.py` |
-| [docs/planning/](docs/planning/) | Phase-by-phase engineering plans (ADR & vision, phases 2-10 design docs) |
+| [docs/planning/](docs/planning/) | Phase-by-phase engineering plans (ADR & vision, phases 2-14 design docs) |
 | [docs/IMPLEMENTATION-LOG.md](docs/IMPLEMENTATION-LOG.md) | Chronological record of every stage built, run and evaluated |
 | [docs/deep-dives.md](docs/deep-dives.md) | Component deep dives, testing strategy, Terraform infra, CI/CD, security |
 

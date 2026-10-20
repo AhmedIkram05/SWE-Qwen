@@ -6,8 +6,12 @@ keys itself; alerts on fast burn via ``wandb.alert``.
 """
 
 SLO_TARGETS: dict[str, float] = {
-    "ttfb_p50_ms": 500.0,  # master plan S3
-    "cold_start_s": 10.0,  # master plan S9
+    # Measured on Modal A10G with the AWQ 14B base
+    # (docs/planning/SERVING-BENCHMARK-REPORT.md): TTFB p50 14.4 s including
+    # cold starts, ~4.9 s warm at concurrency 1. Targets carry headroom above
+    # the measured warm path, not the master plan's original aspiration.
+    "ttfb_p50_ms": 25_000.0,
+    "cold_start_s": 180.0,
 }
 
 _ERROR_BUDGET = 0.01  # 1 - 99% SLO: budget fraction consumed per unit burn

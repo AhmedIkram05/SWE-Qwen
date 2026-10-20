@@ -54,12 +54,8 @@ class DataPipelineConfig(BaseSettings):
     """
 
     # Processing
-    batch_size: int = 50
     max_patch_lines: int = 500
     min_golden_examples: int = 100
-    parallel_workers: int = 1
-    max_issues_per_repo: int = 2000
-    max_events_per_issue: int = 100
 
     # Paths
     gcs_bucket: str = ""

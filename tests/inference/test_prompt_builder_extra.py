@@ -334,10 +334,10 @@ class TestRenderPatchPrompt:
         assert f"## Issue: {example.instance_id}" in out
         assert "- **Repository:** django/django" in out
 
-    def test_assistant_template_renders_empty_sections(self, example, caplog):
-        out = prompt_builder.render_patch_prompt(example, template_name="assistant")
-        assert "### Analysis" in out
-        assert "### Code Changes" in out
+    def test_assistant_template_is_gone(self, example):
+        # assistant.j2 was removed as vestigial (only ever rendered empty).
+        with pytest.raises(ValueError, match="unknown prompt template"):
+            prompt_builder.render_patch_prompt(example, template_name="assistant")
 
     def test_unknown_template_raises(self, example):
         with pytest.raises(ValueError, match="unknown prompt template"):

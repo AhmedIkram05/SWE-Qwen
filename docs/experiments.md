@@ -1,13 +1,15 @@
 # Experiments Guide — Train, Evaluate, Promote
 
-> SWE-Qwen's experiment loop is **one command per phase**: build the dataset, train three QLoRA variants on serverless A100s, evaluate them execution-style against the golden set, then promote a statistically-proven champion. This guide is the how-to; `docs/evaluation.md` is the methodology.
+> SWE-Qwen's experiment loop is **one command per phase**: build the dataset, train QLoRA variants on serverless A100s, evaluate them execution-style against the golden set, then promote a statistically-proven champion. This guide is the how-to; `docs/evaluation.md` is the methodology. Five QLoRA variants are configured in `config/qlora_variants.yaml`; three have been trained + evaluated so far.
 
-**Typical full loop (~4–6 hours on Modal)**
+**Typical full loop**
 
 ```text
 data-pipeline run ──▶ run_3config_comparison ──▶ eval run ──▶ eval compare ──▶ promote.yml
-     ~20K examples          3 × QLoRA (~3-4h)         F2P/P2P                 champion gate
+     ~20K examples          3 × QLoRA (~1.2 h each)      F2P/P2P                 champion gate
 ```
+
+A recorded 1-epoch 14B variant run (champion `higher_rank_14b`) took **4,214 s (~1.2 h)**, well under the 5 h Modal timeout.
 
 ---
 
@@ -40,7 +42,7 @@ export WANDB_API_KEY=...
 
 ## 2. Build the Dataset
 
-All stages are one Typer CLI. Data docs: [`docs/dataset.md`](dataset.md).
+All stages are one Typer CLI — `python -m data_engineering.cli` (console script `data-pipeline`) with three subcommands: `run`, `tokenize`, `config`. Data docs: [`docs/dataset.md`](dataset.md).
 
 ```bash
 # Full pipeline: ingest → validate → clean → split → golden → tokenize
@@ -59,16 +61,20 @@ python -m data_engineering.cli config
 | Flag | Default | Purpose |
 | ---- | ------- | ------- |
 | `--swe-bench-dir` | `data/swe_bench` | Raw SWE-bench JSONL source |
-| `--max-issues` | `2000` | Cap issues ingested (0 = all) |
+| `--output` / `-o` | `data/` | Output directory for pipeline artifacts |
 | `--max-patch-lines` | `500` | Reject degenerate patches |
+| `--min-golden` | `100` (from config) | Minimum golden examples target |
 | `--resume-from` | — | `validated` \| `cleaned` — skip completed stages |
 | `--stages` | all | Comma list, e.g. `split,golden` |
+| `--run-id` / `--run-name` | auto | Run ID override / descriptive W&B run name |
 | `--train-ratio` / `--val-ratio` / `--test-ratio` | 0.8 / 0.1 / 0.1 | Split proportions (by repo) |
-| `--tokenize-model` | `qwen3-14b` | Tokenizer for the train split |
-| `--tokenize-max-length` | `4096` | Max sequence length (8,192 used for training run) |
-| `--augment-codecontests` / `--augment-codealpaca` | off | Optional external augmentation |
+| `--bigquery` / `--no-bigquery` | off | BigQuery repo-stat enrichment |
+| `--augment-codecontests` / `--augment-codealpaca` | off | Optional external augmentation (train split only) |
+| `--max-train-examples` | `30000` | Cap total training size after augmentation |
+| `--tokenize-model` | registry default | Tokenizer model for the tokenize stage |
+| `--tokenize-max-length` | `4096` | `min(registry context_window, trainer max_seq_length)`; the recorded run passed `8192` — ≤ the A100-80GB train window, so nothing is truncated |
 
-The run prints a JSON summary: `{run_id, manifest_hash, stats, gcs_paths, wandb_artifacts}`. Remember the `run_id` — it feeds eval and training.
+The run prints a JSON summary: `{run_id, manifest_hash, stats, gcs_paths, wandb_artifacts, tokenized_paths}` and writes `manifest.json` + `dataset_card.md` alongside the stage files. Remember the `run_id` — it feeds eval and training.
 
 ---
 
@@ -89,8 +95,20 @@ baseline_14b:
     bf16: true
     gradient_checkpointing: true
     max_seq_length: 4096
-    packing: true
+    packing: false       # packing concatenates examples across the -100 prompt boundaries and corrupts the loss mask
 ```
+
+Variants only override what they specify: `training/qlora_config.py` deep-merges `baseline_14b` under every variant at load time (there is no `inherits:` key in the YAML).
+
+**Configured variants** — 5 in `config/qlora_variants.yaml`, 3 trained + evaluated:
+
+| Variant | LoRA | LR | Epochs | Status |
+| ------- | ---- | -- | ------ | ------ |
+| `baseline_14b` | r16/α32 | 2e-5 | 1 | evaluated |
+| `higher_rank_14b` | r32/α64 | 2e-5 | 1 | evaluated — **champion** |
+| `higher_lr_14b` | r16/α32 | 5e-5 | 1 | evaluated |
+| `efficient_14b` | r8/α16 | 5e-5 | 2 | quick-debugging tier |
+| `strong_14b` | r64/α128 | 1e-4 | 3 | staged production candidate — no eval results yet |
 
 ### 3.2 Direct training on Modal
 
@@ -101,7 +119,11 @@ modal run training/modal_train.py::train_qlora \
   --run-id expanded-repos --max-train-samples 5000
 ```
 
-What happens under the hood: Modal builds a `python:3.11-slim` image (torch 2.11.0 cu126 + transformers + peft + trl + Unsloth + flash-attn 2.8.3), mounts the shared models volume, downloads the `tokenized/{run_id}` split from the **public** GCS bucket, trains 1 epoch, saves checkpoints every 500 steps (keep ≤3), and logs to W&B. Returns `{status, wandb_run_id, artifact_name}`.
+What happens under the hood: Modal builds the image as code — `modal.Image.debian_slim(python_version="3.11")`, no Dockerfile — with torch 2.11 (cu126), `transformers>=5.5,<5.6`, peft/trl/bitsandbytes, `unsloth[colab-new]` from git, the flash-attn 2.8.3 cu126 wheel, and `xformers>=0.0.29`. The job runs with the `wandb-secret` + `hf-secret` Modal secrets, mounts the shared `swe-qwen-models` volume, downloads the `tokenized/{run_id}` split from the **public** GCS bucket, trains 1 epoch, saves a checkpoint every **10 steps** (`save_steps: 10`, keep last 3 — a 1-epoch 14B run totals ~16–76 steps, so the old 500-step interval produced zero intermediate checkpoints), and logs to W&B. Returns `{status, wandb_run_id, artifact_name}`.
+
+**GPU reality:** on Modal (A100-80GB) the GPU override adapts the YAML's base shape to the hardware — `max_seq_length` 8,192 and batch 8×2 (effective 16, same product as the YAML's 2×8). Tokenize/train alignment is intentional: the pipeline tokenizes at 4,096 by default (`min(registry context_window, trainer max_seq_length)`) while the A100-80GB trainer window is 8,192, so tokenized data is never longer than the training window (pinned by `tests/test_contract_config.py`; the recorded run tokenized at 8,192).
+
+Recorded champion run (`higher_rank_14b`): **4,214 s (~1.2 h)**, 1 epoch, final loss **0.5843** — well under the 5 h (18,000 s) Modal timeout.
 
 > **Why public GCS instead of a Modal volume mount?** The GCP org blocks service-account HMAC keys (`iam.disableServiceAccountKeyCreation`), so Modal can't use `CloudBucketMount`. The bucket's objects are public-read in dev; training fetches via stdlib urllib from the GCS JSON API. Production moves this behind a signed URL.
 
@@ -114,11 +136,15 @@ python scripts/run_3config_comparison.py --run-id expanded-repos --max-train-sam
 python scripts/run_3config_comparison.py --run-id expanded-repos --force-retrain --max-train-samples 3000
 ```
 
+`run_3config_comparison.py` is resumable — state persists in `scripts/.pipeline-state.json` — reconciles with W&B before reusing cached runs, supports `--dry-run`, and tags the winner `challenger` → `champion` via W&B before dispatching `promote.yml`.
+
+> **`scripts/f2p_proxy.py` is DRY_RUN_ONLY.** The module hard-codes `DRY_RUN_ONLY = True` and every score dict carries `"dry_run": True`. Its proxy ranking can invert relative to true F2P and must never drive promotion.
+
 ### 3.4 Resume / thin checkpoints
 
 ```bash
 python -m training.qlora_train --model-name qwen3-14b --variant baseline_14b \
-  --resume data/tokenized/expanded-repos/  --wandb-project swe-qwen
+  --resume data/expanded-repos_tokenized/  --wandb-project swe-qwen
 ```
 
 Checkpoint hygiene: `save_strategy` keeps the last 3; use `training/resume.py` to locate the newest adapter for serving.
@@ -141,26 +167,28 @@ python -m evaluation.cli run --split golden --sample 100 \
   --models qwen3-14b:baseline_14b,qwen3-14b:higher_rank_14b,qwen3-14b:higher_lr_14b \
   --resume run_golden
 
-# 3. Compare + optionally promote winner
+# 3. Compare (promotes the revalidated winner best-effort)
 python -m evaluation.cli compare --run_ids run_baseline,run_golden
 ```
 
 ### Eval tiers
 
-| `--mode` | Sample | Split | Typical cost |
-| -------- | ------ | ----- | ------------ |
-| `smoke` | 20 | `swebench_verified` | ~$0.15–0.30 (CI gate) |
-| `dev` | 100 | `swebench_verified` | — |
-| `final` | 500 | `swebench_verified` | — |
-| `full` | 50 | `golden` (or `--sample` for a sub-sample) | released run: 100-instance sample of the 2,313-pool, **$30** for 4 variants compare |
+| `--mode` | Sample | Split |
+| -------- | ------ | ----- |
+| `smoke` | 20 | `swebench_verified` |
+| `dev` | 100 | `swebench_verified` |
+| `final` | 500 | `swebench_verified` |
+| `full` | 5,000 | `golden` (or `--sample` for a sub-sample) |
 
-`--sample` overrides; `--ci-mode` runs the CI F2P gate; `--update-baseline` writes the CD-owned `smoke_baseline.json` (main-only). `--backend modal` (default) or `--backend local` with `--ollama-model qwen2.5-coder:7b` for offline debugging.
+Tier subsets are deterministic (`tier_seed 42`). Cost is recorded per `EvalRun` — `cost_usd` = inference GPU-min at $0.0417/min + test vCPU at 2 × $0.008/hr — so treat any recorded total as run-specific, not a reproducible flat rate.
+
+`--sample` overrides the tier size. **`--ci-mode` only sets the sample size** — the actual CI F2P gate runs with `--mode smoke` (20-instance smoke tier, 5% absolute F2P-drop tolerance vs the stored baseline). `--update-baseline` writes the CD-owned `smoke_baseline.json` (main-only). `--backend modal` (default) or `--backend local` with `--ollama-model qwen2.5-coder:7b` for offline debugging. Tuning knobs such as `max_parallel` and `max_new_tokens` are `EvalConfig` fields set via `EVAL_*` env vars — there are no CLI flags for them.
 
 ### Cost controls
 
-- `--sample 100` full 4-variant compare ≈ **$30** (released run); smaller samples scale roughly linearly.
+- Cost is recorded per `EvalRun` (`cost_usd` = inference GPU-min at $0.0417/min + test vCPU at 2 × $0.008/hr); smaller samples scale down accordingly.
 - Cold starts dominate the first run — the EvalConfig caches repos (`eval-repo-cache`) and test images (`eval-test-cache`) on Modal volumes.
-- Historical: `results.txt` shows the 2-run × 4-model comparison at **$30 total** (est.) — the harness is cheap per example (~$0.05 per instance per model).
+- Historical: `results.txt` records the 2-run × 4-model comparison — the harness is cheap per example (~$0.05 per instance per model).
 
 ---
 
@@ -168,7 +196,7 @@ python -m evaluation.cli compare --run_ids run_baseline,run_golden
 
 ### 5.1 Manual promotion (via the CLI gate)
 
-`eval compare --run_ids run_baseline,run_golden --promote-to-registry` writes the winner to the W&B Registry `eval-champion` collection with a full decision record.
+`python -m evaluation.cli compare --run_ids run_baseline,run_golden` promotes best-effort on **every** compare run: it revalidates the best run against the gates (`revalidate_champion`) and, on success, writes it to the W&B Registry `eval-champion` collection with a full decision record (`promote_champion_to_registry`). There is no `--promote-to-registry` flag — the promotion step is built into `compare` and runs best-effort unconditionally.
 
 ### 5.2 CI promotion (recommended)
 
@@ -209,7 +237,7 @@ See [`docs/api.md`](api.md) for the full wire format.
 1. Add the model to `config/models.yaml` (hf_id, quantization, serving_hf_id, gpu, context_window, target_modules).
 2. Re-tokenize: `python -m data_engineering.cli tokenize --run-id <id> --model-name my-model --max-seq-length 8192`.
 3. Train variants per §3, evaluate per §4, promote per §5.
-4. Update `serve.py`'s engine if quantization differs (AWQ vs GPTQ vs none).
+4. Serve — deployment is registry-driven: `serving_hf_id` + `serving_quantization` per model in `config/models.yaml` (AWQ int4 `Qwen/Qwen3-14B-AWQ` for `qwen3-14b`). No code edits needed to swap models.
 
 No code changes elsewhere — the platform is the product.
 

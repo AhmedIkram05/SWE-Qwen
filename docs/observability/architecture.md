@@ -1,6 +1,6 @@
 # SWE-Qwen Observability Architecture
 
-Status: Phase 8 delivery | Owner: Ahmed | Version: V1 (W&B + Langfuse)
+Status: Phase 8 delivery | Owner: Ahmed | Version: V1.1 — 2026-10-18 (W&B + Langfuse)
 
 Conforms to PHASE-8-OBSERVABILITY.md (§1–§8), ADR-011 (every stage emits
 structured outputs), ADR-015/016/017/018, and the master plan's V1 monitoring
@@ -41,7 +41,7 @@ One event has two legal representations:
 | Store | Content | Scope |
 | --- | --- | --- |
 | W&B | Aggregated scalars only, never per-sample raw data (free-tier cost guard, master plan risk) | Every `{domain}/{metric}` registry key; dashboards aggregate across runs |
-| Langfuse | Per-call generation traces (prompt → completion → scores) | Evaluation: **every** golden example, one trace each. Serving: **sampled only** — `rec.error or random.random() >= telemetry_trace_sample_rate` (0.1 in `ServeConfig`) skips the trace; successful requests only |
+| Langfuse | Per-call generation traces (prompt → completion → scores) | Evaluation: one trace per **completed** eval example, never sampled. Serving: **sampled** — errors are always traced, successes are sampled at `telemetry_trace_sample_rate` (0.1, `inference/config.py`). Training: no Langfuse path |
 
 Cross-links: evaluation traces carry `run_id` + `instance_id` (+ prompt
 template / variant) in `trace_generation(metadata=...)`, so the same example
@@ -50,12 +50,15 @@ Serving traces are drained within the long-lived serving run and carry
 `template_name` + timing/`output_tokens` metadata.
 
 Trace sampling rationale: tracing every serving request would multiply Langfuse
-volume and add latency; sampling 0.1 bounds volume and cost. The sampling
-decision happens on the request hot path, but the trace itself is only an
-O(1) bounded-deque append (`_trace_queue`, `maxlen=500`) — Langfuse IO happens
-in the background flush loop (`_drain_trace_queue`), never on the hot path.
-Evaluation traces are never sampled: every golden example counts toward
-F2P/P2P scoring and prompt comparison, so all of them must be traceable.
+volume and add latency; the rule (`rec.error or random.random() >=
+telemetry_trace_sample_rate`) traces **every error** and a 0.1 sample of
+successes, bounding volume and cost. The sampling decision happens on the
+request hot path, but the trace itself is only an O(1) bounded-deque append
+(`_trace_queue`, `maxlen=500`) — Langfuse IO happens in the background flush
+loop (`_drain_trace_queue`), never on the hot path. Evaluation traces are
+never sampled — one trace per completed eval example, because every example
+counts toward F2P/P2P scoring and prompt comparison. Training has no Langfuse
+path.
 
 ## 4. Structured JSON logging
 
@@ -86,18 +89,24 @@ Details:
   handlers it re-formats them in place instead of stacking a second handler.
 - Unserializable extras fall back to `str(value)` so a bad value can never
   break the log line.
+- There is no `google-cloud-logging` SDK integration: `configure_logging()`
+  emits JSON lines to stdout, which land in the Modal container logs. GCP
+  Logging exists only as the IAM grant `roles/logging.logWriter` on the Modal
+  runner service account.
 
 ## 5. Metric registry contract
 
 `observability/metrics.py::METRIC_REGISTRY` is the single source of truth:
 one namespace per domain, flat `{domain}/{metric}` keys, plus eval's
 hierarchical suffix pattern `eval/{model}/{variant}/{template}/latency_p50|p95`
-(mirrors harness L793). Enforcement is belt-and-braces:
+(mirrors harness L793) — 8 domains / 56 entries in total (serve 11, sweep 9,
+train 7, eval 7, cost 3, data 4, deploy 2, promote 6). Enforcement is
+belt-and-braces:
 
 | Check | Where | Failure mode |
 | --- | --- | --- |
 | `assert_registered(metrics)` | `log_metrics()` and `scripts/log_deploy.py::build_payload` | `KeyError` naming the offending key |
-| `test_all_wandb_log_keys_registered` | CI `lint-and-test` | AST walk over `src/`, `training/`, `evaluation/`, `inference/`, `data_engineering/`, `observability/` for `wandb.log({...})` / `log_metrics({...})` key literals; any key outside `METRIC_REGISTRY` fails the PR |
+| `test_all_wandb_log_keys_registered` | CI `lint-and-test` | `tests/observability/test_telemetry_contract.py` — pure-AST walk over `evaluation/harness.py`, `scripts/seed_dashboards.py`, and `observability/cost.py` (via the `_WANDB_ALIASES` map); every `wandb.log({...})` / `log_metrics({...})` dict literal must use a `METRIC_REGISTRY` key (`run_pipeline.py`'s legacy `stage_*` / `dedup_*` / `clean_*` scalars are explicitly out of scope); any key outside `METRIC_REGISTRY` fails the PR |
 | `test_panels_spec_subset_of_registry` | CI `lint-and-test` | Every key in `dashboards.py::PANELS` must be registered (`assert_panels_registered()` rechecks at build time too) |
 
 The plan's DoD note caps each domain at ~5–7 keys (master-plan clutter guard);
@@ -110,6 +119,10 @@ preferable), add the emission site, and let the CI contract test prove the
 keys match. Removing a key breaks `build_payload` and any dashboard panel
 referencing it loudly rather than silently.
 
+On the dashboard side, `observability/dashboards.py::PANELS` pins 26 panels
+across the 4 dashboards (Training 5, Evaluation 6, Serving 8,
+Infrastructure/Cost 7).
+
 Eval hierarchy: `_is_eval_hierarchical` accepts any `eval/` key with ≥ 4
 segments whose last segment is `latency_p50`/`latency_p95` — the harness emits
 per-repo permutation strings, and the dashboard spec only ever writes the
@@ -117,13 +130,17 @@ wildcard form `eval/*/latency_p50`.
 
 ## 6. SLO layer
 
-`observability/slo.py` operationalizes the master plan's success criteria —
-no new metric keys, derived from the existing `serve/*` collector summary:
+`observability/slo.py` operationalizes the serving success criteria — no new
+metric keys, derived from the existing `serve/*` collector summary. The
+targets carry deliberate headroom above the measured warm path (~4.9 s TTFB
+p50 at concurrency 1) and the measured cold start (~140–150 s), per
+`docs/planning/SERVING-BENCHMARK-REPORT.md` (measured aggregate TTFB p50
+14,434.9 ms including cold starts):
 
-| SLO | Target | Source |
+| SLO | Target | Basis |
 | --- | --- | --- |
-| S3: TTFB p50 | `< 500 ms` (`SLO_TARGETS["ttfb_p50_ms"] = 500.0`) | master plan S3 |
-| S9: cold start | `< 10 s` (`SLO_TARGETS["cold_start_s"] = 10.0`) | master plan S9 |
+| TTFB p50 | `≤ 25,000 ms` (`SLO_TARGETS["ttfb_p50_ms"] = 25_000.0`) | headroom over the measured warm-path p50 |
+| Cold start | `≤ 180 s` (`SLO_TARGETS["cold_start_s"] = 180.0`) | headroom over the measured 140–150 s cold start |
 
 Mechanics, all in the flush loop (`inference/telemetry.py::run_flush_loop`):
 
@@ -131,7 +148,7 @@ Mechanics, all in the flush loop (`inference/telemetry.py::run_flush_loop`):
   `summary[key] <= target` else `0.0`, for each SLO key present in the
   collector summary (in practice the loop tracks `ttfb_p50_ms`; `cold_start_s`
   is scored when a cold-start measurement lands in the summary, and is
-  rendered against the 10 s target on the Infra dashboard).
+  rendered against the 180 s target on the Infra dashboard).
 - **Error-budget math**: budget = 1 − SLO = 1%. Consumed per flush interval =
   `(1 − attainment) × (flush_interval_s / window_s)`; `burn_rate` sums consumed
   across the trailing 3600 s window and divides by the budget.
@@ -173,6 +190,11 @@ cost_usd = gpu_seconds / 3600 × rate_per_hour
 and parseable); unparseable/missing config falls back to
 `DEFAULT_RATE_PER_HOUR = 1.0`.
 
+`config/observability.yaml` carries **only** this GPU $/hr rate table — trace
+sample rate, W&B entity, and project names live in Python config
+(`inference/config.py` `telemetry_trace_sample_rate = 0.1`;
+`evaluation/config.py`).
+
 | Caller | Emits | Meaning |
 | --- | --- | --- |
 | Training finish (`qlora_trainer.py`) | `cost/cost_usd`, `cost/gpu_seconds`, `cost/rate_per_hour`, `train/cost_usd` | Train duration × rate |
@@ -207,7 +229,7 @@ not a registered key).
 `if: always()` on the report step is deliberate: a failed deploy must still
 emit — the red dot on the dashboard *is* the point. The infra dashboard shows
 the full loop: code push → CI gate → `deploy/status` + `deploy/duration_s` →
-cold-start trend vs S9.
+cold-start trend vs the SLO target (imported from `observability/slo.py`).
 
 ## 10. v2 upgrade path
 

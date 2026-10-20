@@ -37,11 +37,6 @@ module "iam" {
   model_bucket_name   = var.model_bucket_name
 }
 
-# Random suffix for unique bucket names if not provided
-resource "random_string" "bucket_suffix" {
-  length  = 6
-  special = false
-  upper   = false
-}
+# Random suffixes for unique bucket names are generated inside the storage module.
 
 # Root outputs are defined in outputs.tf
