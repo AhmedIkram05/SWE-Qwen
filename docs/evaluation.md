@@ -24,7 +24,7 @@ flowchart TB
 
 ## 1. Core Metrics
 
-For each evaluated instance (`EvalResult` in `evaluation/schema.py`) the harness records: model, variant, prompt template, the generated patch, patch-application metadata, tests before/after, `f2p` (0/1), `p2p` (0/1), latency, and any error.
+For each evaluated instance (`EvalResult` in `evaluation/schema.py`) the harness records: model, variant, prompt template, the generated patch, patch-application metadata, tests before/after, `f2p` and `p2p` (floats 0.0–1.0 — partial credit per test, not binary), latency, and any error. The binary per-instance **resolve statistic** is a derived predicate (`error is None` and `f2p == 1.0`) — it is what the Wilson CIs and McNemar in §3 operate on.
 
 | Metric | Definition | Meaning |
 | ------ | ---------- | ------- |
@@ -53,16 +53,16 @@ Per-model aggregation is `F2PMetrics`: counts + rates for F2P and P2P, `avg_late
 
 | Variable | Value |
 | -------- | ----- |
-| Source | `golden` (default) or `swebench_verified` |
+| Source | `swebench_verified` (default for a bare `run`, sampled at 50) or `golden` — golden sampling is via `--split golden` or the tiered `--mode full` |
 | Seeding | `tier_seed = 42`, deterministic subsetting |
-| Tier sizes | `smoke` 20 · `dev` 100 · `final` 500 · `full` 50 (or `--sample 0` = whole golden) |
-| `--sample N` override | truncates (golden capped at 50 to bound cost unless 0); the released run used an explicit 100-instance sample |
+| Tier sizes | `smoke` 20 · `dev` 100 · `final` 500 (sampled from `swebench_verified`) · `full` 5000 (samples the held-out golden split) |
+| `--sample N` override | truncates the sampled split (`--sample 0` on golden caps at the `full` tier); the released run used an explicit 100-instance golden sample |
 
 ### 2.2 Execution
 
 1. **Materialize** `repo@base_sha` with the official per-instance SWE-bench Docker image (cached on Modal, `eval-repo-cache` / `eval-test-cache` volumes).
-2. **Generate** the patch: `--models qwen3-14b:baseline_14b,...` — each model string is copied to its own GPU task (up to `max_parallel=16`).
-3. **Apply** (`patch_applier.py`): layered strategy — `git apply` → GNU `patch --fuzz` → `unidiff` fallback — and *recorded* (`PatchApplicationResult.method_used`), so "patch failed to apply" is diagnosably different from "patch applied but wrong".
+2. **Generate** the patch: `--models qwen3-14b:baseline_14b,...` — each model string is copied to its own GPU task. Concurrency is capped at 16 remote calls — a proven ceiling: 64-way concurrent `.remote()` broke modal 1.5.3's aiohttp client (`'Connection' object has no attribute '_transport'`). It's a config value (`EvalConfig` / `EVAL_*` env), not a CLI flag — there is no `--max-parallel`.
+3. **Apply** (`patch_applier.py`): `_repair_hunk_headers` runs *before* the first apply attempt (recomputes miscounted hunk counts, injects missing `---`/`+++` headers), then a layered strategy — `git apply` → GNU `patch --batch --fuzz=5 -p1` → `unidiff` fallback — with each strategy post-checked by `_validate_applied` and *recorded* (`method_used` ∈ `git_apply` | `gnu_patch_fuzz` | `unidiff_fallback` | `failed`), so "patch failed to apply" is diagnosably different from "patch applied but wrong".
 4. **Test**: run `FAIL_TO_PASS` then `PASS_TO_PASS` inside the container; 30s per test, 300s per repo, ≤2 retries for flakes.
 5. **Resume**: `--resume run_id` continues an interrupted run instead of re-burning GPU.
 
@@ -70,7 +70,7 @@ Per-model aggregation is `F2PMetrics`: counts + rates for F2P and P2P, `avg_late
 
 - Modal containers cold-start once; repo + image caching makes subsequent runs cheap.
 - `--sample 50` keeps a CI inference run ~$1; a full golden run is bounded by `--sample`.
-- Released 2-run × 4-model comparison (100 golden instances): **$30 est. total** (see `assets/results.txt`).
+- Cost is recorded per `EvalRun`: `cost_usd` = measured inference latency × $0.0417/min for the A100-80GB + estimated test hours × 2 vCPU × $0.008/hr. The **$30 est. total** in `assets/results.txt` is the recorded estimate from the original 2-run × 4-model comparison (100 golden instances) — a receipt, not a reproducible quote.
 
 ---
 
@@ -80,9 +80,9 @@ Raw rate differences on finite samples are noise. Every comparison that can prom
 
 | Method | Used for |
 | ------ | -------- |
-| **Wilson score interval** | Confidence interval around F2P / P2P rates (95%), reported per model |
-| **McNemar's test** | Paired (per-instance) disagreement between two models — is the F2P gain real on the same instances? |
-| **Paired bootstrap** | CI for the difference (gain) under resampling of instance-level outcomes |
+| **Wilson score interval** | 95% confidence interval around the binary per-instance resolve rate (`resolve_count / total`), reported per model |
+| **McNemar's test** | Exact two-sided binomial on the discordant pairs of two models' per-instance outcomes — is the F2P gain real on the same instances? |
+| **Paired bootstrap** | CI for the difference (gain) under resampling of instance-level outcomes — `paired_bootstrap_ci(seed=42, n_boot=10_000)` |
 
 The eval gate (`promotion/gate.py`) then requires, to promote a challenger:
 
@@ -138,10 +138,10 @@ pinned. `evaluation/inference.py` and `evaluation/comparison.py` enforce:
 
 Why `golden` is sacred:
 
-1. **Never touched by training.** The golden set is carved *before* tokenization (`golden.py`) from the repo-isolated **test** split (verified/test/dev SWE-bench provenance filtered within it; default `golden_source_split="test"`), and is disjoint from train/val by construction.
+1. **Held out for evaluation.** The golden set (`golden.py`) is carved from the repo-stratified **test** split (verified/test/dev SWE-bench provenance filtered within it; `golden_source_split` defaults to `"test"`) and held out from the training split; the isolation check errors if any golden instance overlaps train/val.
 2. **Run-scoped.** Binds to a dataset `run_id` (`EVAL_DATASET_RUN_ID`); evaluation can never silently pick up a "better" oracle that makes results harder to compare.
 3. **Fixed prompts.** Prompt templates live in `training/prompts/` and are shared with inference (`prompt_builder.py`) — an eval result is attributable to the model, not an ad-hoc prompt.
-4. **Full audit.** Every run is a `EvalRun` in W&B (`swe-qwen` project) with per-example logging (patch + status), aggregate metrics, and `cost_usd`; a `compare` writes a markdown table and optionally promotes to the `eval-champion` registry collection.
+4. **Full audit.** Every run is a `EvalRun` in W&B (`swe-qwen` project) with per-example logging (patch + status), aggregate metrics, and `cost_usd`; a `compare` writes a markdown table and then attempts promotion to the `eval-champion` registry collection best-effort (revalidate the champion, then promote). Langfuse logs one trace per completed eval example (never sampled), addressable by `run_id` + `instance_id`.
 
 ---
 
@@ -155,8 +155,10 @@ python -m evaluation.cli run --split golden --sample 100 --models qwen3-14b:base
 python -m evaluation.cli run --split golden --sample 100 \
   --models qwen3-14b:baseline_14b,qwen3-14b:higher_rank_14b,qwen3-14b:higher_lr_14b --resume run_golden
 
-# Statistical comparison + optional promotion
-python -m evaluation.cli compare --run_ids run_baseline,run_golden --promote-to-registry
+# Statistical comparison — promotion is attempted automatically (best-effort)
+# after revalidating the champion; there is no --promote-to-registry flag.
+# The CI promotion path is promote.yml.
+python -m evaluation.cli compare --run_ids run_baseline,run_golden
 
 # CI gate only (no promotion)
 python -m evaluation.cli run --mode smoke --ci-mode --models qwen3-14b:baseline_14b
