@@ -91,10 +91,10 @@ dashboards = [
 ]
 
 [project.scripts]
-data-pipeline = "data_engineering.run_pipeline:app"
+data-pipeline = "data_engineering.cli:app"
 train = "training.qlora_train:app"
 eval = "evaluation.cli:app"
-serve = "inference.serve:app"
+serve = "inference.serve:main"
 model = "registry.cli:app"
 
 [build-system]
