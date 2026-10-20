@@ -1234,193 +1234,259 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 
 ---
 
-## Phase 10: Documentation — YYYY-MM-DD
+## Phase 10: Model Registry — 2026-09-08 to 2026-09-10 ✅ COMPLETED
+
+### Status
+
+✅ COMPLETED (2026-09-08 → 2026-09-10; retrospective entry, dates/SHAs from git history). `registry/` package (loader + CLI) via PR #25 "true agnosticism" (merged 2026-09-09) + hardening 7be6552 (2026-09-10). Every stage now resolves models through the registry. Template title was "Documentation" — most of those tasks had already shipped 2026-08-08..09-15 (Deviation Log 10.0); CI-scope follow-up landed 2026-10-06.
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 | ------ | --------- | -------- | -------- | -------- |
-| 10.1 | Architecture overview | | | |
-| 10.2 | Deployment guide | | | |
-| 10.3 | API reference | | | |
-| 10.4 | Experiment guide | | | |
-| 10.5 | Dataset engineering guide | | | |
-| 10.6 | Evaluation methodology | | | |
-| 10.7 | CONTRIBUTING.md | | | |
-| 10.8 | README update | | | |
-| 10.9 | ADR cross-reference index | | | |
-| 10.10 | Documentation review | | | |
+| 10.0 | Template phase "Documentation" (10.1-10.10) | Replaced by Model Registry per docs/planning/PHASE-10-MODEL-REGISTRY.md (4fdf1d3, 09-08). Documentation already shipped: API reference (018a96b), dataset-engineering guide (03bf1b6), evaluation methodology (1e85a2b), experiments guide (c72bedf), README overhaul + MODEL_CARD.md (7f33daf, 9af1025) all 2026-08-08; final benchmark report (6dace61, 08-09); README/badges/deep-dives/media refresh (09-02..09-08, 09-15). NOT done: CONTRIBUTING.md (10.7), ADR cross-reference index (10.9) — never landed | Docs were completed opportunistically between Phases 9 and 10; the registry was the actual gap | Low |
+| 10.1 | Shared model registry | `registry/loader.py` — single merged loading path: `config/models.yaml` (tracked base) + `config/models.user.yaml` (gitignored user overlay, 03fbcd7) deep-merged per model key (overlay overrides/extends an existing model or adds new ones); merged result memoized in `functools.lru_cache(maxsize=32)` keyed on (repo_root, base mtime_ns, user mtime_ns) — rewrite invalidates automatically, missing overlay = `-1` sentinel; `ModelSpec` (pydantic, extra="allow") validates required fields while extras ride along; `load_raw_models` stays lenient for `resolve_hf_id`'s fallback contract | One loading path so the overlay applies everywhere | Low |
+| 10.2 | CLI for model addition | `registry/cli.py` — `model add <hf_id>` probes via httpx: (1) repo reachable, (2) config.json → `max_position_embeddings` context probe (`--context 0`), (3) tokenizer chat_template check (warn, gated behind `--allow-no-template`; Qwen3 thinking-markers flagged), (4) target-module auto-detection from `model_type`. Writes ONLY the user overlay — the CLI never edits tracked models.yaml | Hand-added models must be probed, not trusted | Low |
+| 10.3 | Registry-first refactor | PR #25 (merged 09-09): every stage resolves through the registry — tokenize config (a14a577), training scripts' default model (341a167), eval CLI (a518296), serve config (feb2c90), deploy/workflows (28ed0d3, a67ec12), W&B init family (6ffd430), local e2e smoke (97f1ae1), promotion test path (e2185e3); `default_model_key()` resolves the `default: true` entry (qwen3-14b); 16 modules across data_engineering/training/evaluation/inference/scripts import registry | Hardcoded hf_ids were scattered across stages | Medium (behavioral: default model now user-configurable via overlay) |
+| 10.4 | Tests + CI scope | tests/registry/ (test_loader 9 + test_cli 16 = 25 tests) added with the package; registry entered CI lint/mypy/coverage scope with fail_under=90 only on 2026-10-06 (2aee8dc, PR #42) — ~3.5 weeks outside the quality gates | PR #25 shipped before the CI scope update | Low (closed 10-06) |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| User overlay gitignored; CLI writes only `config/models.user.yaml` | Personal model entries must not churn the shared registry | Edit tracked models.yaml directly; per-user forks | Zero-merge-conflict personalization; loader deep-merge makes the overlay additive |
+| Every stage reads through registry.loader (no direct models.yaml reads) | Model swaps previously required grep-and-edit across all stages | One-off sed per stage | Single source of truth; swapping the base model is one YAML edit; default = `default: true` flag |
+| mtime-keyed lru_cache instead of explicit invalidation | Config edits during long-lived processes must become visible | TTL refresh, manual cache clear, no cache | mtime_ns changes on rewrite → automatic invalidation; absent overlay gets a stable `-1` sentinel key |
+| nf4→fp4 A10G workaround moved into registry data | `_build_fallback` hardcoded `load_in_4bit=True` + fp4, ignoring registry quantization | Honor registry blindly — resurrects the nf4 CUDA illegal-memory-access crash on A10G with Qwen3-14B | Per-model `fallback_quantization: fp4` override in models.yaml with the crash comment; naive honoring would have re-broken training |
+| `model add` gates no-chat-template models behind a flag | SWE-bench prompt building requires a chat_template | Silent accept | Warn + `--allow-no-template`: a bad add fails at add time, not mid-training |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
+| Hardcoded 4-bit fallback would re-trigger the A10G nf4 crash once the registry is honored | PHASE-10-MODEL-REGISTRY.md pre-analysis | Yes | Quantization-map fallback (nf4/fp4 → 4-bit, int8 → 8-bit, none → bf16) + registry-data override | 0 (caught at plan time) |
+| Registry invisible to CI quality gates after PR #25 | Post-merge review | Yes | 2aee8dc (10-06): registry into lint/mypy/coverage, fail_under=90 | ~3 weeks latent; fix trivial |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| Overlay merge semantics | Per-model-key deep merge; overlay may override fields of an existing model or add new ones; merged raw dict is the source of truth; ModelSpec extras ride along in `model_extra` | A minimal overlay entry doesn't drop base fields; validation errors name the failing model key |
+| Cache identity | `_merged_raw(repo_root, base_mtime_ns, user_mtime_ns)`, maxsize=32; callers must not mutate the returned dict (load paths deep-copy out) | Mutating the cached dict would corrupt every subsequent reader |
+| Default resolution | `default_model_key()` scans the merged (incl. overlay) config for `default: true` → qwen3-14b; KeyError if none | User overlay can re-point the default without touching tracked files |
+| Probe contract | `--context 0` resolves max_position_embeddings; missing chat_template = warn + `--allow-no-template` gate | Bad `model add` inputs fail at add time with actionable messages |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| `registry/` (loader.py, cli.py, __init__.py) | Added | Phase 10 deliverable (PHASE-10-MODEL-REGISTRY.md) |
+| `config/models.user.yaml` (gitignored, .gitignore) + .gitignore entry | Added | User overlay (03fbcd7) |
+| `config/models.yaml` | Modified | qwen3-14b flagged `default: true`; fallback_quantization override (2bbba72, 3b56d17) |
+| `tests/registry/` (test_loader.py, test_cli.py) | Added | 25 tests |
+| Stage integrations: data_engineering/{config,tokenize}.py, training/qlora_config.py + training scripts, evaluation/{config,cli,prompt_ab_test}.py, inference/{config,benchmark,prompt_builder,modal_serve,serve}.py, scripts/* (16 modules total) | Modified | Registry defaults end-to-end (PR #25) |
+| Documentation set (template's original Phase 10 tasks) | Added | API reference, dataset guide, eval methodology, experiments guide, README/MODEL_CARD, final benchmark report, media/badges — 2026-08-08..09-15 (see 10.0) |
+| LICENSE (Apache-2.0) | Added | b4b775b, 09-09 |
 
 ### Metrics / Observations
 
--
--
+- 25 registry tests; total CI coverage measured 95.25% after registry entered scope (2d55253).
+- Docs-accuracy pass 9abd3b3 (10-06, PR #41): broken relative links fixed; inverted promotion/eval behavior descriptions corrected.
+- CONTRIBUTING.md + ADR cross-reference index remain open items from the original template.
 
 ---
 
-## Phase 11: Hardening & Resilience — YYYY-MM-DD
+## Phase 11: Async Serving Refactor + Serving Benchmark — 2026-10-06 to 2026-10-07 ✅ COMPLETED
+
+### Status
+
+✅ COMPLETED (2026-10-06 → 2026-10-07; retrospective entry, dates/SHAs from git history). Async generation path landed in one day (PR #45); benchmark report the next (PR #46). Template title was "Hardening & Resilience" — descoped in MASTER-PLAN.md (97837dc, 2026-08-08).
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 | ------ | --------- | -------- | -------- | -------- |
-| 11.1 | External API audit | | | |
-| 11.2 | GitHub API retry/backoff | | | |
-| 11.3 | Modal API retry/backoff | | | |
-| 11.4 | Input validation hardening | | | |
-| 11.5 | Model fallback chain | | | |
-| 11.6 | Circuit breaker (GitHub) | | | |
-| 11.7 | Edge case test coverage | | | |
-| 11.8 | Error message audit | | | |
-| 11.9 | Failure injection tests | | | |
+| 11.0 | Template phase "Hardening & Resilience" (11.1-11.9: retry/backoff, circuit breaker, failure injection) | Replaced — descoped per MASTER-PLAN.md Phase 11 update ("not being pursued", 97837dc, 2026-08-08); slot consumed by the serving concurrency fix + benchmark | External-API hardening judged lower value than a measured serving path | Low |
+| 11.1 | Serving concurrency fix | Async generation path in inference/: `_sweep_config` async + `_drain` concurrent collection (f5e07f7), `_build_smoke` async (3bd84b8), incremental output streaming (77fcf78), SSE frame functions for chat-completion chunks (bb54118), `_stream_gen` cleanup (aa5dc46), async test harness (8ff0cb8, 16a7235) — PR #45 merged 10-06 | Pre-fix offline-`LLM` code was flat at ~50 tok/s at ANY concurrency (throttling) | High — restores scaling to 8-way |
+| 11.2 | Serving benchmark | docs/planning/SERVING-BENCHMARK-REPORT.md (0129017 + f9dbe81, PR #46, 10-07): 250 requests, 0.0% errors, TTFB p50 14,434.9 ms / p95 25,334.4 ms; per-level (warm, 80GB tier, 45 s keep-alive): tok/s 50 (1-way) → 227.2 / 168.6 (8-way) → 153.0 / 152.2 (16-way) — plateau past 8-way; warm latency p50 ~4.9 s (1-way) → 8.4-11.3 s (8) → 16.3-19.2 s (16); cold start ~140-150 s; response-integrity probe: 0/8 cross-request bleed | First real serving measurement; S3 (TTFB p50 < 500 ms) FAILS on this non-stream benchmark by design — non-stream TTFB == full latency; streaming first-token TTFB not yet measured | Medium (honest negative logged) |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| Keep scale-to-zero despite ~140-150 s cold start | ADR-010 $0-idle commitment | keep_warm(1) | Mitigations documented instead: keep_warm(1) or client timeouts ≥ 200 s; a client aborting mid-cold-start SIGTERMs the booting container (observed `Server has lost track of input` 500 at ~73 s) |
+| Publish the benchmark with its failing S3 gate | Honest reporting | Hold the report until streaming TTFB is measured | Non-stream TTFB == full latency by definition; report flags streaming TTFB as an unmeasured follow-up |
+| Log the 16-way 4.4% error rate as open | 7/160 client 120 s SDK timeouts on first wave, unrooted | Block release on root-cause | Decode/scheduler-bound knee documented; KV cache (373,744 tokens) ruled out as the constraint |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
+| Serving flat at ~50 tok/s under any concurrency | Benchmark prep | Yes | Async-engine refactor (PR #45) — scaling restored to 8-way (227 tok/s first run) | n/a (pre-existing defect, fixed in-window) |
+| 16-way client timeouts (4.4%) | Benchmark rerun | No (open) | First-wave client 120 s SDK timeouts; needs investigation | — |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| Cold-start failure mode | Client timeout < ~150 s fails on a cold endpoint; abort mid-boot → Modal SIGTERMs the booting container | Client timeout policy must be ≥ 200 s, or the endpoint needs keep_warm(1) |
+| Throughput knee | Aggregate tok/s plateaus between 8 and 16-way (decode/scheduler-bound); KV cache not the constraint | Past 8-way, concurrency adds latency, not throughput — capacity-planning number |
+| Cost | $0.00042 per inference (250-req aggregate) | Serving cost baseline |
+| Streaming | SSE frame helpers shipped; real first-token TTFB still unmeasured | S3 gate remains unproven for streaming clients |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| inference/{serve,modal_serve,benchmark}.py + tests | Modified | Async generation + incremental streaming (PR #45) |
+| docs/planning/SERVING-BENCHMARK-REPORT.md | Added | Benchmark record incl. negative results (PR #46) |
 
 ### Metrics / Observations
 
--
--
+- Throughput: 50 → 227.2 tok/s (8-way, first run) → plateau 153 tok/s (16-way); 0% errors at ≤ 8-way.
+- Warm latency p50 ~4.9 s at concurrency 1 (non-stream, 256 tokens, qwen3-14b, 80GB tier).
+- Honest gaps: streaming first-token TTFB unmeasured; 16-way timeouts unrooted; concurrency collapse past 8-way documented as-is.
 
 ---
 
-## Phase 12: End-to-End Validation — YYYY-MM-DD
+## Phase 12: Correctness Hardening P0-P7 — 2026-10-07 ✅ COMPLETED
+
+### Status
+
+✅ COMPLETED (2026-10-07; retrospective entry, dates/SHAs from git history). Seven PRs (#47-#54) merged in a single day, each closing a silent-correctness defect surfaced by audit. One config-only deliverable (strong_14b) shipped without eval results — logged as an honest gap. Pre-wave fixes #43/#44 landed 2026-10-06.
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 | ------ | --------- | -------- | -------- | -------- |
-| 12.1 | Full pipeline clean run | | | |
-| 12.2 | Data pipeline validation | | | |
-| 12.3 | Training pipeline validation | | | |
-| 12.4 | Eval validation | | | |
-| 12.5 | Inference validation | | | |
-| 12.6 | CI/CD validation | | | |
-| 12.7 | Promotion validation | | | |
-| 12.8 | E2E latency benchmark | | | |
-| 12.9 | E2E cost analysis | | | |
-| 12.10 | Validation report | | | |
+| 12.0 (pre-wave) | — | Baseline-cache schema unified batch/single + batch truncation guard (589579a, PR #43); data_engineering.clean quality-gate tests (d7c73c0, PR #44) — both 10-06 | Cache-schema drift between batch and single runs | Medium |
+| P0/P1 (PR #47) | Prompt parity | Train/eval prompts unified via a shared parity contract in inference/prompt_builder.py (31ca92e; also data_engineering/tokenize.py, training/prompts/user.j2); tests/test_prompt_parity.py (14 tests) | Train/eval prompt drift silently invalidates paired comparisons | High |
+| P2 (PR #48) | Tokenize-trainer alignment | Tokenizer length aligned with the trainer, packing OFF, exact loss mask (534422e; config/qlora_variants.yaml, data_engineering/{config,tokenize}.py, training/qlora_config.py) | Sequence handling mismatched between tokenize and train stages | High |
+| P3 (PR #49) | Golden-set isolation | Golden restricted to the test split (1aff508): `DataPipelineConfig.golden_source_split` default now `"test"` (data_engineering/config.py); split.py, golden.py, card.py updated | Golden carved from "all" could leak eval instances into training data | High |
+| P4 (PR #50) | Checkpoint sanity | Per-run output dirs, run-scoped checkpoint uploads, dry-run proxy (6cfa90f) | Cross-run checkpoint clobbering on shared output dirs | Medium |
+| P5 (PR #51) | Eval fairness | Unified prompt wrapping, apply-vs-conditional metrics split (evaluation/metrics.py), paired significance wired into promotion/gate.py (4ad1551) | Prompt wrapping + metric-definition skew biased variant comparisons | High |
+| P6 (PR #52) | Diff fail-loud | Shared fail-loud parser data_engineering/diff_utils.py (consumed by swebench_ingest + patch_applier + prompt_builder), extraction flag, repair-before-apply (4fc1d9b) | Silent diff mangling → wrong patches applied/evaluated | High |
+| P7 (PR #53) | Contract tests | tests/test_contract_{config,determinism,prompt_parity}.py (43f5d42): 6 + 8 + 23 tests — config contract guards, split determinism, 376-line prompt-parity contract | Parity/determinism regressions were unguarded | Medium |
+| 12.9 (PR #54) | strong_14b variant | r64/alpha128, lr 1e-4, 3 epochs added to config/qlora_variants.yaml (8cc4b2a) — production candidate to A/B against the recorded champion higher_rank_14b | Config only — NO eval results yet; variant untested | Low (follow-up pending) |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| `golden_source_split` default flipped "all" → "test" | Golden drawn from all splits could place eval records into training | Keep "all" + document the risk | Leakage-proof by default; golden is carved from the repo-stratified test split with an isolation check on train/val overlap |
+| Repair-before-apply, not repair-everywhere | Silent repairs masked data defects | Fail everywhere (breaks legacy records); silent repair (status quo) | Fail-loud parse + explicit extraction flag; repair is an explicit, visible pre-apply step |
+| Packing off for exact loss masking | Token-budget accounting must match the trainer exactly | Packing on (throughput) | Correctness over throughput; packing would blur the exact loss mask |
+| apply vs conditional metrics split | F2P/P2P conflated patch-application success with fix rate | Single blended metric | evaluation/metrics.py separates them; comparison + promotion consume the right one per gate |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| Parity contract | inference/prompt_builder.py is the single prompt source for both the train (user.j2) and eval paths; contract tests pin prompt equality + split determinism | Any future prompt edit must update the contract, not fork the template |
+| diff_utils.py consumers | swebench_ingest (ingest-time), patch_applier (apply-time), prompt_builder | One parser = one bug class; fail-loud beats silent repair |
+| Promotion coupling | 4ad1551 touched promotion/gate.py — the gate consumes the fairness-fixed metrics | Phase 9 gate semantics unchanged; inputs corrected upstream |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| PRs #47-#54 (8 merges, all 2026-10-07) + #43/#44 (10-06) | Modified/Added | Seven correctness fixes + variant config |
+| New test suites: test_prompt_parity (14), test_contract_config (6), test_contract_determinism (8), test_contract_prompt_parity (23), test_eval_comparison_fairness (7), test_eval_metrics_fairness (11), test_diff_utils (19) | Added | ~88 regression guards over the fixed defect classes |
 
 ### Metrics / Observations
 
--
--
+- All seven PRs merged within one day (2026-10-07) — audit found the defects, fixes batched.
+- Honest gap: strong_14b shipped as config only; no eval results exist for it yet.
+- Known debt: golden artifact re-run pending (see Decisions Made).
 
 ---
 
-## Phase 13: Production Launch & Portfolio Presentation — YYYY-MM-DD
+## Phase 13: CI/CD + Dependency Security — 2026-09-22 to 2026-10-15 ✅ COMPLETED
+
+### Status
+
+✅ COMPLETED (2026-09-22 → 2026-10-15; retrospective entry, dates/SHAs from git history). Ran as a parallel track interleaved with Phases 11-12: dependabot wave 09-22/09-29, CI gates 09-29/09-30, correctness-adjacent CI scope 10-06, security + pin hardening 10-06..10-15. Template title was "Production Launch & Portfolio Presentation" — see 13.0 for what did and didn't ship from it.
 
 ### Deviation Log
 
 | Task | Planned | Actual | Reason | Impact |
 | ------ | --------- | -------- | -------- | -------- |
-| 13.1 | Deploy production endpoint | | | |
-| 13.2 | Portfolio showcase doc | | | |
-| 13.3 | Benchmark results package | | | |
-| 13.4 | CV/LinkedIn summary | | | |
-| 13.5 | Git tag v1.0.0 | | | |
-| 13.6 | Project retro doc | | | |
-| 13.7 | README highlight | | | |
-| 13.8 | Final docs review | | | |
-| 13.9 | HF Hub model card | | | |
+| 13.0 | Template phase "Production Launch & Portfolio Presentation" (13.1-13.9) | Replaced by the CI/CD + dependency-security track. From the template only the repo MODEL_CARD.md shipped (9af1025, 08-08; formatted 09-02). NOT done: production endpoint as a launched product step (serving exists, Phase 6/11, but no launch event), portfolio showcase doc, CV/LinkedIn summary, git tag v1.0.0 (zero tags exist in the repo), project retro doc, README launch highlight, HF Hub model-card upload | Launch/portfolio work was not scheduled in this window; dependency-security debt was pressing | Low (deferred, not lost) |
+| 13.1 | Dependabot hygiene | Unified to weekly Monday 09:00 Europe/London across all ecosystems (690f41a, PR #59, 10-14); python ecosystem switched uv → pip (712155b, 10-15) — uv resolver fails on this marker matrix | Unscheduled action-version PR storms; uv group updates errored | Medium |
+| 13.2 | Static security analysis | CodeQL workflow added (.github/workflows/codeql.yml, d42a15d, 10-14) | None existed | Low |
+| 13.3 | CI gates for dependency PRs | eval-gate skip on dependabot PRs — no secrets available (a39f0a9, 267c60d, PR #58, 10-10); torch bumps ignored (a39f0a9); terraform-plan skip on dependabot PRs (fd5a3a8, 09-22); GCP_DEPLOY_ENABLED gate for terraform-apply + deploy-modal (fa3edcd, 09-30); RUN_MODAL_EVAL gate extended to main pushes (58d0edd, 09-30) | Dependabot PRs red on secrets they can never have; GPU eval must not burn on dependency bumps | Medium |
+| 13.4 | torch pin | `torch==2.13.0` (vllm 0.28 requires it; 2.14 unsatisfiable) — pinned three separate times (c338785 09-29, 71cf875 10-05, 2803a02 10-10) before the dependabot ignore rule landed | Repeated bump churn would break vllm | Medium |
+| 13.5 | transformers window | `>=5.5.0,<5.18.0` (6f71c7f, 09-29) → `<5.19.0` (eb6fa40, 10-10) → `<5.20.0` (d4b5486, 10-15) + dependabot ignore for `>=5.15` (132865a, PR #67, 10-15) | 5.15.0 removed `TrainingArguments.warmup_ratio` (verified; config/qlora_variants.yaml + training/callbacks.py still read it) | Medium |
+| 13.6 | Quality-gate scope | registry into lint/mypy/coverage + fail_under=90 (2aee8dc, 10-06); requires-python cap + inference extra installed for tests (d702554, 09-29); gate comment cites CI's own measured 95.25% (2d55253) | New package invisible to the gates | Low |
+| 13.7 | Ruff | 0.16.7 → 0.16.8 → 0.16.9 → 0.16.10 → 0.17.0 across the window (47998ce, 71cf875, 2803a02, 74c790b) | Routine cadence | Low |
 
 ### Decisions Made
 
 | Decision | Context | Alternatives Considered | Rationale |
 |----------|---------|------------------------|-----------|
-| | | | |
+| pip ecosystem for dependabot python updates | uv resolver fails on the marker matrix | Stay on uv + hand-patch every group update | dependabot's pip resolution handles the matrix; updates land automatically again |
+| Ignore transformers >=5.15 rather than chase patches | warmup_ratio removal is a hard training-API break | Bump + migrate the training code each week | Window capped at <5.20; migrate off warmup_ratio deliberately in a future phase |
+| Skip (not unblock) the eval gate on dependabot PRs | Secrets unavailable in the dependabot context | Provision read-only secrets | The $0 path already exists (RUN_MODAL_EVAL=false); dependency bumps don't need GPU eval |
+| Ignore torch bumps alongside the pin | Three manual pins in 12 days | Keep re-pinning manually | dependabot ignore (a39f0a9) removes the churn at the source |
 
 ### Blockers & Resolutions
 
 | Blocker | Discovered | Resolved | Resolution | Time Lost |
 |---------|------------|----------|------------|-----------|
-| | | | | |
+| Dependabot uv group updates failing | PR cycle, 10-15 | Yes | Ecosystem switched to pip (712155b) | ~1 day |
+| Repeated torch-bump churn (3 pins) | 09-29 → 10-10 | Yes | torch added to dependabot ignores (a39f0a9) | ~hours |
 
 ### Technical Details (For Future Phases)
 
 | Area | Detail | Why It Matters |
 |------|--------|----------------|
-| | | |
+| Final constraint set | `torch==2.13.0` (vllm 0.28), `transformers>=5.5.0,<5.20.0`, dependabot ignores: transformers >=5.15 (warmup_ratio removal) + torch bumps; ruff 0.17.0 | Single place to check before any dependency upgrade |
+| Unified schedule | All ecosystems: weekly, Monday 09:00 Europe/London (.github/dependabot.yml) | Predictable dependency-PR cadence, no storm days |
 
 ### Scope Changes
 
 | Change | Added/Removed/Modified | Justification |
 |--------|------------------------|---------------|
-| | | |
+| .github/workflows/codeql.yml | Added | CodeQL security analysis (d42a15d) |
+| .github/dependabot.yml | Modified | Unified schedule, pip ecosystem, ignore rules (690f41a, 712155b, 132865a) |
+| pyproject.toml (torch/transformers/ruff constraints) | Modified | Pins + windows above |
+| ~20 dependabot bump PRs merged (actions/*, pip, uv groups), 09-22..10-15 | Modified | Routine dependency maintenance |
 
 ### Metrics / Observations
 
--
--
+- Interleaved track: git history shows PRs #28-#42 landing 09-22..10-06, #43-#58 10-06..10-10, #59-#67 10-14..10-15 — CI/dep work ran alongside Phases 11-12, not after them.
+- Honest note: 13.4 needed three separate manual pins before the ignore rule stuck — process cost of pin-by-hand.
+
+---
+
+## Phase 14: Kubernetes-Based CPU Eval Platform — 2026-09-10 ◻ PLANNED / NOT STARTED
+
+### Status
+
+◻ PLANNED — design doc only (docs/planning/PHASE-14-K8S-EVAL-PLATFORM.md, 314 lines, added 2026-09-10 via PR #26 "docs/K8s-eval"). Zero implementation as of 2026-10-18: no k8s/ manifests, no evaluation/k8s_worker.py, no modules/gke anywhere in the repo. Retrospective entry.
+
+### Deviation Log
+
+| Task | Planned | Actual | Reason | Impact |
+| ------ | --------- | -------- | -------- | -------- |
+| 14.x | Kubernetes-based CPU eval platform implementation | Design doc only; no code, manifests, or workers exist | Design-first phase; not yet scheduled | — |
+
+### Decisions Made
+
+| Decision | Context | Alternatives Considered | Rationale |
+|----------|---------|------------------------|-----------|
+| Design doc landed before any implementation | PR #26 merged alongside Phase 10 close-out | Implement immediately | Eval-platform economics decision deferred; no resources committed |
+
+### Scope Changes
+
+| Change | Added/Removed/Modified | Justification |
+|--------|------------------------|---------------|
+| docs/planning/PHASE-14-K8S-EVAL-PLATFORM.md | Added | Design doc only (314 lines) |
 
 ---
 
@@ -1428,7 +1494,20 @@ Suite: 936 passed (0 failed), ~302 s (~5 min).
 
 | Topic | Phase(s) | Key Detail |
 |-------|----------|------------|
-| | | |
+| Foundation & Scaffolding | 1 | 2026-07-25 |
+| Repository Curation & Verification | 2 | 2026-07-26 |
+| Data Engineering Pipeline | 3, 3b, 3b-ext | 2026-07-27..30 — SWE-bench pivot, synthetic augmentation, GCS fix + tokenization integration |
+| Fine-Tuning Pipeline (QLoRA) | 4 | 2026-07-28 |
+| Evaluation Harness | 5, 5b | 2026-07-31 / 08-01 — F2P/P2P harness; Eval v5 redesign |
+| Inference API (serverless vLLM on Modal) | 6 | 2026-08-06 |
+| CI/CD quality gates | 7, 13 | 2026-08-06 / 09-22..10-15 — gates, then dependency security + CodeQL |
+| Observability & Telemetry | 8 | 2026-08-07 — dual-write W&B + Langfuse, SLO layer, dashboards |
+| Champion/Challenger Promotion | 9 | 2026-08-08 — four-gate predicate, deploy+probe+alias, audit artifacts |
+| Model Registry | 10 | 2026-09-08..09-10 — loader deep-merge + gitignored user overlay, `model add` probes, registry-first stages |
+| Async serving + benchmark | 11 | 2026-10-06..07 — async engine (8-way scaling restored), SERVING-BENCHMARK-REPORT (cold start ~140-150 s) |
+| Correctness hardening | 12 | 2026-10-07 — P0-P7: prompt parity, tokenize-trainer alignment, golden isolation, eval fairness, fail-loud diffs, contract tests |
+| Dependency security | 13 | torch==2.13.0, transformers <5.20 (ignore ≥5.15), CodeQL, weekly dependabot |
+| K8s CPU eval platform | 14 | ◻ PLANNED — design doc only (2026-09-10) |
 
 ---
 
