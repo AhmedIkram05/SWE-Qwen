@@ -273,17 +273,22 @@ class QLoRATrainer:
         use_cuda = torch.cuda.is_available()
 
         if use_cuda:
-            # Quantization config (4-bit FP4 — NF4 causes CUDA illegal memory access
-            # on A10G with Qwen3-14B, a known bitsandbytes issue with MoE-like
-            # architectures. FP4 trades ~1% perplexity for full stability.)
+            # Quantization type resolves from the registry, same order as
+            # unsloth_factory._build_fallback: `fallback_quantization` wins over
+            # `quantization` (e.g. qwen3-14b is nf4 generally but fp4 here —
+            # nf4 causes CUDA illegal memory access on A10G with MoE-like
+            # architectures). Single source of truth, one code path.
+            quant_type = model_cfg.get(
+                "fallback_quantization", model_cfg.get("quantization", "nf4")
+            )
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_quant_type="fp4",
+                bnb_4bit_quant_type=quant_type,
                 bnb_4bit_compute_dtype=torch_dtype,
                 bnb_4bit_use_double_quant=False,
             )
             device_map = "auto"
-            logger.info("Loading model %s with 4-bit FP4 (CUDA)...", hf_id)
+            logger.info("Loading model %s with 4-bit %s (CUDA)...", hf_id, quant_type)
         else:
             # CPU/MPS: no quantization, full precision
             bnb_config = None
