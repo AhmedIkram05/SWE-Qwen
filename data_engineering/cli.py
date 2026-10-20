@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -39,7 +40,10 @@ from observability.logging import configure_logging
 
 app = typer.Typer(
     name="data-engineering",
-    help="SWE-Qwen pipeline: ingest -> validate -> clean -> split -> golden -> version -> archive",
+    help=(
+        "SWE-Qwen pipeline: ingest -> validate -> clean -> split -> golden -> "
+        "version -> archive -> card -> tokenize"
+    ),
     no_args_is_help=True,
 )
 
@@ -61,37 +65,16 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         help="Output directory for pipeline artifacts",
         file_okay=False,
     ),
-    max_issues: int = typer.Option(
-        2000,
-        "--max-issues",
-        help="Max issues per repo (reserved for future use)",
-        min=1,
-    ),
-    parallel_workers: int = typer.Option(
-        1,
-        "--parallel-workers",
-        "-p",
-        help="Number of parallel workers (default 1 = sequential)",
-        min=1,
-        max=32,
-    ),
-    batch_size: int = typer.Option(
-        50,
-        "--batch-size",
-        "-b",
-        help="Records per batch",
-        min=1,
-    ),
     max_patch_lines: int = typer.Option(
         500,
         "--max-patch-lines",
         help="Max lines in a patch diff",
         min=1,
     ),
-    min_golden: int = typer.Option(
-        200,
+    min_golden: int | None = typer.Option(
+        None,
         "--min-golden",
-        help="Minimum golden examples target",
+        help="Minimum golden examples target (default: DataPipelineConfig.min_golden_examples)",
         min=0,
     ),
     resume_from: str | None = typer.Option(
@@ -178,14 +161,16 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
     """Run the full data pipeline end to end."""
     _setup_logging(verbose)
 
+    # --min-golden defaults to None so DataPipelineConfig stays the single
+    # source of truth for the golden floor.
+    overrides: dict[str, Any] = {}
+    if min_golden is not None:
+        overrides["min_golden_examples"] = min_golden
+
     config = DataPipelineConfig(
         output_dir=output,
         swe_bench_dir=swe_bench_dir,
-        max_issues_per_repo=max_issues,
-        parallel_workers=parallel_workers,
-        batch_size=batch_size,
         max_patch_lines=max_patch_lines,
-        min_golden_examples=min_golden,
         resume_from=resume_from,
         enabled_stages=stages.split(",") if stages else None,
         run_id_override=run_id,
@@ -199,6 +184,7 @@ def run(  # noqa: PLR0913,B008 -- typer CLI dispatcher; Option() calls required 
         max_train_examples=max_train_examples,
         tokenize_model=tokenize_model,
         tokenize_max_length=tokenize_max_length,
+        **overrides,
     )
 
     try:

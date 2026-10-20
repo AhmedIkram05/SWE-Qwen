@@ -1,7 +1,7 @@
 """Pipeline orchestrator.
 
 Coordinates the full data pipeline: ingest -> validate -> clean -> split ->
-golden -> version -> archive -> card generation.
+golden -> version -> archive -> card generation -> tokenize.
 
 Source: SWE-bench dataset from Hugging Face
 """
@@ -14,6 +14,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +130,58 @@ def _manifest_hash(manifest: dict[str, Any]) -> str:
     """Compute SHA256 of the serialised manifest."""
     raw = json.dumps(manifest, sort_keys=True, default=str).encode()
     return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _file_digest(path: Path) -> dict[str, Any]:
+    """Content fingerprint of a stage artifact: bytes on disk + truncated SHA256.
+
+    Streaming so an 800 MB stage file costs a sequential read, not a parse.
+    """
+    if not path.exists():
+        return {"bytes": 0, "sha256": None}
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return {"bytes": path.stat().st_size, "sha256": digest.hexdigest()[:16]}
+
+
+def _build_manifest(
+    config: DataPipelineConfig,
+    run_id: str,
+    stages: dict[str, Any],
+    stats: PipelineStats,
+    git_sha: str,
+) -> dict[str, Any]:
+    """Lineage manifest: what ran, from what, and the digest of every stage file.
+
+    ``manifest_hash`` is the hash of this object, so two runs that produced
+    byte-identical stages under an identical config share a hash, and any
+    change to the corpus, the config or the code moves it.
+    """
+    stage_dir = config.output_dir / run_id / "swebench"
+    stage_files = {
+        "raw": "raw.jsonl",
+        "validated": "validated.jsonl",
+        "cleaned": "cleaned.jsonl",
+        "train": "train.jsonl",
+        "val": "val.jsonl",
+        "test": "test.jsonl",
+        "golden": "golden.jsonl",
+        "validation_errors": "validation_errors.jsonl",
+    }
+    return {
+        "run_id": run_id,
+        "source": "swebench",
+        "git_sha": git_sha,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "stages": {
+            name: {"records": len(stages[name]), **_file_digest(stage_dir / filename)}
+            for name, filename in stage_files.items()
+            if stages.get(name)
+        },
+        "config": config.model_dump(mode="json", exclude={"wandb_api_key", "gcs_bucket"}),
+    }
 
 
 # Checkpoint helpers
@@ -574,14 +627,15 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
     stages["validated"] = [IssueRecord(**d) for d in validated_dicts]
 
     wandb_artifacts: dict[str, str] = {}
+    manifest = _build_manifest(config, run_id, stages, stats, os.environ.get("GIT_SHA", ""))
+    manifest_hash = _manifest_hash(manifest)
     if _stage_enabled(config, "version"):
         try:
-            mft_hash = _manifest_hash({})
             wandb_artifacts = version.log_dataset_artifacts(
                 run_id,
                 stages,
                 config,
-                mft_hash,
+                manifest_hash,
                 stats=stats.model_dump(),
             )
         except Exception as exc:
@@ -595,7 +649,7 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
             gcs_paths = archive.upload_to_gcs(
                 run_id,
                 stages,
-                {},
+                manifest,
                 "",
                 config,
             )
@@ -606,7 +660,7 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
 
     # Dataset Card
     dataset_card_md = card.generate_dataset_card(
-        manifest={},
+        manifest=manifest,
         stats=stats,
         run_id=run_id,
         git_sha=os.environ.get("GIT_SHA", ""),
@@ -671,7 +725,7 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
 
     return PipelineResult(
         run_id=run_id,
-        manifest_hash=_manifest_hash({}),
+        manifest_hash=manifest_hash,
         splits=splits,
         stats=stats,
         gcs_paths=gcs_paths,
