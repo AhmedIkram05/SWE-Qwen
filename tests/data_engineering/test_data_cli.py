@@ -29,13 +29,11 @@ class TestCli:
         result = runner.invoke(app, ["config"])
         assert result.exit_code == 0
         data = json.loads(result.stdout)
-        assert data["batch_size"] == 50
-        assert data["max_issues_per_repo"] == 2000
+        assert data["max_patch_lines"] == 500
         assert data["wandb_project"] == "swe-qwen-data"
         assert data["train_ratio"] == 0.8
         assert data["val_ratio"] == 0.1
         assert data["test_ratio"] == 0.1
-        assert data["parallel_workers"] == 1
         assert data["bigquery_enabled"] is False
         assert data["resume_from"] is None
         assert data["enabled_stages"] is None
@@ -146,12 +144,6 @@ class TestCli:
                     "/tmp/swe",
                     "--output",
                     "/tmp/out",
-                    "--max-issues",
-                    "500",
-                    "--parallel-workers",
-                    "4",
-                    "--batch-size",
-                    "25",
                     "--max-patch-lines",
                     "300",
                     "--min-golden",
@@ -172,9 +164,6 @@ class TestCli:
             cfg = m.call_args[0][0]
             assert str(cfg.swe_bench_dir) == "/tmp/swe"
             assert str(cfg.output_dir) == "/tmp/out"
-            assert cfg.max_issues_per_repo == 500
-            assert cfg.parallel_workers == 4
-            assert cfg.batch_size == 25
             assert cfg.max_patch_lines == 300
             assert cfg.min_golden_examples == 100
             assert cfg.resume_from == "validated"
@@ -241,25 +230,24 @@ class TestCli:
         with mock.patch("data_engineering.cli.run_pipeline", return_value=mock_result) as m:
             runner.invoke(app, ["run"])
             cfg = m.call_args[0][0]
-            assert cfg.batch_size == 50
-            assert cfg.max_issues_per_repo == 2000
-            assert cfg.parallel_workers == 1
+            assert cfg.max_patch_lines == 500
+            assert cfg.min_golden_examples == 100
             assert cfg.train_ratio == 0.8
             assert cfg.val_ratio == 0.1
             assert cfg.test_ratio == 0.1
 
     def test_config_shows_env_overrides(self, monkeypatch) -> None:
         """config subcommand should reflect DATA_PIPELINE_ env vars."""
-        monkeypatch.setenv("DATA_PIPELINE_BATCH_SIZE", "999")
+        monkeypatch.setenv("DATA_PIPELINE_MAX_PATCH_LINES", "999")
         monkeypatch.setenv("DATA_PIPELINE_WANDB_PROJECT", "env-override")
         result = runner.invoke(app, ["config"])
         assert result.exit_code == 0
         data = json.loads(result.stdout)
-        assert data["batch_size"] == 999
+        assert data["max_patch_lines"] == 999
         assert data["wandb_project"] == "env-override"
 
     def test_run_command_zero_values(self) -> None:
-        """run accepts edge values like min-golden 0, batch-size 1."""
+        """run accepts edge values like min-golden 0."""
         mock_result = PipelineResult(
             run_id="s",
             manifest_hash="h",
@@ -267,7 +255,7 @@ class TestCli:
             stats=PipelineStats(),
         )
         with mock.patch("data_engineering.cli.run_pipeline", return_value=mock_result):
-            result = runner.invoke(app, ["run", "--min-golden", "0", "--batch-size", "1"])
+            result = runner.invoke(app, ["run", "--min-golden", "0"])
         assert result.exit_code == 0
 
     # ── Augmentation flags ────────────────────────────────────────────────
