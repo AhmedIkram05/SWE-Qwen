@@ -53,7 +53,7 @@ def resolve_checkpoint_path(  # noqa: PLR0911, PLR0912
         return str(local_path.resolve())
 
     # If it looks like a W&B artifact ref (contains `/` and `:` or starts with `entity/`)
-    is_wandb_ref = "/" in resume_spec and ":" in resume_spec or resume_spec.count("/") >= 1
+    is_wandb_ref = ("/" in resume_spec and ":" in resume_spec) or resume_spec.startswith("entity/")
 
     if not is_wandb_ref and resume_spec.lower() != "latest":
         # It's a local path that doesn't exist — try under local_volume_path
