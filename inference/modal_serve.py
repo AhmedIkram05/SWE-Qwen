@@ -16,13 +16,16 @@ base + vLLM cache) pays for cold starts.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 import modal
 from fastapi import FastAPI
 
+from inference import serve
 from inference.config import ServeConfig
 from inference.serve import VLLMEngine, create_app
+from inference.telemetry import finish_wandb, run_flush_loop
 from observability.logging import configure_logging
 from registry.loader import default_model_key, load_raw_models
 
@@ -191,11 +194,30 @@ class ModelServer:
     """
 
     _engine: VLLMEngine
+    _stop_event: threading.Event
 
     @modal.enter()
     def enter(self) -> None:
         configure_logging()
-        self._engine = VLLMEngine(ServeConfig())
+        config = ServeConfig()
+        self._engine = VLLMEngine(config)
+        # Phase 8 (decisions 8/9 + Langfuse drain): the flush loop must run in
+        # the container. ``serve._collector`` is the module-level singleton
+        # ``create_app`` records requests into, so serving metrics, cost, SLO
+        # burn, alerts and traced requests actually reach W&B + Langfuse.
+        self._stop_event = threading.Event()
+        threading.Thread(
+            target=run_flush_loop,
+            args=(serve._collector, config, self._stop_event),
+            name="telemetry-flush",
+            daemon=True,
+        ).start()
+
+    @modal.exit()
+    def teardown(self) -> None:
+        """Stop the flush loop and finish the W&B run (Modal skips atexit)."""
+        self._stop_event.set()
+        finish_wandb()
 
     @modal.asgi_app()
     def web(self) -> FastAPI:

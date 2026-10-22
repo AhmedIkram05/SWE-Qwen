@@ -245,6 +245,7 @@ _fake_modal.NetworkFileSystem = _FakeNetworkFileSystem
 _fake_modal.Retries = _FakeRetries
 _fake_modal.concurrent = _passthrough_decorator
 _fake_modal.enter = _passthrough_decorator
+_fake_modal.exit = _passthrough_decorator
 _fake_modal.asgi_app = _passthrough_decorator
 
 

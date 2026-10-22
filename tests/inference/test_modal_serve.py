@@ -7,11 +7,13 @@ No cloud, no GPU, no network.
 
 import asyncio
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
 
 from inference import modal_serve
+from inference.config import ServeConfig
 from inference.serve import GenerationResult
 
 pytestmark = pytest.mark.unit
@@ -73,9 +75,35 @@ class TestBuildSmoke:
 class TestModelServer:
     def test_enter_constructs_engine(self, mocker):
         mocker.patch("inference.modal_serve.VLLMEngine", return_value="ENGINE")
+        mocker.patch("inference.modal_serve.threading.Thread")
         server = modal_serve.ModelServer()
         server.enter()  # type: ignore[attr-defined]
         assert server._engine == "ENGINE"
+
+    def test_enter_starts_telemetry_flush_thread(self, mocker):
+        mocker.patch("inference.modal_serve.VLLMEngine", return_value="ENGINE")
+        thread_cls = mocker.patch("inference.modal_serve.threading.Thread")
+        server = modal_serve.ModelServer()
+        server.enter()  # type: ignore[attr-defined]
+        kwargs = thread_cls.call_args.kwargs
+        assert kwargs["target"] is modal_serve.run_flush_loop
+        collector, config, stop_event = kwargs["args"]
+        assert collector is modal_serve.serve._collector
+        assert isinstance(config, ServeConfig)
+        assert isinstance(stop_event, threading.Event)
+        assert kwargs["daemon"] is True
+        thread_cls.return_value.start.assert_called_once()
+
+    def test_teardown_stops_loop_and_finishes_wandb(self, mocker):
+        mocker.patch("inference.modal_serve.VLLMEngine", return_value="ENGINE")
+        mocker.patch("inference.modal_serve.threading.Thread")
+        finish = mocker.patch("inference.modal_serve.finish_wandb")
+        server = modal_serve.ModelServer()
+        server.enter()  # type: ignore[attr-defined]
+        assert not server._stop_event.is_set()
+        server.teardown()  # type: ignore[attr-defined]
+        assert server._stop_event.is_set()
+        finish.assert_called_once_with()
 
     def test_web_returns_create_app_result(self, mocker):
         mocker.patch("inference.modal_serve.create_app", return_value="APP")
