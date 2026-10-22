@@ -297,13 +297,3 @@ def _build_fallback(
     tokenizer.padding_side = "right"
 
     return model, tokenizer
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Fallback mapping (for documentation/debugging)
-# ──────────────────────────────────────────────────────────────────────────────
-FALLBACK_MAP = {
-    "FastLanguageModel.from_pretrained": "AutoModelForCausalLM.from_pretrained + prepare_model_for_kbit_training",  # noqa: E501
-    "FastLanguageModel.get_peft_model": "get_peft_model(model, LoraConfig(...))",
-    "FastLanguageModel.for_inference": "model.eval() + model.merge_and_unload() if needed",
-}
