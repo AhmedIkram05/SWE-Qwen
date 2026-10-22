@@ -200,9 +200,6 @@ _STAGE_MAP = {
     "tokenize": "tokenize",
 }
 
-# Reverse map: human-readable -> file-stage name
-_HUMAN_TO_FILE = {v: k for k, v in _STAGE_MAP.items()}
-
 
 def _stage_enabled(config: DataPipelineConfig, stage: str) -> bool:
     """Check if stage is in the enabled-stages whitelist.

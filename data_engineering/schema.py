@@ -141,12 +141,6 @@ class CleanStats(BaseModel):
     warnings_non_python: list[str] = []
 
 
-class SplitRatios(BaseModel):
-    train: float = 0.8
-    val: float = 0.1
-    test: float = 0.1
-
-
 class Splits(BaseModel):
     train: list[IssueRecord] = []
     val: list[IssueRecord] = []

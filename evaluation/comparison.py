@@ -33,7 +33,6 @@ _MIN_P2P_RATE = 0.90
 
 # W&B artifact name/type for persisted eval runs (JSONL of EvalResult).
 _ARTIFACT_NAME = "eval-results-{run_id}"
-_ARTIFACT_TYPE = "eval_results"
 
 # Fallback proxy champion when P4 scoring inputs are unavailable.
 # Now configurable via EvalConfig.proxy_champion_fallback (default: "baseline_14b")

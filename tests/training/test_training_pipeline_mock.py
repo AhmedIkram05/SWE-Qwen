@@ -131,6 +131,18 @@ class TestResume:
         assert result is not None
         assert "checkpoint-500" in result
 
+    def test_resume_local_subpath_under_volume(self, mocker, tmp_path):
+        """A relative path containing "/" is local, not a W&B artifact ref."""
+        mocker.patch("wandb.Api", side_effect=ImportError("no wandb"))
+        from training.resume import resolve_checkpoint_path
+
+        vol_path = tmp_path / "models"
+        ckpt = vol_path / "runs" / "checkpoint-500"
+        ckpt.mkdir(parents=True)
+
+        result = resolve_checkpoint_path("runs/checkpoint-500", local_volume_path=str(vol_path))
+        assert result == str(ckpt.resolve())
+
     def test_resume_latest_no_wandb_run(self, mocker):
         """'latest' without active W&B run returns None."""
         mocker.patch("wandb.run", None)
