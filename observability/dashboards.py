@@ -19,8 +19,6 @@ from observability.slo import SLO_TARGETS
 
 # The four panel types the plan allows. Only "line", "bar" and "custom" are in
 # use; "run-table" is reserved (no spec currently needs it).
-_PANEL_TYPES = ("line", "bar", "run-table", "custom")
-_AGG_FUNCS = ("mean", "min", "max", "median", "sum", "samples")
 
 PanelType = Literal["line", "bar", "run-table", "custom"]
 AggFunc = Literal["mean", "min", "max", "median", "sum", "samples"]
