@@ -9,6 +9,7 @@ Covers the pure helpers exhaustively (``extract_patch``, ``_files_from_diff``,
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import types
 from collections.abc import Iterator
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from unidiff.patch import PatchSet
 
 from evaluation.config import EvalConfig
 from evaluation.inference import (
@@ -205,6 +207,131 @@ class TestExtractPatch:
         patch, failed = extract_patch_with_flag(text)
         assert failed is False
         assert patch == "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+
+
+# ── hunk-body preservation (audit finding 1 regression) ────────────────────
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+
+class TestHunkBodyPreserved:
+    """Hunk-body bytes must survive normalization unchanged.
+
+    A unified-diff context line *is* ``" code"`` — the leading space is the
+    line-type marker. Stripping hunk bodies corrupts every real patch:
+    ``git apply`` fails with "corrupt patch" and the unidiff fallback raises
+    UnidiffParseError (audit finding 1, regression since 4fc1d9b).
+    """
+
+    UNIFIED_DIFF = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " line1\n"
+        "-line2\n"
+        "+line2-fixed\n"
+        " line3\n"
+    )
+
+    def test_hunk_body_byte_identical(self):
+        patch, failed = extract_patch_with_flag("```diff\n" + self.UNIFIED_DIFF + "```")
+        assert failed is False
+        assert patch == self.UNIFIED_DIFF
+
+    def test_unidiff_parses_context_lines(self):
+        patch, failed = extract_patch_with_flag("```diff\n" + self.UNIFIED_DIFF + "```")
+        assert failed is False
+        pset = PatchSet(patch)
+        assert len(pset) == 1
+        assert [f"{ln.line_type}{ln.value}".rstrip("\n") for ln in pset[0][0]] == [
+            " line1",
+            "-line2",
+            "+line2-fixed",
+            " line3",
+        ]
+
+    def test_git_apply_check_accepts_extracted_patch(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-b", "main")
+        _git(repo, "config", "user.email", "t@t")
+        _git(repo, "config", "user.name", "t")
+        (repo / "app.py").write_text("line1\nline2\nline3\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "base")
+        patch, failed = extract_patch_with_flag("```diff\n" + self.UNIFIED_DIFF + "```")
+        assert failed is False
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "apply", "--check", "-"],
+            input=patch,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def test_header_normalization_still_applies(self):
+        text = (
+            "Here is the fix:\n"
+            "```diff\n"
+            "--- src/app.py\n"
+            "+++ src/app.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " line1\n"
+            "-line2\n"
+            "+line2-fixed\n"
+            " line3\n"
+            "```"
+        )
+        patch, failed = extract_patch_with_flag(text)
+        assert failed is False
+        assert patch == (
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " line1\n"
+            "-line2\n"
+            "+line2-fixed\n"
+            " line3\n"
+        )
+
+    def test_multifile_second_header_still_normalized(self):
+        # The body->header reset on the next file's ``diff --git`` must
+        # survive the fix: a second file section still gets a/b prefixes.
+        # (Fenced, since the no-fence path takes only the LAST diff --git.)
+        text = (
+            "```diff\n"
+            "diff --git a/x.py b/x.py\n"
+            "--- x.py\n"
+            "+++ x.py\n"
+            "@@ -1 +1 @@\n"
+            "-a\n"
+            "+b\n"
+            "diff --git a/y.py b/y.py\n"
+            "--- y.py\n"
+            "+++ y.py\n"
+            "@@ -1 +1 @@\n"
+            "-c\n"
+            "+d\n"
+            "```"
+        )
+        assert extract_patch(text) == (
+            "diff --git a/x.py b/x.py\n"
+            "--- a/x.py\n"
+            "+++ b/x.py\n"
+            "@@ -1 +1 @@\n"
+            "-a\n"
+            "+b\n"
+            "diff --git a/y.py b/y.py\n"
+            "--- a/y.py\n"
+            "+++ b/y.py\n"
+            "@@ -1 +1 @@\n"
+            "-c\n"
+            "+d\n"
+        )
 
 
 # ── _files_from_diff ───────────────────────────────────────────────────────
