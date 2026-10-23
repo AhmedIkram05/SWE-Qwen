@@ -234,8 +234,9 @@ class TestRunPipeline:
     @patch("data_engineering.tokenize.tokenize_pipeline")
     @patch("data_engineering.run_pipeline.swebench_ingest.ingest_swebench")
     @patch("data_engineering.run_pipeline.validate.validate_batch")
+    @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
     def test_validate_only_completes(
-        self, mock_validate, mock_ingest, mock_tokenize, tmp_path
+        self, mock_validate_auth, mock_validate, mock_ingest, mock_tokenize, tmp_path
     ) -> None:
         """Validate-only config completes: no 0-cleaned raise, tokenize not run."""
         rec = _make_record("test#1")
