@@ -541,7 +541,10 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
     repo_results[0].raw_count = len(raw_dicts)
     repo_results[0].validated_count = len(validated_dicts)
 
-    if not all_cleaned:
+    # A validate-only run (clean stage disabled) legitimately ends with 0
+    # cleaned records — the validated output is the run's product. Treat an
+    # empty result as fatal only when the clean stage was supposed to run.
+    if not all_cleaned and _stage_enabled(config, "cleaned"):
         raise RuntimeError("Pipeline produced 0 cleaned records. Check per-repo logs.")
 
     # Split

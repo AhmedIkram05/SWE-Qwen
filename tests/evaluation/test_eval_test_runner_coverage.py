@@ -1353,6 +1353,132 @@ class TestExecuteInstance:
         assert resets == ["sha"]
 
 
+class TestPatchTamperGuard:
+    """_execute_instance rejects patches that touch the tests they are graded on."""
+
+    _TEST_PATCH = "--- a/tests/test_foo.py\n+++ b/tests/test_foo.py\n"
+    _BENIGN_PATCH = "--- a/src/mod.py\n+++ b/src/mod.py\n"
+
+    def _setup(self, monkeypatch, tmp_path):
+        """Same seams as TestExecuteInstance._setup, plus an apply recorder."""
+        import evaluation.metrics
+        import evaluation.patch_applier
+
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir(parents=True)
+        monkeypatch.setattr(tr, "_reset_to_base", lambda d, s: None)
+        state = {"n": 0}
+
+        def fake_collect(*a, **k):
+            state["n"] += 1
+            status = "failed" if state["n"] == 1 else "passed"
+            return [TestResult(name="test_a", status=status, duration=0.1)]
+
+        monkeypatch.setattr(tr, "collect_test_results", fake_collect)
+        monkeypatch.setattr(evaluation.metrics, "compute_f2p", lambda *a: (1.0, 1.0, 1, 1))
+        applied: list[str] = []
+
+        def fake_apply(repo_path, patch, base_sha, skip_checkout=False):
+            applied.append(patch)
+            return _fake_apply(True)
+
+        monkeypatch.setattr(evaluation.patch_applier, "apply_patch", fake_apply)
+        return repo_dir, applied
+
+    def _errored_shape(self, name: str) -> dict:
+        return {
+            "name": name,
+            "status": "errored",
+            "duration": 0.0,
+            "output": "patch touches test files",
+            "retry_count": 0,
+        }
+
+    def test_benign_patch_applies(self, tmp_path, monkeypatch):
+        repo_dir, applied = self._setup(monkeypatch, tmp_path)
+        result = tr._execute_instance(
+            repo_dir,
+            "sha",
+            self._TEST_PATCH,
+            self._BENIGN_PATCH,
+            ["test_a"],
+            [],
+            timeout=30,
+            max_retries=2,
+        )
+        assert result["error"] is None
+        assert result["patch_application"]["success"] is True
+        assert result["tests_after"][0]["status"] == "passed"
+        # order: test_patch (ground truth) → test_patch (final phase) → generated
+        assert applied == [self._TEST_PATCH, self._TEST_PATCH, self._BENIGN_PATCH]
+
+    def test_patch_touching_graded_test_file_rejected(self, tmp_path, monkeypatch):
+        repo_dir, applied = self._setup(monkeypatch, tmp_path)
+        result = tr._execute_instance(
+            repo_dir,
+            "sha",
+            self._TEST_PATCH,
+            self._TEST_PATCH,  # generated patch edits the same test file
+            ["test_a"],
+            [],
+            timeout=30,
+            max_retries=2,
+        )
+        assert result["patch_application"] == {
+            "success": False,
+            "method_used": "failed",
+            "error": "patch touches test files",
+            "files_modified": [],
+        }
+        assert result["tests_after"] == [self._errored_shape("test_a")]
+        assert result["error"] is None
+        # only the ground-truth apply ran; final phase applies nothing
+        assert applied == [self._TEST_PATCH]
+
+    @pytest.mark.parametrize(
+        "path",
+        ["conftest.py", "tests/conftest.py", "conftest/helpers.py"],
+    )
+    def test_patch_adding_conftest_rejected(self, tmp_path, monkeypatch, path):
+        repo_dir, applied = self._setup(monkeypatch, tmp_path)
+        generated = f"--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+x\n"
+        result = tr._execute_instance(
+            repo_dir,
+            "sha",
+            self._TEST_PATCH,
+            generated,
+            ["test_a"],
+            [],
+            timeout=30,
+            max_retries=2,
+        )
+        assert result["patch_application"]["success"] is False
+        assert result["patch_application"]["error"] == "patch touches test files"
+        assert result["tests_after"] == [self._errored_shape("test_a")]
+        assert applied == [self._TEST_PATCH]
+
+    def test_multi_file_patch_with_one_test_file_rejected(self, tmp_path, monkeypatch):
+        repo_dir, applied = self._setup(monkeypatch, tmp_path)
+        generated = (
+            self._BENIGN_PATCH
+            + "--- a/tests/test_foo.py\n+++ b/tests/test_foo.py\n@@ -1 +1 @@\n-a\n+b\n"
+        )
+        result = tr._execute_instance(
+            repo_dir,
+            "sha",
+            self._TEST_PATCH,
+            generated,
+            ["test_a"],
+            [],
+            timeout=30,
+            max_retries=2,
+        )
+        assert result["patch_application"]["success"] is False
+        assert result["patch_application"]["error"] == "patch touches test files"
+        assert result["tests_after"] == [self._errored_shape("test_a")]
+        assert applied == [self._TEST_PATCH]  # all-or-nothing: benign file not applied
+
+
 # ── run_tests_in_container (via .local()) ───────────────────────────────────
 
 

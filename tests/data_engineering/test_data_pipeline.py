@@ -231,6 +231,36 @@ class TestRunPipeline:
             with pytest.raises(RuntimeError, match="0 cleaned records"):
                 run_pipeline(config)
 
+    @patch("data_engineering.tokenize.tokenize_pipeline")
+    @patch("data_engineering.run_pipeline.swebench_ingest.ingest_swebench")
+    @patch("data_engineering.run_pipeline.validate.validate_batch")
+    @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
+    def test_validate_only_completes(
+        self, mock_validate_auth, mock_validate, mock_ingest, mock_tokenize, tmp_path
+    ) -> None:
+        """Validate-only config completes: no 0-cleaned raise, tokenize not run."""
+        rec = _make_record("test#1")
+        mock_ingest.return_value = [rec]
+        mock_validate.return_value = ([rec], [])
+
+        config = DataPipelineConfig(
+            output_dir=tmp_path,
+            bigquery_enabled=False,
+            augment_codecontests=False,
+            augment_codealpaca=False,
+            enabled_stages=["ingest", "validate"],
+            run_id_override="run123",
+        )
+        with patch.dict("sys.modules", {"wandb": _mock_wandb()}):
+            result = run_pipeline(config)
+
+        assert result.stats.total_validated == 1
+        assert result.stats.total_cleaned == 0
+        validated_path = _checkpoint_dir(config, "run123", "swebench") / "validated.jsonl"
+        assert validated_path.exists()
+        assert "test#1" in validated_path.read_text()
+        mock_tokenize.assert_not_called()
+
     @patch("data_engineering.run_pipeline.run_pipeline_swebench")
     @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
     @pytest.mark.slow
