@@ -185,22 +185,31 @@ def _normalize_patch_prefixes(patch: str) -> str:
     """Normalize ---/+++ headers to a/b prefixes; strip whitespace; trailing newline.
 
     Only header-position lines (before the first ``@@`` hunk of a file
-    section) are rewritten: a ``--- `` line inside a hunk body is deleted
-    content (a removed line starting with ``-- ``) and must be left alone.
+    section) are rewritten and whitespace-stripped: a ``--- `` line inside a
+    hunk body is deleted content (a removed line starting with ``-- ``) and
+    must be left alone. Hunk bodies pass through verbatim — a context line
+    *is* ``" code"`` (the leading space is the line-type marker), so stripping
+    it corrupts the patch for ``git apply`` and unidiff alike.
     """
     out: list[str] = []
     in_header = True  # before the first @@ hunk of the current file section
     for line in patch.strip().splitlines():
+        if not in_header:
+            # Hunk body: the leading line-type marker (space/-/+/\) is
+            # significant — a context line *is* " code". Emit verbatim; a
+            # bare ``diff --git`` at column 0 starts the next file section.
+            if line.startswith("diff --git"):
+                in_header = True
+            out.append(line)
+            continue
         s = line.strip()
-        if s.startswith("diff --git"):
-            in_header = True
-        elif s.startswith("@@"):
+        if s.startswith("@@"):
             in_header = False
-        elif in_header and s.startswith("--- "):
+        elif s.startswith("--- "):
             rest = s[4:].strip()
             if rest and rest != "/dev/null" and not rest.startswith(("a/", '"a/')):
                 s = "--- a/" + rest.lstrip("/")
-        elif in_header and s.startswith("+++ "):
+        elif s.startswith("+++ "):
             rest = s[4:].strip()
             if rest and rest != "/dev/null" and not rest.startswith(("b/", '"b/')):
                 s = "+++ b/" + rest.lstrip("/")
