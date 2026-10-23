@@ -1124,6 +1124,37 @@ def swebench_image_exists(instance_id: str) -> bool:
     return _swebench_image_tag_exists(munge_instance_id(instance_id))
 
 
+def _normalized_patch_path(path: str) -> str:
+    """Normalize a diff path for comparison (strip leading ``a/``, ``b/``, ``./``)."""
+    while path.startswith(("a/", "b/", "./")):
+        path = path[2:]
+    return path
+
+
+def _test_tamper_error(generated_patch: str, test_patch: str | None) -> str | None:
+    """Return a rejection error when a generated patch could tamper with grading.
+
+    The generated patch must never touch a file the ground-truth ``test_patch``
+    changes, any ``conftest.py``, or anything under a ``conftest/`` directory:
+    such a patch could neuter or spoof the tests it is graded on and score
+    F2P=1.0 without fixing anything. All-or-nothing: one offending file
+    rejects the whole patch.
+    """
+    from data_engineering.diff_utils import parse_files
+
+    test_files: set[str] = (
+        {_normalized_patch_path(p) for p in parse_files(test_patch)} if test_patch else set()
+    )
+    for raw in parse_files(generated_patch):
+        path = _normalized_patch_path(raw)
+        if path in test_files:
+            return "patch touches test files"
+        segments = path.split("/")
+        if segments[-1] == "conftest.py" or "conftest" in segments[:-1]:
+            return "patch touches test files"
+    return None
+
+
 def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
     repo_dir: Path,
     base_sha: str,
@@ -1290,7 +1321,32 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
         }
 
     tests_after: list[TestResult] = []
-    if generated_patch:
+    tamper_error = _test_tamper_error(generated_patch, test_patch) if generated_patch else None
+    if generated_patch and tamper_error is not None:
+        logger.warning(
+            "generated patch rejected for %s: %s",
+            repo_dir,
+            tamper_error,
+        )
+        # Same patch-failure semantics as a failed apply below: the tree stays
+        # untouched and every requested test reports errored, so downstream
+        # metrics treat tampering like any non-applying patch.
+        patch_result = PatchApplicationResult(
+            success=False,
+            method_used="failed",
+            error=tamper_error,
+        )
+        tests_after = [
+            TestResult(
+                name=n,
+                status="errored",
+                duration=0.0,
+                output=tamper_error,
+                retry_count=0,
+            )
+            for n in test_names
+        ]
+    elif generated_patch:
         if test_patch:
             apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
         patch_result = apply_patch(repo_dir, generated_patch, base_sha, skip_checkout=True)
