@@ -228,7 +228,8 @@ class TestSWEBenchPipelineIntegration:
             config.output_dir = Path(tmp)
             config.resume_from = None
             run_id = "test_run_123"
-            cleaned = run_pipeline_swebench(config, run_id, None)
+            phase = run_pipeline_swebench(config, run_id, None)
+            cleaned = phase.cleaned
 
         assert len(cleaned) >= 0  # May be 0 if cleaning removes it (no test files)
         # If record has test_files_changed, it should survive

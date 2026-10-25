@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from inference import prompt_builder
 from inference.config import ServeConfig
-from inference.serve import StubEngine, create_app
+from inference.serve import GenerationResult, StubEngine, create_app
 
 
 class _FakeTokenizer:
@@ -117,6 +117,56 @@ class TestChatCompletions:
         assert deltas[-1] == {}
         assert frames[-1]["choices"][0]["finish_reason"] == "stop"
 
+    def test_stream_preserves_whitespace_verbatim(self, config):
+        """Audit finding 9: streamed deltas concatenate to the exact text.
+
+        OpenAI clients concatenate ``delta.content`` as-is; word-splitting
+        the delta destroyed every space and newline — fatal for patches.
+        """
+        full_text = "def f():\n    return x  # keep  spacing"
+
+        class ChunkyEngine:
+            async def generate(  # noqa: PLR0913
+                self,
+                prompt,
+                *,
+                lora,
+                max_tokens,
+                temperature,
+                top_p,
+                stop,
+                repetition_penalty,
+            ):
+                # CUMULATIVE text, split at awkward points (incl. whitespace).
+                for cut in (5, 10, 11, 18, len(full_text)):
+                    yield GenerationResult(
+                        text=full_text[:cut],
+                        prompt_tokens=1,
+                        completion_tokens=cut,
+                        finished=cut >= len(full_text),
+                    )
+
+        from inference.serve import create_app
+
+        client = TestClient(create_app(ChunkyEngine(), config))
+        response = client.post(
+            "/v1/chat/completions",
+            json=self._payload(stream=True),
+            headers={"Authorization": "Bearer test-token-123"},
+        )
+        assert response.status_code == 200
+        frames = [
+            json.loads(line.removeprefix("data: ").rstrip("\n"))
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        content = "".join(
+            frame["choices"][0]["delta"].get("content", "")
+            for frame in frames
+            if frame["choices"][0]["delta"]
+        )
+        assert content == full_text
+
     def test_unknown_model_404(self, client):
         response = client.post(
             "/v1/chat/completions",
@@ -167,4 +217,44 @@ class TestChatCompletions:
         body = response.json()
         assert "error" in body
         assert "detail" not in body
+        assert body["error"]["type"] == "server_error"
+
+    def test_engine_error_midstream_returns_500_not_partial(self, config):
+        """Audit finding 10: partial text + mid-generation error → 500.
+
+        ``engine.generate`` yields CUMULATIVE text; returning the last yield
+        after an exception would hand clients a truncated patch labelled
+        ``finish_reason="stop"`` — a half-applied diff beats a loud failure
+        for nobody.
+        """
+
+        class MidStreamFailureEngine:
+            async def generate(  # noqa: PLR0913
+                self,
+                prompt,
+                *,
+                lora,
+                max_tokens,
+                temperature,
+                top_p,
+                stop,
+                repetition_penalty,
+            ):
+                yield GenerationResult(
+                    text="--- a/f\n+++ b/f\n@@ -1 +1 @@\n",
+                    prompt_tokens=1,
+                    completion_tokens=8,
+                    finished=False,
+                )
+                raise RuntimeError("engine died mid-generation")
+
+        client = TestClient(create_app(MidStreamFailureEngine(), config))
+        response = client.post(
+            "/v1/chat/completions",
+            json=self._payload(),
+            headers={"Authorization": "Bearer test-token-123"},
+        )
+        assert response.status_code == 500
+        body = response.json()
+        assert "error" in body
         assert body["error"]["type"] == "server_error"

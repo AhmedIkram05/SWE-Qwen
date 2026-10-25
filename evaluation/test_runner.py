@@ -174,6 +174,19 @@ def _bare_test_name(name: str) -> str:
     return name
 
 
+def _nodeid_matches_name(nodeid: str, name: str) -> bool:
+    """Shared node-id ↔ requested-name matcher for both report paths.
+
+    Used by the JSON-report attribution and the stdout-fallback attribution
+    so a request name resolves identically regardless of which report pytest
+    produced (audit finding 11).
+    """
+    bare = _bare_test_name(name)
+    if not bare:
+        return False
+    return bare == nodeid or nodeid.endswith(bare) or nodeid in name
+
+
 def _quote_k_name(name: str) -> str:
     """Sanitize one test name into a bare pytest ``-k`` ident token.
 
@@ -268,14 +281,13 @@ def _attempts_from_report(
     by_name: dict[str, _Attempt] = {}
     used: set[int] = set()
     for name in test_names:
-        bare = _bare_test_name(name)
-        if not bare:
+        if not _bare_test_name(name):
             continue
         for idx, test in enumerate(tests):
             if idx in used or not isinstance(test, dict):
                 continue
             nodeid = str(test.get("nodeid", ""))
-            if bare == nodeid or nodeid.endswith(bare) or nodeid in name:
+            if _nodeid_matches_name(nodeid, name):
                 by_name[name] = _attempt_from_report_test(test)
                 used.add(idx)
                 break
@@ -296,19 +308,46 @@ def _attempts_from_report(
     return by_name, nodeids
 
 
-def _parse_stdout_report(stdout: str) -> dict[str, _Attempt] | None:
-    """Fallback: parse ``pytest -rA`` summary lines when the JSON report is missing."""
-    attempts: dict[str, _Attempt] = {}
+def _parse_stdout_report(
+    stdout: str,
+    test_names: list[str],
+) -> dict[str, _Attempt] | None:
+    """Fallback: parse ``pytest -rA`` summary lines when the JSON report is missing.
+
+    With requested *test_names*, attempts are keyed by the REQUESTED names
+    (via the same ``_nodeid_matches_name`` matcher as the JSON-report path),
+    because ``collect_test_results`` looks results up by request name —
+    keying by raw node ID made every lookup miss and scored the whole run
+    as errored (audit finding 11). With empty *test_names* (full-suite
+    baseline) results stay keyed by node ID, per the ``_run_pytest_once``
+    contract.
+    """
+    by_nodeid: dict[str, _Attempt] = {}
     for line in stdout.splitlines():
         status, _, nodeid = line.partition(" ")
-        if not status or not nodeid or status not in _OUTCOME_TO_STATUS:
+        # ``pytest -rA`` summary lines are UPPERCASE (``PASSED path::test``);
+        # the map is lowercase-keyed, so normalize before lookup.
+        outcome = status.lower()
+        if not status or not nodeid or outcome not in _OUTCOME_TO_STATUS:
             continue
-        outcome = status
-        attempts[nodeid] = {
+        by_nodeid[nodeid] = {
             "status": _OUTCOME_TO_STATUS[outcome],
             "duration": 0.0,
             "output": line,
         }
+    if not by_nodeid:
+        return None
+    if not test_names:
+        return by_nodeid
+    attempts: dict[str, _Attempt] = {}
+    used: set[str] = set()
+    for name in test_names:
+        for nodeid, attempt in by_nodeid.items():
+            if nodeid in used or not _nodeid_matches_name(nodeid, name):
+                continue
+            attempts[name] = attempt
+            used.add(nodeid)
+            break
     return attempts or None
 
 
@@ -627,7 +666,7 @@ def _run_pytest_once(  # noqa: PLR0912, PLR0915
             proc.returncode,
             (proc.stderr or "")[-2000:],
         )
-        attempts = _parse_stdout_report(proc.stdout)
+        attempts = _parse_stdout_report(proc.stdout, test_names)
         if attempts is not None:
             return attempts, list(attempts)
         return ({n: _errored_attempt("pytest produced no report") for n in test_names}, [])

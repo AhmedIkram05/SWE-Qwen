@@ -16,6 +16,7 @@ import yaml
 import training.callbacks as cbs
 from training.qlora_trainer import (
     QLoRATrainer,
+    latest_checkpoint,
     prepare_run_output_dir,
     resolve_run_output_dir,
 )
@@ -51,27 +52,49 @@ class TestModalOutputDir:
         assert t.output_dir.is_dir()
 
     def test_modal_prepare_cleans_stale_checkpoints(self, tmp_path):
+        """No checkpoint dirs (only stray files) → stale files still cleaned."""
         base = tmp_path / "out"
-        stale_dir = base / "checkpoint-108"
-        stale_dir.mkdir(parents=True)
-        (stale_dir / "adapter_model.safetensors").write_text("stale")
+        base.mkdir(parents=True)
         stale_file = base / "checkpoint-99.txt"
         stale_file.write_text("stale")
 
         result = prepare_run_output_dir(str(base))
 
         assert Path(result).is_dir()
-        assert not (Path(result) / "checkpoint-108").exists()
         assert not (Path(result) / "checkpoint-99.txt").exists()
 
-    def test_modal_prepare_keeps_checkpoints_when_resuming(self, tmp_path):
+    def test_modal_prepare_keeps_checkpoints_without_resume(self, tmp_path, caplog):
+        """Audit finding 7: crash-retry guard.
+
+        A Modal retry re-invokes with resume unset; existing ``checkpoint-*``
+        dirs must survive (they hold the crashed attempt's compute) instead
+        of being rmtree'd.
+        """
         base = tmp_path / "out"
         stale_dir = base / "checkpoint-108"
         stale_dir.mkdir(parents=True)
+        (stale_dir / "adapter_model.safetensors").write_text("precious")
 
-        prepare_run_output_dir(str(base), resume_from_checkpoint=str(stale_dir))
+        with caplog.at_level("WARNING", logger="training.qlora_trainer"):
+            result = prepare_run_output_dir(str(base))
 
+        assert Path(result) == base
         assert stale_dir.is_dir()
+        assert (stale_dir / "adapter_model.safetensors").exists()
+        assert "crash-retry protection" in caplog.text
+
+    def test_modal_latest_checkpoint_picks_newest_step(self, tmp_path):
+        """latest_checkpoint returns the highest-step checkpoint dir only."""
+        base = tmp_path / "out"
+        (base / "checkpoint-20").mkdir(parents=True)
+        (base / "checkpoint-108").mkdir(parents=True)
+        (base / "checkpoint-99.txt").write_text("not a dir")
+        (base / "checkpoint-bogus").mkdir(parents=True)  # unparsable step
+
+        assert latest_checkpoint(base) == str(base / "checkpoint-108")
+
+    def test_modal_latest_checkpoint_empty_returns_none(self, tmp_path):
+        assert latest_checkpoint(tmp_path) is None
 
     def test_modal_resolve_run_output_dir_idempotent(self, tmp_path):
         base = tmp_path / "out"
@@ -109,8 +132,10 @@ class TestCallbackRunFiltering:
         artifact_cls = mocker.patch.object(cbs.wandb, "Artifact")
         artifact = artifact_cls.return_value
         log_artifact = mocker.patch.object(cbs.wandb, "log_artifact")
-        mocker.patch("training.callbacks.time.sleep")
+        # Audit finding 8: the upload runs in a daemon thread; on_train_end
+        # joins pending uploads so assertions are deterministic.
         callback.on_save(_args(base), _state(global_step), SimpleNamespace())
+        callback.on_train_end(_args(base), _state(global_step), SimpleNamespace())
         return artifact_cls, artifact, log_artifact
 
     def test_callback_uploads_current_run_checkpoint_not_stale_max(self, tmp_path, mocker):

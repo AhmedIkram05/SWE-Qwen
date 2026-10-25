@@ -537,19 +537,43 @@ class TestWandbCheckpointCallback:
         result = cb.on_save(args, state, control)
         assert result is None
 
-    def test_on_save_artifact_wait_success(self, mocker, tmp_path):
-        """on_save: artifact.wait() succeeds."""
+    def test_on_save_uploads_in_background_without_blocking(self, mocker, tmp_path):
+        """Audit finding 8: on_save must not block the training loop.
+
+        The upload runs in a daemon thread (parked here on a gate to prove
+        on_save returns before it completes); no ``artifact.wait()`` is ever
+        called, and the snapshot excludes optimizer/scheduler/rng state.
+        """
+        import shutil
+        import threading
+        from pathlib import Path
+
         mock_run = mocker.MagicMock()
         mock_run.name = "test-run"
         mocker.patch("wandb.run", mock_run)
 
         mock_artifact = mocker.MagicMock()
         mocker.patch("wandb.Artifact", return_value=mock_artifact)
-        mocker.patch("wandb.log_artifact")
-        mocker.patch("time.sleep")
+        log_artifact = mocker.patch("wandb.log_artifact")
 
         ckpt_dir = tmp_path / "checkpoint-100"
         ckpt_dir.mkdir()
+        (ckpt_dir / "adapter_model.safetensors").write_text("weights")
+        (ckpt_dir / "optimizer.pt").write_text("bulk")
+        (ckpt_dir / "scheduler.pt").write_text("bulk")
+        (ckpt_dir / "rng_state.pth").write_text("bulk")
+
+        gate = threading.Event()
+        real_copytree = shutil.copytree
+        copied: list[str] = []
+
+        def gated_copytree(src, dst, **k):
+            assert gate.wait(timeout=5), "upload thread never reached copytree"
+            result = real_copytree(src, dst, **k)
+            copied.extend(sorted(p.name for p in Path(dst).iterdir()))
+            return result
+
+        mocker.patch("training.callbacks.shutil.copytree", side_effect=gated_copytree)
 
         from transformers import TrainingArguments
         from transformers.trainer_callback import TrainerControl, TrainerState
@@ -566,22 +590,31 @@ class TestWandbCheckpointCallback:
         control = TrainerControl()
 
         cb.on_save(args, state, control)
+        # Thread is parked on the gate → on_save returned WITHOUT waiting.
+        assert log_artifact.call_count == 0
+        mock_artifact.wait.assert_not_called()
 
-        mock_artifact.wait.assert_called_once_with(timeout=120)
+        gate.set()
+        cb.on_train_end(args, state, control)  # joins the pending upload
 
-    def test_on_save_artifact_wait_exception(self, mocker, tmp_path):
-        """on_save: artifact.wait() raises exception."""
+        log_artifact.assert_called_once()
+        mock_artifact.wait.assert_not_called()
+        # The snapshot copied model weights but not optimizer/scheduler/rng
+        # bulk (the artifact comment's stated intent, now actually true).
+        assert copied == ["adapter_model.safetensors"]
+
+    def test_on_save_upload_failure_never_crashes_training(self, mocker, tmp_path):
+        """A failed background upload is logged, not raised (ckpt stays local)."""
         mock_run = mocker.MagicMock()
         mock_run.name = "test-run"
         mocker.patch("wandb.run", mock_run)
 
-        mock_artifact = mocker.MagicMock()
-        mock_artifact.wait.side_effect = Exception("timeout")
-        mocker.patch("wandb.Artifact", return_value=mock_artifact)
+        mocker.patch("wandb.Artifact", side_effect=Exception("wandb down"))
         mocker.patch("wandb.log_artifact")
 
         ckpt_dir = tmp_path / "checkpoint-50"
         ckpt_dir.mkdir()
+        (ckpt_dir / "adapter_model.safetensors").write_text("weights")
 
         from transformers import TrainingArguments
         from transformers.trainer_callback import TrainerControl, TrainerState
@@ -597,9 +630,9 @@ class TestWandbCheckpointCallback:
         state.log_history = []
         control = TrainerControl()
 
-        cb.on_save(args, state, control)
-
-        mock_artifact.wait.assert_called_once_with(timeout=120)
+        cb.on_save(args, state, control)  # must not raise
+        cb.on_train_end(args, state, control)  # flush — still no raise
+        assert ckpt_dir.is_dir()
 
 
 class TestWandbLoggingCallback:

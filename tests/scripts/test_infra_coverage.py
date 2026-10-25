@@ -196,6 +196,33 @@ class TestBuildModelAndPeft:
         result = build_model_and_peft({"hf_id": "test"}, {"lora": {"r": 8}})
         assert result == ("model_fb", "tok_fb")
 
+    def test_enabled_false_overrides_env_true(self, mocker):
+        """Audit finding 6: the per-call flag must override the env snapshot."""
+        mocker.patch("training.unsloth_factory._UNSLOTH_AVAILABLE", True)
+        mocker.patch("training.unsloth_factory._UNSLOTH_ENABLED", True)
+        mock_build = mocker.patch("training.unsloth_factory._build_with_unsloth")
+        mock_fallback = mocker.patch("training.unsloth_factory._build_fallback")
+        mock_fallback.return_value = ("model_fb", "tok_fb")
+
+        from training.unsloth_factory import build_model_and_peft
+
+        result = build_model_and_peft({"hf_id": "test"}, {"lora": {"r": 8}}, enabled=False)
+        assert result == ("model_fb", "tok_fb")
+        mock_build.assert_not_called()
+        mock_fallback.assert_called_once()
+
+    def test_enabled_true_overrides_env_false(self, mocker):
+        mocker.patch("training.unsloth_factory._UNSLOTH_AVAILABLE", True)
+        mocker.patch("training.unsloth_factory._UNSLOTH_ENABLED", False)
+        mock_build = mocker.patch("training.unsloth_factory._build_with_unsloth")
+        mock_build.return_value = ("model", "tokenizer")
+
+        from training.unsloth_factory import build_model_and_peft
+
+        result = build_model_and_peft({"hf_id": "test"}, {"lora": {"r": 8}}, enabled=True)
+        assert result == ("model", "tokenizer")
+        mock_build.assert_called_once()
+
 
 class TestBuildWithUnsloth:
     """Test _build_with_unsloth config-logic with unsloth mocked."""

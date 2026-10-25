@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import logging
-import time
+import shutil
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,15 @@ from transformers import TrainerCallback, TrainingArguments
 from transformers.trainer_callback import TrainerControl, TrainerState
 
 logger = logging.getLogger(__name__)
+
+# Checkpoint files excluded from the W&B artifact (audit finding 8: the
+# artifact carries model + trainer state, not optimizer/scheduler/rng bulk).
+_ARTIFACT_EXCLUDES = shutil.ignore_patterns(
+    "optimizer.pt*",
+    "scheduler.pt*",
+    "rng_state*.pth",
+    "scaler.pt",
+)
 
 
 class WandbCheckpointCallback(TrainerCallback):
@@ -34,6 +45,7 @@ class WandbCheckpointCallback(TrainerCallback):
 
     def __init__(self, run_id: str | None = None) -> None:
         self.run_id = run_id
+        self._upload_threads: list[threading.Thread] = []
 
     @staticmethod
     def _step_of(path: Path) -> int:
@@ -98,34 +110,63 @@ class WandbCheckpointCallback(TrainerCallback):
             else f"checkpoint-step-{step}"
         )
 
-        artifact = wandb.Artifact(
-            name=artifact_name,
-            type="model_checkpoint",
-            metadata={
-                "step": step,
-                "epoch": state.epoch if state.epoch else 0,
-                "eval_loss": state.log_history[-1].get("eval_loss", None)
-                if state.log_history
-                else None,
-                "global_step": state.global_step,
-                "max_steps": state.max_steps,
-            },
+        metadata = {
+            "step": step,
+            "epoch": state.epoch if state.epoch else 0,
+            "eval_loss": state.log_history[-1].get("eval_loss", None)
+            if state.log_history
+            else None,
+            "global_step": state.global_step,
+            "max_steps": state.max_steps,
+        }
+
+        # Upload in a daemon thread (audit finding 8): on_save runs inside the
+        # training loop, so a blocking artifact.wait() idled the GPU for up to
+        # 120s per save. The checkpoint directory is immutable once written,
+        # so the snapshot can be taken inside the thread. Threads are joined
+        # in on_train_end so the final upload is not lost at process exit.
+        self._upload_threads = [t for t in self._upload_threads if t.is_alive()]
+        thread = threading.Thread(
+            target=self._upload_checkpoint,
+            args=(latest_ckpt, artifact_name, metadata),
+            name=f"wandb-ckpt-upload-step-{step}",
+            daemon=True,
+        )
+        self._upload_threads.append(thread)
+        thread.start()
+        logger.info(
+            "Checkpoint artifact upload started in background: %s (step %d)", artifact_name, step
         )
 
-        # Add the checkpoint directory (all files except optimizer state for size)
-        artifact.add_dir(str(latest_ckpt), name="checkpoint")
-        wandb.log_artifact(artifact)
+    def _upload_checkpoint(
+        self, latest_ckpt: Path, artifact_name: str, metadata: dict[str, Any]
+    ) -> None:
+        """Snapshot *latest_ckpt* (minus optimizer/scheduler/rng state) and upload.
+
+        Runs in a daemon thread. Failures never crash training — the
+        checkpoint is saved locally regardless.
+        """
+        snapshot_parent = Path(tempfile.mkdtemp(prefix="wandb-ckpt-"))
         try:
-            artifact.wait(timeout=120)
-        except Exception:  # WANDB service busy, network blip — don't crash training
-            logger.warning(
-                "W&B artifact wait timed out for %s — checkpoint saved locally, "
-                "artifact may appear later",
-                artifact_name,
+            snapshot = snapshot_parent / latest_ckpt.name
+            shutil.copytree(latest_ckpt, snapshot, ignore=_ARTIFACT_EXCLUDES)
+            artifact = wandb.Artifact(
+                name=artifact_name,
+                type="model_checkpoint",
+                metadata=metadata,
             )
-        else:
-            time.sleep(1)
-            logger.info("Checkpoint artifact logged: %s (step %d)", artifact_name, step)
+            artifact.add_dir(str(snapshot), name="checkpoint")
+            wandb.log_artifact(artifact)
+            logger.info("Checkpoint artifact logged: %s", artifact_name)
+        except Exception:
+            logger.warning(
+                "W&B artifact upload failed for %s — checkpoint saved locally, "
+                "artifact may be missing",
+                artifact_name,
+                exc_info=True,
+            )
+        finally:
+            shutil.rmtree(snapshot_parent, ignore_errors=True)
 
     def on_train_end(
         self,
@@ -134,8 +175,11 @@ class WandbCheckpointCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs: Any,
     ) -> Any:
-        """Final cleanup when training ends."""
-        pass
+        """Final cleanup when training ends: flush pending background uploads."""
+        for thread in self._upload_threads:
+            if thread.is_alive():
+                thread.join()
+        self._upload_threads.clear()
 
 
 class WandbLoggingCallback(TrainerCallback):

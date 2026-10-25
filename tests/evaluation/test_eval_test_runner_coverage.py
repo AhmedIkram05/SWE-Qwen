@@ -361,22 +361,73 @@ class TestAttemptsFromReport:
 
 
 class TestParseStdoutReport:
-    def test_parses_expected_format(self):
-        out = tr._parse_stdout_report("passed tests/a.py::t1\nfailed tests/a.py::t2\n")
+    def test_parses_expected_format_full_suite(self):
+        # Full-suite mode (empty test_names): keyed by node ID per contract.
+        out = tr._parse_stdout_report("passed tests/a.py::t1\nfailed tests/a.py::t2\n", [])
         assert out is not None
         assert out["tests/a.py::t1"]["status"] == "passed"
         assert out["tests/a.py::t2"]["status"] == "failed"
         assert out["tests/a.py::t1"]["output"] == "passed tests/a.py::t1"
 
+    def test_parses_expected_format(self):
+        out = tr._parse_stdout_report(
+            "passed tests/a.py::t1\nfailed tests/a.py::t2\n", ["tests/a.py::t1", "tests/a.py::t2"]
+        )
+        assert out is not None
+        assert out["tests/a.py::t1"]["status"] == "passed"
+        assert out["tests/a.py::t2"]["status"] == "failed"
+        assert out["tests/a.py::t1"]["output"] == "passed tests/a.py::t1"
+
+    def test_keys_by_requested_name_with_matcher(self):
+        """Audit finding 11: stdout fallback keys by REQUESTED name.
+
+        The JSON path attributes nodeids to requested names via
+        ``_bare_test_name`` matching; the stdout fallback must do the same,
+        or every ``per_run.get(name)`` lookup misses and the run scores as
+        errored (wasted retries, F2P=0 despite a passing suite).
+        """
+        out = tr._parse_stdout_report(
+            "PASSED tests/django/test_cookies.py::test_delete_cookie_samesite",
+            ["test_delete_cookie_samesite(DeleteCookieTests)"],
+        )
+        assert out is not None
+        assert "test_delete_cookie_samesite(DeleteCookieTests)" in out
+        assert out["test_delete_cookie_samesite(DeleteCookieTests)"]["status"] == "passed"
+        # Raw node ids are no longer keys once names are requested.
+        assert "tests/django/test_cookies.py::test_delete_cookie_samesite" not in out
+
+    def test_matcher_equivalence_with_json_path(self):
+        """Same name→nodeid matcher decides in both the JSON and stdout paths."""
+        nodeid = "tests/api/test_ops.py::test_refresh"
+        name = "test_refresh(ApiOps)"
+        # Shared matcher used by both paths agrees for the django-style name.
+        assert tr._nodeid_matches_name(nodeid, name)
+        out = tr._parse_stdout_report(f"PASSED {nodeid}", [name])
+        assert out is not None
+        assert name in out
+
+        # JSON path attributes the same pair identically.
+        by_name, nodeids = tr._attempts_from_report(
+            {"tests": [{"nodeid": nodeid, "outcome": "passed"}]}, [name]
+        )
+        assert name in by_name
+        assert nodeids == [nodeid]
+
+    def test_unmatched_names_absent(self):
+        out = tr._parse_stdout_report("passed tests/a.py::t_other\n", ["test_ghost(Missing)"])
+        assert out is None
+
     def test_skips_unknown_and_garbage_lines(self):
-        out = tr._parse_stdout_report("passed tests/a.py::t1\nBOGUS x\nnot a status\n")
+        out = tr._parse_stdout_report(
+            "passed tests/a.py::t1\nBOGUS x\nnot a status\n", ["tests/a.py::t1"]
+        )
         assert list(out or {}) == ["tests/a.py::t1"]
 
     def test_empty_returns_none(self):
-        assert tr._parse_stdout_report("") is None
+        assert tr._parse_stdout_report("", []) is None
 
     def test_no_valid_lines_returns_none(self):
-        assert tr._parse_stdout_report("random noise\n") is None
+        assert tr._parse_stdout_report("random noise\n", []) is None
 
 
 # ── _derive_test_files ──────────────────────────────────────────────────────
@@ -453,8 +504,11 @@ class TestRunPytestOnce:
             stdout_lines=("passed tests/a.py::test_b",),
         )
         attempts, nodeids = tr._run_pytest_once(tmp_path, ["test_b"], timeout=30, python_cmd=cmd)
-        assert nodeids == ["tests/a.py::test_b"]
-        assert attempts["tests/a.py::test_b"]["status"] == "passed"
+        # Audit finding 11: stdout-fallback attempts are keyed by the
+        # requested name (same matcher as the JSON path), so downstream
+        # per_run.get(name) lookups hit.
+        assert nodeids == ["test_b"]
+        assert attempts["test_b"]["status"] == "passed"
 
     def test_json_report_read_when_unlink_fails(self, tmp_path, monkeypatch, caplog):
         cmd = _fake_pytest(
@@ -495,7 +549,7 @@ class TestRunPytestOnce:
             exitcode=3,
         )
         attempts, _ = tr._run_pytest_once(tmp_path, ["t1"], timeout=30, python_cmd=cmd)
-        assert attempts["tests/a.py::t1"]["status"] == "failed"
+        assert attempts["t1"]["status"] == "failed"
 
     def test_timeout_expired_returns_errored(self, tmp_path, monkeypatch):
         def boom(*args, **kwargs):
@@ -536,7 +590,7 @@ class TestRunPytestOnce:
         )
         venv_python.chmod(0o755)
         attempts, _ = tr._run_pytest_once(repo_dir, ["t1"], timeout=30)
-        assert attempts["tests/a.py::t1"]["status"] == "passed"
+        assert attempts["t1"]["status"] == "passed"
 
     def test_approaching_modal_timeout_warns(self, tmp_path, monkeypatch, caplog):
         cmd = _fake_pytest(
@@ -554,7 +608,7 @@ class TestRunPytestOnce:
         monkeypatch.setattr(time, "time", slow_time)
         with caplog.at_level("WARNING", logger="evaluation.test_runner"):
             attempts, _ = tr._run_pytest_once(tmp_path, ["t1"], timeout=30, python_cmd=cmd)
-        assert attempts["tests/a.py::t1"]["status"] == "passed"
+        assert attempts["t1"]["status"] == "passed"
         assert "approaching limit" in caplog.text
 
     def test_cleanup_failure_is_logged_not_raised(self, tmp_path, monkeypatch, caplog):
@@ -574,7 +628,7 @@ class TestRunPytestOnce:
         monkeypatch.setattr(Path, "unlink", raisy)
         with caplog.at_level("WARNING", logger="evaluation.test_runner"):
             attempts, _ = tr._run_pytest_once(tmp_path, ["t1"], timeout=30, python_cmd=cmd)
-        assert attempts["tests/a.py::t1"]["status"] == "passed"
+        assert attempts["t1"]["status"] == "passed"
 
 
 # ── collect_test_results ────────────────────────────────────────────────────

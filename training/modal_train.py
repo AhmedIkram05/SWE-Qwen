@@ -264,6 +264,7 @@ def train_qlora(  # noqa: PLR0913, PLR0917
     from training.qlora_config import build_model_and_peft, resolve_gpu_type
     from training.qlora_trainer import (
         QLoRATrainer,
+        latest_checkpoint,
         prepare_run_output_dir,
         resolve_run_output_dir,
     )
@@ -282,20 +283,31 @@ def train_qlora(  # noqa: PLR0913, PLR0917
     else:
         logger.info("Building model with standard TRL + PEFT + bitsandbytes (UNSLOTH_ENABLED=0)")
 
+    # Audit finding 6: the flag must reach the factory — the image env pins
+    # UNSLOTH_ENABLED=1, so an operator's use_unsloth=False was silently
+    # ignored and the run built with Unsloth anyway.
     model, tokenizer = build_model_and_peft(
         variant=variant,
         model_name=model_name,
         use_flash_attn=True,
         gpu_type=gpu_type,
+        enabled=unsloth_enabled,
     )
 
     # P0-4: isolate checkpoints per variant-run; clean stale unless resuming.
-    output_dir = str(
-        prepare_run_output_dir(
-            resolve_run_output_dir(output_dir, variant, run_name, run_id),
-            resume,
-        )
-    )
+    # Audit finding 7: a Modal retry re-invokes with the same (resume-free)
+    # args. If the crashed attempt saved checkpoints to the volume, resume
+    # from the newest one instead of wiping hours of GPU compute.
+    resolved_output_dir = resolve_run_output_dir(output_dir, variant, run_name, run_id)
+    if resume is None:
+        resume = latest_checkpoint(resolved_output_dir)
+        if resume:
+            logger.info(
+                "Existing checkpoints in %s — resuming from %s (crash-retry protection)",
+                resolved_output_dir,
+                resume,
+            )
+    output_dir = str(prepare_run_output_dir(resolved_output_dir, resume))
 
     trainer = QLoRATrainer(
         model_name=model_name,

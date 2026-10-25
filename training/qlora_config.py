@@ -285,12 +285,13 @@ def list_variants() -> list[str]:
     return list(data.get("variants", {}).keys())
 
 
-def build_model_and_peft(
+def build_model_and_peft(  # noqa: PLR0913, PLR0917
     variant: str,
     model_name: str | None = None,
     max_seq_length: int = 8192,
     use_flash_attn: bool = True,
     gpu_type: str | None = None,
+    enabled: bool | None = None,
 ) -> tuple:
     """Build (model, tokenizer) using Unsloth or fallback.
 
@@ -304,6 +305,9 @@ def build_model_and_peft(
         use_flash_attn: Whether to use flash attention
         gpu_type: Modal GPU spec (e.g. ``"A10G:1"``). When provided, applies
                   GPU-specific memory overrides to max_seq_length.
+        enabled: Force Unsloth on/off (``None`` = env snapshot default).
+            Threaded through to the factory so a caller's explicit choice is
+            honored instead of the import-time ``UNSLOTH_ENABLED`` env read.
 
     Returns:
         Tuple of (model, tokenizer) ready for SFTTrainer
@@ -334,4 +338,5 @@ def build_model_and_peft(
         variant_cfg=var_cfg,
         max_seq_length=max_seq_length,
         use_flash_attn=use_flash_attn,
+        enabled=enabled,
     )

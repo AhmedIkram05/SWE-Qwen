@@ -10,7 +10,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -60,24 +59,55 @@ def resolve_run_output_dir(
     return str(base / leaf)
 
 
+def latest_checkpoint(output_dir: str | Path) -> str | None:
+    """Newest ``checkpoint-{step}`` dir under *output_dir*, or None.
+
+    Used for crash-retry resume (audit finding 7): a Modal retry re-invokes
+    ``train_qlora`` with the same resume-free args, and the crashed attempt's
+    checkpoints on the volume are the only way to pick the run back up.
+    Unparsable ``checkpoint-*`` names are ignored.
+    """
+    candidates: list[tuple[int, Path]] = []
+    for path in Path(output_dir).glob("checkpoint-*"):
+        if not path.is_dir():
+            continue
+        step = path.name.rsplit("-", 1)[-1]
+        if step.isdigit():
+            candidates.append((int(step), path))
+    if not candidates:
+        return None
+    return str(max(candidates)[1])
+
+
 def prepare_run_output_dir(
     output_dir: str | Path,
     resume_from_checkpoint: str | None = None,
 ) -> Path:
     """Create per-run *output_dir*; remove stale ``checkpoint-*`` unless resuming.
 
-    Idempotent: re-running on an already-prepared directory is a no-op.
+    Crash-retry guard (audit finding 7): when no resume was requested but
+    ``checkpoint-*`` directories already exist, they are kept — on a Modal
+    retry the same args re-invoke with ``resume`` unset, and deleting here
+    would discard every checkpoint the crashed attempt saved to the volume.
+    Callers wanting a clean restart should delete the directory or pass an
+    explicit checkpoint path. Idempotent: re-running on an already-prepared
+    directory is a no-op.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     if resume_from_checkpoint:
         return out
+    if any(d.is_dir() for d in out.glob("checkpoint-*")):
+        logger.warning(
+            "Output dir %s contains existing checkpoint dirs but no resume was "
+            "requested — keeping them (crash-retry protection). Delete the "
+            "directory or pass a checkpoint path for a clean restart.",
+            out,
+        )
+        return out
     for stale in out.glob("checkpoint-*"):
-        if stale.is_dir():
-            shutil.rmtree(stale, ignore_errors=True)
-        else:
-            with contextlib.suppress(OSError):
-                stale.unlink()
+        with contextlib.suppress(OSError):
+            stale.unlink()
     return out
 
 
@@ -335,7 +365,12 @@ class QLoRATrainer:
         dataset_dict: DatasetDict = dataset  # type: ignore[assignment]
 
         self.train_dataset = dataset_dict.get("train")
-        self.eval_dataset = dataset_dict.get("val") or dataset_dict.get("test")
+        # Eval on the val split ONLY (audit finding 13): silently falling back
+        # to test would select on repos that also feed the golden eval —
+        # leakage. A missing/empty val split disables evaluation with a loud
+        # warning instead.
+        val = dataset_dict.get("val")
+        self.eval_dataset = val if val is not None and len(val) > 0 else None
 
         # Subsample for quick debugging
         if self.max_train_samples is not None and self.train_dataset is not None:
@@ -354,7 +389,8 @@ class QLoRATrainer:
         # Adjust eval_strategy if no eval dataset available
         if self.eval_dataset is None and self.training_args is not None:
             logger.warning(
-                "No 'val' or 'test' split found in %s; disabling evaluation",
+                "No 'val' split found in %s; disabling evaluation (never falling "
+                "back to 'test': test repos also feed the golden eval set)",
                 self.data_dir,
             )
             self.training_args.eval_strategy = "no"

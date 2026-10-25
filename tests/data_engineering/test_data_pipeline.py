@@ -10,6 +10,7 @@ import pytest
 
 from data_engineering.config import DataPipelineConfig
 from data_engineering.run_pipeline import (
+    SwebenchPhaseResult,
     _checkpoint_dir,
     _load_stage,
     _load_stage_gcs,
@@ -22,6 +23,8 @@ from data_engineering.run_pipeline import (
     run_pipeline_swebench,
 )
 from data_engineering.schema import (
+    CleanStats,
+    DedupStats,
     GoldenSet,
     IssueRecord,
     Splits,
@@ -34,6 +37,24 @@ def _mock_wandb() -> MagicMock:
     m = MagicMock()
     m.init.return_value = MagicMock()
     return m
+
+
+def _phase_result(
+    cleaned: list[IssueRecord] | None = None,
+    raw: list[IssueRecord] | None = None,
+    validated: list[IssueRecord] | None = None,
+) -> SwebenchPhaseResult:
+    """Build a ``SwebenchPhaseResult`` for mocked ``run_pipeline_swebench`` returns."""
+    from data_engineering import clean as _clean
+
+    cleaned = cleaned or []
+    return SwebenchPhaseResult(
+        cleaned=cleaned,
+        raw=raw if raw is not None else cleaned,
+        validated=validated if validated is not None else cleaned,
+        dedup_stats=_clean.DedupStats(),
+        clean_stats=_clean.CleanStats(),
+    )
 
 
 def _make_record(issue_id: str, repo: str = "r") -> IssueRecord:
@@ -136,7 +157,7 @@ class TestRunPipelineSWEBench:
         with patch.dict("sys.modules", {"wandb": _mock_wandb()}):
             result = run_pipeline_swebench(config, "run123", resume_from=None)
 
-        assert len(result) == 1
+        assert len(result.cleaned) == 1
         mock_ingest.assert_called_once()
 
     @patch("data_engineering.run_pipeline.validate.validate_batch")
@@ -172,7 +193,7 @@ class TestRunPipelineSWEBench:
             ):
                 result = run_pipeline_swebench(config, "run123", None)
         assert result is not None
-        assert result[0].issue_id == "raw_only#1"
+        assert result.raw[0].issue_id == "raw_only#1"
 
     @patch("data_engineering.run_pipeline.swebench_ingest.ingest_swebench")
     def test_empty_ingest_raises(self, mock_ingest, tmp_path) -> None:
@@ -190,8 +211,8 @@ class TestRunPipelineSWEBench:
         config = DataPipelineConfig(output_dir=tmp_path, enabled_stages=["ingest"])
         with patch.dict("sys.modules", {"wandb": _mock_wandb()}):
             result = run_pipeline_swebench(config, "run123", None)
-        assert len(result) == 1
-        assert result[0].issue_id == "raw_only#1"
+        assert len(result.raw) == 1
+        assert result.raw[0].issue_id == "raw_only#1"
 
 
 class TestRunPipeline:
@@ -200,7 +221,7 @@ class TestRunPipeline:
     @pytest.mark.slow
     def test_run_pipeline_basic(self, mock_validate_auth, mock_run_swebench, tmp_path) -> None:
         """run_pipeline should coordinate stages and return PipelineResult."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
 
         config = DataPipelineConfig(
             output_dir=tmp_path,
@@ -216,11 +237,57 @@ class TestRunPipeline:
 
     @patch("data_engineering.run_pipeline.run_pipeline_swebench")
     @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
+    def test_stats_propagate_from_swebench_phase(
+        self, mock_validate_auth, mock_run_swebench, tmp_path
+    ) -> None:
+        """Audit finding 4: PipelineStats carries the phase's REAL filter stats.
+
+        The dataset card and W&B stage numbers must agree — zeroed
+        DedupStats/CleanStats rebuilt inside run_pipeline would report
+        "0 removed" regardless of the actual filtering.
+        """
+        rec = _make_record("test#1")
+        dedup_stats = DedupStats(
+            total_input=10,
+            exact_duplicates_removed=4,
+            content_duplicates_removed=2,
+            unique_output=4,
+        )
+        clean_stats = CleanStats(total_input=4, removed_binary=3, removed_no_test_files=1)
+        mock_run_swebench.return_value = SwebenchPhaseResult(
+            cleaned=[rec],
+            raw=[rec, rec],
+            validated=[rec],
+            dedup_stats=dedup_stats,
+            clean_stats=clean_stats,
+        )
+
+        config = DataPipelineConfig(
+            output_dir=tmp_path,
+            bigquery_enabled=False,
+            augment_codecontests=False,
+            augment_codealpaca=False,
+        )
+        with patch.dict("sys.modules", {"wandb": _mock_wandb()}):
+            result = run_pipeline(config)
+
+        assert result.stats.dedup_stats.exact_duplicates_removed == 4
+        assert result.stats.dedup_stats.content_duplicates_removed == 2
+        assert result.stats.clean_stats.removed_binary == 3
+        assert result.stats.clean_stats.removed_no_test_files == 1
+        # Counts come from the phase's in-memory records (finding 14) —
+        # no stage-file re-read needed to fill RepoResult.
+        assert result.stats.total_raw == 2
+        assert result.stats.total_validated == 1
+        assert result.stats.total_cleaned == 1
+
+    @patch("data_engineering.run_pipeline.run_pipeline_swebench")
+    @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
     def test_run_pipeline_empty_cleaned_raises(
         self, mock_validate_auth, mock_run_swebench, tmp_path
     ) -> None:
         """Pipeline with 0 cleaned records should raise RuntimeError."""
-        mock_run_swebench.return_value = []
+        mock_run_swebench.return_value = _phase_result([])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             bigquery_enabled=False,
@@ -268,7 +335,7 @@ class TestRunPipeline:
         self, mock_validate_auth, mock_run_swebench, tmp_path
     ) -> None:
         """When augmentation is enabled, synthetic records are added to train split."""
-        mock_run_swebench.return_value = [_make_record("swe#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("swe#1")])
 
         config = DataPipelineConfig(
             output_dir=tmp_path,
@@ -319,7 +386,7 @@ class TestRunPipeline:
     @pytest.mark.slow
     def test_run_id_override(self, mock_validate_auth, mock_run_swebench, tmp_path) -> None:
         """run_id_override should be used as the run ID."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             run_id_override="custom-id",
@@ -332,7 +399,7 @@ class TestRunPipeline:
     @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
     def test_split_disabled(self, mock_validate_auth, mock_run_swebench, tmp_path) -> None:
         """Disabled split stage uses empty Splits()."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             enabled_stages=["ingest", "validate", "clean"],
@@ -347,7 +414,7 @@ class TestRunPipeline:
     @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
     def test_golden_disabled(self, mock_validate_auth, mock_run_swebench, tmp_path) -> None:
         """Disabled golden stage uses empty GoldenSet()."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             enabled_stages=["ingest", "validate", "clean", "split"],
@@ -363,7 +430,7 @@ class TestRunPipeline:
         self, mock_validate_auth, mock_run_swebench, tmp_path
     ) -> None:
         """Corrupted validation_errors JSON does not crash pipeline."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             run_id_override="test-run",
@@ -381,7 +448,7 @@ class TestRunPipeline:
         self, mock_validate_auth, mock_run_swebench, tmp_path
     ) -> None:
         """W&B artifact logging failure is caught and logged."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             enabled_stages=["ingest", "validate", "clean", "split", "golden", "version"],
@@ -402,7 +469,7 @@ class TestRunPipeline:
         self, mock_validate_auth, mock_run_swebench, tmp_path
     ) -> None:
         """GCS upload failure is caught and logged."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             enabled_stages=["ingest", "validate", "clean", "split", "archive"],
@@ -421,7 +488,7 @@ class TestRunPipeline:
     @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
     def test_gcs_card_upload(self, mock_validate_auth, mock_run_swebench, tmp_path) -> None:
         """Dataset card is uploaded to GCS when gcs_paths and gcs_bucket set."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             gcs_bucket="my-bucket",
@@ -443,7 +510,7 @@ class TestRunPipeline:
         self, mock_validate_auth, mock_run_swebench, tmp_path
     ) -> None:
         """GCS card upload failure is caught and logged."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             gcs_bucket="my-bucket",
@@ -467,7 +534,7 @@ class TestRunPipeline:
         self, mock_validate_auth, mock_run_swebench, tmp_path
     ) -> None:
         """Tokenization failure is caught and logged."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             enabled_stages=["ingest", "validate", "clean", "split", "tokenize"],
@@ -489,7 +556,7 @@ class TestRunPipeline:
     @patch.object(DataPipelineConfig, "validate_auth", return_value=[])
     def test_tokenize_success(self, mock_validate_auth, mock_run_swebench, tmp_path) -> None:
         """Successful tokenization produces tokenized_paths."""
-        mock_run_swebench.return_value = [_make_record("test#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("test#1")])
         config = DataPipelineConfig(
             output_dir=tmp_path,
             run_id_override="tid",
@@ -515,7 +582,7 @@ class TestRunPipeline:
         self, mock_validate_auth, mock_run_swebench, tmp_path
     ) -> None:
         """When augmentation is disabled, augment_training_data is NOT called."""
-        mock_run_swebench.return_value = [_make_record("swe#1")]
+        mock_run_swebench.return_value = _phase_result([_make_record("swe#1")])
 
         config = DataPipelineConfig(
             output_dir=tmp_path,
@@ -635,6 +702,37 @@ class TestGCSHelpers:
             result = _load_stage_gcs(config, "run123", "swebench", "validated")
             assert result == []
 
+    def test_load_stage_falls_back_to_gcs_on_local_miss(self, tmp_path) -> None:
+        """Audit finding 14: a local miss consults the GCS checkpoint copy."""
+        config = DataPipelineConfig(gcs_bucket="my-bucket", output_dir=tmp_path)
+        rec_data = _make_record("gcs#1").model_dump()
+        with patch("google.cloud.storage.Client") as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_bucket = MagicMock()
+            mock_client.bucket.return_value = mock_bucket
+            mock_bucket.exists.return_value = True
+            mock_blob = MagicMock()
+            mock_bucket.blob.return_value = mock_blob
+            mock_blob.exists.return_value = True
+            mock_blob.download_as_text.return_value = json.dumps(rec_data)
+            result = _load_stage(config, "run123", "swebench", "cleaned")
+        assert result == [rec_data]
+        mock_bucket.blob.assert_called_once_with("datasets/run123/swebench/cleaned.jsonl")
+
+    def test_load_stage_local_hit_skips_gcs(self, tmp_path) -> None:
+        """A local hit is served without touching GCS."""
+        config = DataPipelineConfig(gcs_bucket="my-bucket", output_dir=tmp_path)
+        _save_stage([_make_record("local#1")], config, "run123", "swebench", "raw")
+        with (
+            patch("google.cloud.storage.Client") as mock_cls,
+            patch("data_engineering.run_pipeline._load_stage_gcs") as mock_gcs,
+        ):
+            result = _load_stage(config, "run123", "swebench", "raw")
+        assert result[0]["issue_id"] == "local#1"
+        mock_cls.assert_not_called()
+        mock_gcs.assert_not_called()
+
 
 class TestCheckpointEdgeCases:
     """Edge cases for _save_stage and _load_stage."""
@@ -692,7 +790,7 @@ class TestRunPipelineSWEBenchBranchCoverage:
         mock_wandb = _mock_wandb()
         with patch.dict("sys.modules", {"wandb": mock_wandb}):
             result = run_pipeline_swebench(config, "run123", None)
-        assert len(result) == 1
+        assert len(result.cleaned) == 1
         _, kwargs = mock_wandb.init.call_args
         assert kwargs["name"] == "my-custom-run"
 
@@ -722,7 +820,7 @@ class TestRunPipelineSWEBenchBranchCoverage:
             mock_dedup.return_value = ([rec], MagicMock())
             mock_clean.return_value = ([rec], MagicMock())
             result = run_pipeline_swebench(config, "run123", resume_from="cleaned")
-        assert len(result) == 1
+        assert len(result.cleaned) == 1
 
     @patch("data_engineering.run_pipeline.swebench_ingest.ingest_swebench")
     @patch("data_engineering.run_pipeline.validate.validate_batch")
@@ -783,7 +881,7 @@ class TestRunPipelineSWEBenchBranchCoverage:
         config = DataPipelineConfig(output_dir=tmp_path, bigquery_enabled=False)
         with patch.dict("sys.modules", {"wandb": _mock_wandb()}):
             result = run_pipeline_swebench(config, "run123", None)
-        assert len(result) == 1
+        assert len(result.cleaned) == 1
 
     @patch("data_engineering.run_pipeline.swebench_ingest.ingest_swebench")
     @patch("data_engineering.run_pipeline.swebench_ingest.augment_with_bigquery")
@@ -806,7 +904,7 @@ class TestRunPipelineSWEBenchBranchCoverage:
         config = DataPipelineConfig(output_dir=tmp_path, bigquery_enabled=True)
         with patch.dict("sys.modules", {"wandb": _mock_wandb()}):
             result = run_pipeline_swebench(config, "run123", None)
-        assert len(result) == 3
+        assert len(result.cleaned) == 3
         mock_bq.assert_called_once()
 
     @patch("data_engineering.run_pipeline.swebench_ingest.ingest_swebench")
@@ -823,7 +921,12 @@ class TestRunPipelineSWEBenchBranchCoverage:
         )
         with patch.dict("sys.modules", {"wandb": _mock_wandb()}):
             result = run_pipeline_swebench(config, "run123", None)
-        assert result == []
+        assert result.cleaned == []
+
+        # Audit finding 4: the phase carries the real (zeroed-when-clean-
+        # disabled) filter stats instead of run_pipeline rebuilding zeros.
+        assert result.dedup_stats is not None
+        assert result.clean_stats is not None
 
 
 class TestSaveSplits:

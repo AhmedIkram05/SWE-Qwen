@@ -45,6 +45,7 @@ def build_model_and_peft(
     variant_cfg: dict[str, Any],
     max_seq_length: int = 8192,
     use_flash_attn: bool = True,
+    enabled: bool | None = None,
 ) -> ModelAndPEFT:
     """Build (model, peft_model) using Unsloth or fallback.
 
@@ -53,11 +54,17 @@ def build_model_and_peft(
         variant_cfg: Variant config from qlora_variants.yaml (lora, training)
         max_seq_length: Max sequence length for Unsloth
         use_flash_attn: Whether to use flash attention
+        enabled: Force Unsloth on/off for THIS call. ``None`` falls back to
+            the ``UNSLOTH_ENABLED`` env snapshot taken at import time.
+            Callers with an explicit operator choice (e.g. Modal's
+            ``use_unsloth`` flag) must pass it here — the env snapshot alone
+            cannot honor a per-call override.
 
     Returns:
         Tuple of (base_model, peft_model) ready for SFTTrainer
     """
-    if _UNSLOTH_ENABLED and _UNSLOTH_AVAILABLE:
+    unsloth_on = _UNSLOTH_ENABLED if enabled is None else enabled
+    if unsloth_on and _UNSLOTH_AVAILABLE:
         try:
             return _build_with_unsloth(model_cfg, variant_cfg, max_seq_length, use_flash_attn)
         except Exception as e:

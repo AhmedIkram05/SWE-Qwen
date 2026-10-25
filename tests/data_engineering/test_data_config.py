@@ -192,3 +192,22 @@ class TestTokenizeRegistryResolution:
         cfg = DataPipelineConfig()
         assert cfg.tokenize_model == "qwen3-14b"
         assert cfg.tokenize_max_length == 4096
+
+    def test_gpu_type_shrinks_tokenize_max_length(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Audit finding 5: A10G's 2048 trainer override applies at tokenization.
+
+        Tokenize-at-4096-then-train-at-2048 silently truncates the gold tail;
+        the config must resolve the same effective length the trainer uses.
+        """
+        monkeypatch.delenv("DATA_PIPELINE_TOKENIZE_MODEL", raising=False)
+        monkeypatch.delenv("DATA_PIPELINE_TOKENIZE_MAX_LENGTH", raising=False)
+        cfg = DataPipelineConfig(tokenize_gpu_type="A10G:1")
+        assert cfg.tokenize_gpu_type == "A10G:1"
+        assert cfg.tokenize_max_length == 2048
+
+    def test_variant_threads_into_max_length(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DATA_PIPELINE_TOKENIZE_MODEL", raising=False)
+        monkeypatch.delenv("DATA_PIPELINE_TOKENIZE_MAX_LENGTH", raising=False)
+        cfg = DataPipelineConfig(tokenize_variant="baseline_14b")
+        assert cfg.tokenize_variant == "baseline_14b"
+        assert cfg.tokenize_max_length == 4096
