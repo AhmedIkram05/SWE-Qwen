@@ -318,8 +318,8 @@ async def _stream_gen(  # noqa: PLR0913, PLR0917
     """SSE generator: build prompt, stream real token deltas, telemetry.
 
     Engine outputs are CUMULATIVE: only the new suffix of each yield is
-    streamed (word chunks), so the client sees incremental text as it is
-    generated instead of a dump after completion.  Generation errors are
+    streamed verbatim, so the client sees incremental text as it is
+    generated instead of a dump after completion. Generation errors are
     streamed to the client as an OpenAI-style error frame followed by
     ``[DONE]``; telemetry is recorded exactly once in the ``finally`` block
     (TTFB = time of the first yielded chunk).
@@ -345,6 +345,9 @@ async def _stream_gen(  # noqa: PLR0913, PLR0917
         ):
             # CUMULATIVE outputs: stream only the new suffix.  (sse-starlette
             # adds its own "data: " framing, so hand it the raw payloads.)
+            # The delta goes out VERBATIM (audit finding 9): whitespace is
+            # load-bearing in patches, and OpenAI clients concatenate
+            # delta.content as-is — word-splitting corrupted streamed diffs.
             delta = res.text[sent:] if len(res.text) > sent else ""
             sent = len(res.text)
             if delta:
@@ -356,12 +359,11 @@ async def _stream_gen(  # noqa: PLR0913, PLR0917
                         .removeprefix("data: ")
                         .rstrip("\n")
                     )
-                for word in delta.split():
-                    yield (
-                        content_chunk_frame(request_id, created, request.model, word)
-                        .removeprefix("data: ")
-                        .rstrip("\n")
-                    )
+                yield (
+                    content_chunk_frame(request_id, created, request.model, delta)
+                    .removeprefix("data: ")
+                    .rstrip("\n")
+                )
             if res.finished:
                 output_tokens = res.completion_tokens
                 break
@@ -521,6 +523,11 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
             )
 
         last: GenerationResult | None = None
+        # Audit finding 10: engine.generate yields CUMULATIVE text, so `last`
+        # after a mid-generation exception holds a partial patch. Returning it
+        # as finish_reason="stop" hands clients a truncated diff that may
+        # still apply — a loud 500 is the only safe answer.
+        loop_completed = True
         try:
             system_prompt, user_text = build_messages(request)
             prompt = _build_prompt(hf_id, system_prompt, user_text, lora)
@@ -537,8 +544,9 @@ def create_app(engine: Engine, config: ServeConfig | None = None) -> FastAPI:
             ):
                 last = res
         except Exception:
+            loop_completed = False
             logger.exception("generation failed for model=%s", request.model)
-        if last is None:
+        if last is None or not loop_completed:
             _, body = error_response(500, "internal generation failure", "server_error")
             _record(
                 request.model,

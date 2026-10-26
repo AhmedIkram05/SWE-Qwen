@@ -145,7 +145,7 @@ def extract_golden(
         ]
         # All three official splits have FAIL_TO_PASS by construction.
         golden = [rec for rec in source if rec.test_files_changed]
-        _log_golden_isolation(splits, golden, source_split, min_size)
+        _check_golden_isolation(splits, golden, source_split, min_size)
         if len(golden) < min_size:
             logger.warning(
                 "Golden set has %d examples (min %d requested).",
@@ -168,7 +168,7 @@ def extract_golden(
             golden.append(rec)
 
     n_golden = len(golden)
-    _log_golden_isolation(splits, golden, source_split, min_size)
+    _check_golden_isolation(splits, golden, source_split, min_size)
     if n_golden < min_size:
         logger.warning(
             "Golden set has %d examples (min %d requested). "
@@ -198,13 +198,22 @@ def _log_split_isolation(splits: Splits, source_split: str) -> None:
     )
 
 
-def _log_golden_isolation(
+def _check_golden_isolation(
     splits: Splits,
     golden: list[IssueRecord],
     source_split: str,
     min_size: int,
 ) -> None:
-    """Log golden repo provenance; error loudly on any train/val leakage."""
+    """Log golden repo provenance; raise on any train/val leakage.
+
+    Golden repos must be a subset of the test repos (module docstring: each
+    repo lives in EXACTLY one split). A violation means the golden eval set
+    shares repos with training data — an eval-integrity bug, not a warning.
+
+    ``source_split="all"`` is an explicit operator opt-in to leakage (it
+    logs its own DATA LEAKAGE RISK warning upstream), so it keeps the
+    log-only behavior instead of raising.
+    """
     test_repos = {r.repo for r in splits.test}
     train_repos = {r.repo for r in splits.train}
     golden_repos = sorted({r.repo for r in golden})
@@ -218,9 +227,18 @@ def _log_golden_isolation(
     )
     leaked = set(golden_repos) & train_repos
     if leaked or not set(golden_repos) <= test_repos:
-        logger.error(
-            "GOLDEN ISOLATION VIOLATION: golden repos %s not ⊆ test repos %s (train overlap: %s)",
-            golden_repos,
-            sorted(test_repos),
-            sorted(leaked),
+        if source_split == "all":
+            logger.error(
+                "GOLDEN ISOLATION VIOLATION (source_split='all', expected): golden repos %s "
+                "not ⊆ test repos %s (train overlap: %s)",
+                golden_repos,
+                sorted(test_repos),
+                sorted(leaked),
+            )
+            return
+        raise RuntimeError(
+            "GOLDEN ISOLATION VIOLATION: golden repos "
+            f"{golden_repos} not ⊆ test repos {sorted(test_repos)} "
+            f"(train overlap: {sorted(leaked)}). Refusing to build a golden set "
+            "that leaks train/val repos into evaluation."
         )

@@ -1255,7 +1255,10 @@ class EvaluationHarness:
                 dataset_run_id=self.config.dataset_run_id or None,
             )
             gen_seconds = max(time.monotonic() - _gen_start, 0.0)
-            per_instance_latency = gen_seconds / max(len(all_instances), 1)
+            # Amortize over the instances actually generated (audit finding
+            # 12): all_instances includes checkpoint-restored patches, which
+            # understated avg_latency ~10x on cache-heavy resumed runs.
+            per_instance_latency = gen_seconds / len(new_instances)
             for i, example in enumerate(new_instances):
                 patches_map[example.instance_id] = patches[i] if i < len(patches) else ""
 

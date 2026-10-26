@@ -16,7 +16,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from rich.console import Console
 from rich.progress import (
@@ -254,10 +254,15 @@ def _load_stage(
     repo_id: str,
     stage: str,
 ) -> list[dict[str, Any]]:
-    """Load records from JSONL checkpoint."""
+    """Load records from JSONL checkpoint, falling back to the GCS copy.
+
+    ``_save_stage`` writes every stage both locally and to GCS; the GCS copy
+    is the cross-machine checkpoint (local disk does not survive between
+    Modal runs), so a local miss consults it instead of returning empty.
+    """
     path = _checkpoint_dir(config, run_id, repo_id) / f"{stage}.jsonl"
     if not path.exists():
-        return []
+        return _load_stage_gcs(config, run_id, repo_id, stage)
     records: list[dict[str, Any]] = []
     with path.open() as f:
         for line in f:
@@ -270,11 +275,27 @@ def _load_stage(
 # SWE-bench pipeline
 
 
+class SwebenchPhaseResult(NamedTuple):
+    """In-memory products of the SWE-bench phase.
+
+    Carries the raw/validated records and the real dedup/clean filter stats
+    alongside the cleaned records, so ``run_pipeline`` never re-reads the
+    stage JSONL files just for counts or versioning (audit findings 4/14)
+    and ``PipelineStats``/the dataset card agree with the W&B stage logs.
+    """
+
+    cleaned: list[IssueRecord]
+    raw: list[IssueRecord]
+    validated: list[IssueRecord]
+    dedup_stats: clean.DedupStats
+    clean_stats: clean.CleanStats
+
+
 def run_pipeline_swebench(
     config: DataPipelineConfig,
     run_id: str,
     resume_from: str | None,
-) -> list[IssueRecord]:
+) -> SwebenchPhaseResult:
     """Run the complete pipeline for SWE-bench source with progress tracking."""
 
     # Initialize W&B run for progress tracking
@@ -421,7 +442,13 @@ def run_pipeline_swebench(
             if not validate_enabled and not clean_enabled:
                 # Validation disabled and clean disabled: stop pipeline after ingest
                 logger.info("Pipeline stopped after ingest (no further stages enabled)")
-                return raw_records
+                return SwebenchPhaseResult(
+                    cleaned=[],
+                    raw=raw_records,
+                    validated=validated,
+                    dedup_stats=dedup_stats,
+                    clean_stats=clean_stats,
+                )
 
             if clean_enabled:
                 progress.update(task, description="Cleaning records...")
@@ -467,7 +494,13 @@ def run_pipeline_swebench(
             logger.warning("W&B metric emission failed (non-fatal): %s", exc)
         wandb_run.finish()
 
-    return cleaned_records
+    return SwebenchPhaseResult(
+        cleaned=cleaned_records,
+        raw=raw_records,
+        validated=validated,
+        dedup_stats=dedup_stats,
+        clean_stats=clean_stats,
+    )
 
 
 # Full pipeline entry point
@@ -525,21 +558,19 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
     # SWE-bench flow (only source)
     console.print(f"[bold]Pipeline Run:[/bold] {run_id} (SWE-bench)")
 
-    all_cleaned = run_pipeline_swebench(config, run_id, resume_from)
+    phase = run_pipeline_swebench(config, run_id, resume_from)
+    all_cleaned = phase.cleaned
 
+    # Counts come straight from the phase's in-memory records (audit finding
+    # 14) — no full-JSONL re-read of raw/validated just to fill RepoResult.
     repo_results = [
         RepoResult(
             repo_id="swebench",
-            raw_count=0,
-            validated_count=0,
+            raw_count=len(phase.raw),
+            validated_count=len(phase.validated),
             cleaned_count=len(all_cleaned),
         )
     ]
-
-    raw_dicts = _load_stage(config, run_id, "swebench", "raw")
-    validated_dicts = _load_stage(config, run_id, "swebench", "validated")
-    repo_results[0].raw_count = len(raw_dicts)
-    repo_results[0].validated_count = len(validated_dicts)
 
     # A validate-only run (clean stage disabled) legitimately ends with 0
     # cleaned records — the validated output is the run's product. Treat an
@@ -591,8 +622,10 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
     total_raw = sum(r.raw_count for r in repo_results)
     total_validated = sum(r.validated_count for r in repo_results)
 
-    dedup_stats_total = clean.DedupStats()
-    clean_stats_total = clean.CleanStats()
+    # Real filter stats from the SWE-bench phase (audit finding 4) — the
+    # dataset card and W&B stage logs must agree, not report 0 removed.
+    dedup_stats_total = phase.dedup_stats
+    clean_stats_total = phase.clean_stats
 
     stats = PipelineStats(
         total_raw=total_raw,
@@ -611,8 +644,8 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
     )
 
     stages: dict[str, Any] = {
-        "raw": [],
-        "validated": [],
+        "raw": phase.raw,
+        "validated": phase.validated,
         "cleaned": all_cleaned,
         "train": splits.train,
         "val": splits.val,
@@ -620,11 +653,6 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         "golden": golden_set.records,
         "validation_errors": all_validation_errors,
     }
-
-    raw_dicts = _load_stage(config, run_id, "swebench", "raw")
-    validated_dicts = _load_stage(config, run_id, "swebench", "validated")
-    stages["raw"] = [IssueRecord(**d) for d in raw_dicts]
-    stages["validated"] = [IssueRecord(**d) for d in validated_dicts]
 
     wandb_artifacts: dict[str, str] = {}
     manifest = _build_manifest(config, run_id, stages, stats, os.environ.get("GIT_SHA", ""))
@@ -688,15 +716,19 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
         try:
             from data_engineering.tokenize import tokenize_pipeline
 
-            model_name = getattr(config, "tokenize_model", "qwen3-14b")
-            max_seq_length = getattr(config, "tokenize_max_length", 4096)
-
             tokenized_dir = config.output_dir / f"{run_id}_tokenized"
             ds = tokenize_pipeline(
                 data_dir=config.output_dir / run_id / "swebench",
                 output_dir=tokenized_dir,
-                model_name=model_name,
-                max_length=max_seq_length,
+                model_name=config.tokenize_model,
+                # Aligned with the run's training intent (audit finding 5):
+                # the config validator resolves tokenize_max_length via
+                # resolve_train_max_seq_length(variant, gpu_type), so the
+                # A10G 2048 override applies at tokenization time too — no
+                # tokenize-at-4096-then-truncate-at-2048 gold-tail loss.
+                max_length=config.tokenize_max_length,
+                variant=config.tokenize_variant,
+                gpu_type=config.tokenize_gpu_type,
                 config=config,
                 run_id=run_id,
             )

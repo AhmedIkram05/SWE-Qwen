@@ -884,6 +884,72 @@ def test_run_batch_runner_returned_fewer_results_falls_back_per_example(
     assert len(per_example_calls) == 1
 
 
+def test_run_batch_latency_amortizes_over_new_instances_only(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit finding 12: resumed-run latency divides by len(new_instances).
+
+    ``all_instances`` includes checkpoint-restored patches; amortizing the
+    generation time over them understated avg_latency ~10x on cache-heavy
+    resumed runs (and avg_latency feeds the comparison table and cost math).
+    """
+    config = _cfg(tmp_path, use_swebench_images=False)
+    harness = EvaluationHarness(config)
+
+    # Cached patch for inst-a stored under a STALE variant key: inst-a skips
+    # generation via loaded_patches, but its baseline_14b repo key stays
+    # incomplete — the exact resumed-run shape.
+    cached = EvalResult(
+        instance_id="inst-a",
+        repo="owner/repo",
+        model_name="qwen3-14b",
+        variant="baseline_14b",
+        prompt_template="chat",
+        generated_patch="+cached\n",
+        patch_application=PatchApplicationResult(success=True, method_used="git_apply"),
+        tests_before=[],
+        tests_after=[],
+        f2p=1.0,
+        p2p=1.0,
+        latency_seconds=1.0,
+        timestamp=datetime.now(UTC),
+    )
+    stale_key = harness.checkpoint_mgr.get_checkpoint_key(
+        "run-1", "owner/repo", "qwen3-14b", "stale_variant", "chat"
+    )
+    harness.checkpoint_mgr.save_result(stale_key, [cached])
+
+    monkeypatch.setattr(
+        harness_mod,
+        "_generate_patches",
+        lambda m, v, t, ex, **kw: ["+p\n"] * len(ex),  # noqa: E501
+    )
+    # One payload per job so every instance routes through
+    # run_example_from_output (which carries latency_seconds).
+    monkeypatch.setattr(
+        harness_mod, "_run_tests_batch", lambda *a, **k: [PASSING_PAYLOAD for _ in a[3]]
+    )
+
+    # Scope the fake clock to the harness module only (the shared time module
+    # is used by unrelated libs during the test). First call = _gen_start,
+    # second call (after _generate_patches) = end → gen_seconds = 4.0.
+    clock_calls = {"n": 0}
+
+    def fake_monotonic() -> float:
+        clock_calls["n"] += 1
+        return 100.0 if clock_calls["n"] == 1 else 104.0
+
+    monkeypatch.setattr(harness_mod, "time", types.SimpleNamespace(monotonic=fake_monotonic))
+
+    results = harness.run_batch(
+        [_input("inst-a"), _input("inst-b")], "qwen3-14b", "baseline_14b", "chat", "run-1"
+    )
+
+    new_result = next(r for r in results if r.instance_id == "inst-b")
+    # gen_seconds = 4.0 over ONE generated instance → 4.0 (old code: /2 = 2.0).
+    assert new_result.latency_seconds == pytest.approx(4.0)
+
+
 def test_run_batch_not_checkpointing_errored_repo(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

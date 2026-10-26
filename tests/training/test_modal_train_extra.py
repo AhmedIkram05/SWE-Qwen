@@ -149,10 +149,12 @@ def _fake_training_imports(mocker, *, with_torch_shutdown=True):
 
     fake_qtr = types.ModuleType("training.qlora_trainer")
     fake_qtr.QLoRATrainer = mocker.MagicMock(return_value=trainer)
-    # P0-4: the REAL pure resolver is exercised (no filesystem); prepare is
-    # stubbed to identity because /models is a Modal volume, not a local dir.
+    # P0-4: the REAL pure resolvers are exercised (no filesystem writes);
+    # prepare is stubbed to identity because /models is a Modal volume, not
+    # a local dir. latest_checkpoint is real (read-only glob).
     fake_qtr.prepare_run_output_dir = lambda output_dir, resume_from_checkpoint=None: output_dir
     fake_qtr.resolve_run_output_dir = _real_qlora_trainer.resolve_run_output_dir
+    fake_qtr.latest_checkpoint = _real_qlora_trainer.latest_checkpoint
 
     modules = {
         "training.qlora_config": fake_qcfg,
@@ -246,6 +248,33 @@ class TestTrainQlora:
             "metrics": {"train_loss": 0.42},
         }
 
+    def test_crash_retry_resumes_from_newest_checkpoint(self, mocker, tmp_path):
+        """Audit finding 7: a Modal retry (same args, resume=None) resumes.
+
+        The crashed attempt's checkpoints must not be wiped — the retry picks
+        up from the newest ``checkpoint-{step}`` dir on the volume.
+        """
+        mod = _mod()
+        ns = _fake_training_imports(mocker)
+        out_base = tmp_path / "out"
+        run_dir = out_base / "baseline_14b-my-run"
+        (run_dir / "checkpoint-499").mkdir(parents=True)
+        (run_dir / "checkpoint-500").mkdir(parents=True)
+        mocker.patch.dict("os.environ", {"WANDB_API_KEY": "key"})
+        mocker.patch.object(mod, "_download_gcs_public", return_value="/tmp/data/tokenized/f")
+        mocker.patch("wandb.run", None)
+        mocker.patch("wandb.finish")
+
+        _call(
+            mod.train_qlora,
+            output_dir=str(out_base),
+            run_name="my-run",
+        )
+
+        assert ns.qtr.QLoRATrainer.call_args[1]["resume_from_checkpoint"] == str(
+            run_dir / "checkpoint-500"
+        )
+
     def test_explicit_gpu_and_no_unsloth(self, mocker, caplog):
         mod = _mod()
         ns = _fake_training_imports(mocker)
@@ -264,6 +293,11 @@ class TestTrainQlora:
 
         assert "standard TRL" in caplog.text
         ns.qcfg.resolve_gpu_type.assert_not_called()
+        # Audit finding 6: use_unsloth must reach the factory — the image
+        # env pins UNSLOTH_ENABLED=1, so the flag is the only way the
+        # operator's "no Unsloth" choice can take effect.
+        build_call = ns.qcfg.build_model_and_peft.call_args
+        assert build_call[1]["enabled"] is False
         assert result["wandb_run_id"] is None
         assert result["metrics"] == {"train_loss": 0.42}
         assert ns.qtr.QLoRATrainer.call_args[1]["resume_from_checkpoint"] == "/models/ckpt/step-500"

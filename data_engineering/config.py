@@ -90,6 +90,12 @@ class DataPipelineConfig(BaseSettings):
     # init kwargs win; see _resolve_registry.
     tokenize_model: str = _LEGACY_MODEL
     tokenize_max_length: int = _LEGACY_MAX_LENGTH
+    # Training intent used to align tokenization with the trainer (audit
+    # finding 5): the GPU memory-override table (e.g. A10G:1 → max_seq_length
+    # 2048) must shrink tokenization the same way it shrinks SFTConfig
+    # max_length, or rows in (2048, 4096] silently lose their gold tail.
+    tokenize_variant: str = "baseline_14b"
+    tokenize_gpu_type: str | None = None
 
     @model_validator(mode="after")
     def _resolve_registry(self) -> DataPipelineConfig:
@@ -99,7 +105,8 @@ class DataPipelineConfig(BaseSettings):
         registry without ``tokenize_model`` raises — literals apply only when
         the registry is missing or unreadable (no silent family fallback).
         ``tokenize_max_length`` defaults to the trainer's effective
-        ``max_seq_length`` (capped by the model context window), never bare 32k.
+        ``max_seq_length`` for ``tokenize_variant``/``tokenize_gpu_type``
+        (capped by the model context window), never bare 32k.
         """
         try:
             models = load_models()
@@ -119,7 +126,12 @@ class DataPipelineConfig(BaseSettings):
             try:
                 from training.qlora_config import resolve_train_max_seq_length
 
-                self.tokenize_max_length = min(spec.context_window, resolve_train_max_seq_length())
+                self.tokenize_max_length = min(
+                    spec.context_window,
+                    resolve_train_max_seq_length(
+                        variant=self.tokenize_variant, gpu_type=self.tokenize_gpu_type
+                    ),
+                )
             except Exception:
                 self.tokenize_max_length = min(spec.context_window, _LEGACY_MAX_LENGTH)
         return self
