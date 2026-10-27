@@ -43,6 +43,8 @@ class TestParseHelpers:
         ]
 
     def test_parse_files_from_patch(self):
+        # The register.py-looking lines sit inside auth.py's hunk body, so
+        # they are content, not a second file header pair.
         patch = """--- a/auth.py
 +++ b/auth.py
 @@ -10,7 +10,8 @@
@@ -60,7 +62,7 @@ class TestParseHelpers:
      return save_user(data)
  """
         files = _parse_files_from_patch(patch)
-        assert files == ["auth.py", "register.py"]
+        assert files == ["auth.py"]
 
     def test_parse_unified_diff_invalid(self) -> None:
         """Invalid diff strings should return empty list without crashing."""

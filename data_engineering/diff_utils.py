@@ -61,8 +61,11 @@ def parse_files(patch: str) -> list[str]:
     For each file section the ``+++``/b-side path is the changed file;
     deletions (``+++ /dev/null``) fall back to the ``---``/a-side path.
     Handles ``diff --git a/old b/new`` (rename: new name wins), bare
-    ``---``/``+++`` header pairs without ``diff --git``, ``/dev/null``,
-    and quoted paths. Order-preserving, deduplicated.
+    ``---``/``+++`` header pairs before a section's first hunk,
+    ``/dev/null``, and quoted paths. Once inside a hunk body the
+    ``---``/``+++`` prefixes are content, not headers (a removed line
+    starting ``-- `` reads as ``--- ``), so only a new ``diff --git``
+    re-opens header detection. Order-preserving, deduplicated.
     """
     if not patch or not patch.strip():
         return []
@@ -78,6 +81,7 @@ def parse_files(patch: str) -> list[str]:
         _add(new or old)
 
     pending_old: str | None = None
+    in_header = True  # before the first @@ hunk of the current file section
     for line in patch.splitlines():
         stripped = line.strip()
         if stripped.startswith("diff --git"):
@@ -85,9 +89,15 @@ def parse_files(patch: str) -> list[str]:
             if git is not None:
                 _file_from_pair(git[0], git[1])
             pending_old = None
+            in_header = True
+            continue
+        if not in_header:
+            # Hunk body: ``--- ``/``+++ `` here are removed/added content
+            # lines, not file headers.
             continue
         if line.startswith("@@"):
             pending_old = None
+            in_header = False
             continue
         if line.startswith("--- "):
             pending_old = _clean_header_path(line[4:])
