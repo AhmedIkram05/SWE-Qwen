@@ -233,6 +233,27 @@ class TestSWEBenchToIssueRecord:
         assert record.test_results.passed == []
         assert record.metadata["has_test_patch"] is False
 
+    def test_has_test_patch_keys_on_test_patch_field(self):
+        # A record can carry a test patch with an empty FAIL_TO_PASS list;
+        # has_test_patch must key on the patch itself, not the test list.
+        example = {
+            "instance_id": "test-1",
+            "repo": "django/django",
+            "base_commit": "abc123",
+            "patch": "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-foo\n+bar\n",
+            "test_patch": "--- a/tests/test_foo.py\n+++ b/tests/test_foo.py\n"
+            "@@ -1 +1 @@\n+def test_foo(): pass\n",
+            "problem_statement": "Test",
+            "hints_text": "",
+            "created_at": "2024-01-01",
+            "version": "1.0",
+            "FAIL_TO_PASS": "",
+            "PASS_TO_PASS": "",
+            "environment_setup_commit": "def456",
+        }
+        record = swebench_to_issue_record(example, "web-api")
+        assert record.metadata["has_test_patch"] is True
+
     def test_missing_optional_fields(self):
         """Test handling of missing optional fields like hints_text."""
         example = {
