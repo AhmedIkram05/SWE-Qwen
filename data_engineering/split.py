@@ -64,7 +64,8 @@ def stratified_split(
             ``run_id_override`` is set).
 
     Returns:
-        Splits with train/val/test. All non-empty.
+        Splits with train/val/test. All non-empty for pools of >= 3 repos;
+        smaller pools degrade (a single repo goes train-only).
     """
     # Group by repo
     repo_groups: dict[str, list[IssueRecord]] = defaultdict(list)
@@ -77,9 +78,10 @@ def stratified_split(
     # Shuffle repos deterministically
     rng.shuffle(repos)
 
-    # Calculate split indices
+    # Calculate split indices; clamp n_train so val and test each keep at
+    # least one repo (previously a 3-repo pool could yield empty val/test).
     total = len(repos)
-    n_train = max(1, round(total * config.train_ratio))
+    n_train = max(1, min(round(total * config.train_ratio), total - 2))
     n_val = max(1, round(total * config.val_ratio))
 
     train_repos = repos[:n_train]
