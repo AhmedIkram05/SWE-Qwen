@@ -494,6 +494,20 @@ class TestAggregateMetrics:
         assert m.p2p_rate == 0.0
         assert m.p2p_count == 0
 
+    def test_errored_results_excluded_from_avg_latency(self) -> None:
+        # Errored results carry near-zero latency (generation never finished);
+        # averaging them in skews avg_latency down, unlike the error-free
+        # denominators f2p/p2p already use.
+        ok = _make_result(repo="a/b", latency=8.0)
+        errored = _make_result(repo="a/b", latency=0.1).model_copy(update={"error": "boom"})
+        m = aggregate_metrics([ok, errored])
+        assert m.avg_latency == pytest.approx(8.0)
+
+    def test_all_errored_avg_latency_zero(self) -> None:
+        errored = _make_result(latency=0.1).model_copy(update={"error": "boom"})
+        m = aggregate_metrics([errored])
+        assert m.avg_latency == 0.0
+
     def test_empty_raises(self) -> None:
         with pytest.raises(ValueError):
             aggregate_metrics([])

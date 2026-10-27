@@ -154,7 +154,7 @@ def aggregate_metrics(results: list[EvalResult]) -> F2PMetrics:
         f2p_count=f2p_examples,
         p2p_rate=sum(r.p2p for r in valid) / len(valid) if valid else 0.0,
         p2p_count=p2p_examples,
-        avg_latency=sum(r.latency_seconds for r in results) / example_count,
+        avg_latency=sum(r.latency_seconds for r in valid) / len(valid) if valid else 0.0,
         flaky_test_rate=flaky_tests / total_tests if total_tests else 0.0,
         per_repo_breakdown=breakdown,
         apply_rate=apply_rate(successful, example_count),
