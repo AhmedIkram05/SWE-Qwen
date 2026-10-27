@@ -336,7 +336,7 @@ def swebench_to_issue_record(
     - hints_text → metadata.hints
     - created_at → metadata.created_at
     """
-    has_test_patch = bool(example.get("FAIL_TO_PASS"))
+    has_test_patch = bool(example.get("test_patch"))
 
     # Parse test files from test_patch
     test_files = _parse_files_from_patch(example.get("test_patch", ""))

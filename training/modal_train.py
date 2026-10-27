@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import shutil
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -63,14 +64,23 @@ def _download_gcs_public(prefix: str, dst_dir: str) -> str:
     Uses the public JSON API — no auth required because the bucket has
     ``allUsers`` with ``roles/storage.objectViewer``.
     """
-    # List objects via public JSON API
-    list_url = f"https://www.googleapis.com/storage/v1/b/{_GCS_BUCKET}/o?prefix={prefix}"
-    logger.info("Downloading tokenized data from GCS: %s", list_url)
+    # List objects via public JSON API, following nextPageToken — the API
+    # caps listing pages at 1000 objects, so a single request silently
+    # truncates larger DatasetDicts.
+    base_url = f"https://www.googleapis.com/storage/v1/b/{_GCS_BUCKET}/o?prefix={prefix}"
+    logger.info("Downloading tokenized data from GCS: %s", base_url)
 
-    with urllib.request.urlopen(list_url) as resp:
-        payload = json.loads(resp.read().decode())
+    items: list[dict[str, Any]] = []
+    list_url = base_url
+    while True:
+        with urllib.request.urlopen(list_url) as resp:
+            payload = json.loads(resp.read().decode())
+        items.extend(payload.get("items", []))
+        next_token = payload.get("nextPageToken")
+        if not next_token:
+            break
+        list_url = f"{base_url}&pageToken={urllib.parse.quote_plus(next_token)}"
 
-    items = payload.get("items", [])
     if not items:
         raise RuntimeError(
             f"No objects found at gs://{_GCS_BUCKET}/{prefix} — "

@@ -80,6 +80,22 @@ class TestStratifiedSplit:
         assert len(splits.val) == 0
         assert len(splits.test) == 0
 
+    def test_three_repos_all_splits_non_empty(self) -> None:
+        # With 3 repos the old rounding gave n_train=2, n_val=1, leaving
+        # test empty; the peel-back then emptied val too. The clamp keeps
+        # one repo per split.
+        config = DataPipelineConfig()
+        records = [_make_record(f"r{i}#1", repo=f"r{i}") for i in range(3)]
+        splits = stratified_split(records, config, seed=42)
+        assert len(splits.train) > 0
+        assert len(splits.val) > 0
+        assert len(splits.test) > 0
+        repos_train = {r.repo for r in splits.train}
+        repos_val = {r.repo for r in splits.val}
+        repos_test = {r.repo for r in splits.test}
+        assert repos_train.isdisjoint(repos_val)
+        assert repos_val.isdisjoint(repos_test)
+
     def test_small_number_of_repos(self) -> None:
         config = DataPipelineConfig()
         records = [_make_record(f"r{i}#1", repo=f"r{i}") for i in range(2)]

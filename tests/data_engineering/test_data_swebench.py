@@ -43,6 +43,8 @@ class TestParseHelpers:
         ]
 
     def test_parse_files_from_patch(self):
+        # The register.py-looking lines sit inside auth.py's hunk body, so
+        # they are content, not a second file header pair.
         patch = """--- a/auth.py
 +++ b/auth.py
 @@ -10,7 +10,8 @@
@@ -60,7 +62,7 @@ class TestParseHelpers:
      return save_user(data)
  """
         files = _parse_files_from_patch(patch)
-        assert files == ["auth.py", "register.py"]
+        assert files == ["auth.py"]
 
     def test_parse_unified_diff_invalid(self) -> None:
         """Invalid diff strings should return empty list without crashing."""
@@ -230,6 +232,27 @@ class TestSWEBenchToIssueRecord:
         assert record.test_results.failed == []
         assert record.test_results.passed == []
         assert record.metadata["has_test_patch"] is False
+
+    def test_has_test_patch_keys_on_test_patch_field(self):
+        # A record can carry a test patch with an empty FAIL_TO_PASS list;
+        # has_test_patch must key on the patch itself, not the test list.
+        example = {
+            "instance_id": "test-1",
+            "repo": "django/django",
+            "base_commit": "abc123",
+            "patch": "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-foo\n+bar\n",
+            "test_patch": "--- a/tests/test_foo.py\n+++ b/tests/test_foo.py\n"
+            "@@ -1 +1 @@\n+def test_foo(): pass\n",
+            "problem_statement": "Test",
+            "hints_text": "",
+            "created_at": "2024-01-01",
+            "version": "1.0",
+            "FAIL_TO_PASS": "",
+            "PASS_TO_PASS": "",
+            "environment_setup_commit": "def456",
+        }
+        record = swebench_to_issue_record(example, "web-api")
+        assert record.metadata["has_test_patch"] is True
 
     def test_missing_optional_fields(self):
         """Test handling of missing optional fields like hints_text."""

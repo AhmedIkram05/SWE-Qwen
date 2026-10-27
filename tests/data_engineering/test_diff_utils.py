@@ -27,12 +27,16 @@ class TestParseFilesHeaderStyle:
         patch = "--- a/auth.py\n+++ b/auth.py\n@@ -1,2 +1,2 @@\n x\n"
         assert parse_files(patch) == ["auth.py"]
 
-    def test_multi_file_bare_headers(self) -> None:
+    def test_bare_headers_after_hunk_body_not_reopened(self) -> None:
+        # Header detection only re-opens on a new ``diff --git``: after a
+        # hunk body, ``--- ``/``+++ `` lines are content (a removed line
+        # starting "-- " reads as "--- "), so the second bare pair here is
+        # body text of auth.py's hunk, not a register.py file section.
         patch = (
             "--- a/auth.py\n+++ b/auth.py\n@@ -1,2 +1,2 @@\n x\n"
             "--- a/register.py\n+++ b/register.py\n@@ -1,2 +1,2 @@\n y\n"
         )
-        assert parse_files(patch) == ["auth.py", "register.py"]
+        assert parse_files(patch) == ["auth.py"]
 
     def test_bare_repo_relative_paths(self) -> None:
         patch = "--- src/foo.py\n+++ src/foo.py\n@@ -1 +1 @@\n"
@@ -103,6 +107,9 @@ class TestParseFilesQuotedAndEdge:
         assert parse_files("no diff markers here") == []
 
     def test_mixed_styles(self) -> None:
+        # The plain.py-looking lines follow a hunk header, so they are hunk
+        # body content of git.py, not a second file section (the old parser
+        # fabricated a phantom "plain.py" from exactly this shape).
         patch = (
             "diff --git a/git.py b/git.py\n"
             "--- a/git.py\n"
@@ -112,7 +119,27 @@ class TestParseFilesQuotedAndEdge:
             "+++ b/plain.py\n"
             "@@ -1 +1 @@\n"
         )
-        assert parse_files(patch) == ["git.py", "plain.py"]
+        assert parse_files(patch) == ["git.py"]
+
+    def test_hunk_body_markers_are_content(self) -> None:
+        # A removed line whose text starts "-- " reads as "--- " in the hunk
+        # body, and an added "++ " line as "+++ " — markdown-ish content that
+        # must not fabricate a phantom file pair.
+        patch = (
+            "diff --git a/notes.md b/notes.md\n"
+            "--- a/notes.md\n"
+            "+++ b/notes.md\n"
+            "@@ -1,3 +1,3 @@\n"
+            "--- draft heading\n"
+            "+++ revised heading\n"
+        )
+        assert parse_files(patch) == ["notes.md"]
+
+    def test_hunk_body_markers_bare_headers(self) -> None:
+        patch = (
+            "--- a/notes.md\n+++ b/notes.md\n@@ -1,2 +1,2 @@\n--- removed text\n+++ added text\n"
+        )
+        assert parse_files(patch) == ["notes.md"]
 
 
 class TestDiffGitPaths:

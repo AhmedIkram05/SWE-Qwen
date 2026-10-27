@@ -91,6 +91,42 @@ class TestDownloadGcsPublic:
         list_url = urlopen.call_args_list[0][0][0]
         assert "storage/v1/b/swe-qwen-datasets/o?prefix=tokenized/run-1/" in list_url
 
+    def test_paginates_until_no_next_page_token(self, mocker, tmp_path):
+        mod = _mod()
+        page1 = (
+            b'{"items": [{"name": "tokenized/run-1/train/a.arrow", "mediaLink": "http://x/a"}],'
+            b' "nextPageToken": "t/ok+1"}'
+        )
+        page2 = (
+            b'{"items": [{"name": "tokenized/run-1/val/b.arrow", "mediaLink": "http://x/b"}],'
+            b' "nextPageToken": "t2"}'
+        )
+        page3 = b'{"items": [{"name": "tokenized/run-1/test/c.arrow", "mediaLink": "http://x/c"}]}'
+        mocker.patch("shutil.copyfileobj")
+        urlopen = mocker.patch(
+            "urllib.request.urlopen",
+            side_effect=[
+                _FakeHttpResponse(page1),
+                _FakeHttpResponse(page2),
+                _FakeHttpResponse(page3),
+                _FakeHttpResponse(b"a"),
+                _FakeHttpResponse(b"b"),
+                _FakeHttpResponse(b"c"),
+            ],
+        )
+
+        result = mod._download_gcs_public("tokenized/run-1/", str(tmp_path))
+
+        assert result == str(tmp_path)
+        # 3 listing pages + 3 media downloads; every page fully consumed.
+        assert urlopen.call_count == 6
+        list_urls = [call.args[0] for call in urlopen.call_args_list[:3]]
+        assert all("prefix=tokenized/run-1/" in url for url in list_urls)
+        assert "pageToken=t%2Fok%2B1" in list_urls[1]
+        assert "pageToken=t2" in list_urls[2]
+        for rel in ("train/a.arrow", "val/b.arrow", "test/c.arrow"):
+            assert (tmp_path / rel).exists()
+
     def test_no_items_raises(self, mocker, tmp_path):
         mod = _mod()
         mocker.patch(
