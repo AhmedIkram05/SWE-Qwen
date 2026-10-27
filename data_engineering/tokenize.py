@@ -208,7 +208,7 @@ def _log_tokenization_histograms(  # noqa: PLR0913, PLR0917
     )
 
 
-def tokenize_split(
+def tokenize_split(  # noqa: PLR0915
     records: list[dict[str, Any]],
     tokenizer: Any,
     prompt_loader: PromptLoader,
@@ -243,9 +243,6 @@ def tokenize_split(
     prompt_ends: list[int] = []  # token index where prompt ends (response starts)
     errors = 0
     dropped = 0  # examples whose prompt alone fills the window (no room for the gold patch)
-    truncated_dropped = 0  # prompt fits but prompt+completion exceeds max_length
-    prompt_lens: list[int] = []
-    completion_lens: list[int] = []
 
     for i, rec in enumerate(records):
         try:
@@ -258,23 +255,12 @@ def tokenize_split(
                 add_special_tokens=True,
                 truncation=False,
             )["input_ids"]
-            full_ids = tokenizer(
-                text,
-                add_special_tokens=True,
-                truncation=False,
-            )["input_ids"]
             prompt_len = len(prompt_ids)
-            full_len = len(full_ids)
             if prompt_len >= max_length:
                 dropped += 1
                 continue
-            if full_len > max_length:
-                truncated_dropped += 1
-                continue
             texts.append(text)
             prompt_ends.append(prompt_len)
-            prompt_lens.append(prompt_len)
-            completion_lens.append(full_len - prompt_len)
 
         except Exception as exc:
             errors += 1
@@ -304,25 +290,13 @@ def tokenize_split(
             max_length,
         )
 
-    if truncated_dropped:
-        logger.warning(
-            "Tokenization: dropped %d/%d records in split '%s' "
-            "(prompt+completion exceeds max_length=%d, completion never truncated)",
-            truncated_dropped,
-            len(records),
-            split_name,
-            max_length,
-        )
-
-    _log_tokenization_histograms(
-        split_name, prompt_lens, completion_lens, dropped, truncated_dropped, max_length
-    )
-
     if not texts:
         logger.error("No valid texts for split '%s'", split_name)
         return Dataset.from_list([])
 
-    # Tokenize all texts (no truncation: oversize was dropped above)
+    # Tokenize all texts in one pass (no truncation: oversize rows are
+    # dropped below, never cut). The full lengths this pass yields replace
+    # a second per-record full-text tokenization that doubled corpus cost.
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
@@ -336,39 +310,68 @@ def tokenize_split(
         return_tensors=None,  # return python lists
     )
 
-    # Build labels with prompt masking (-100 for prompt tokens).
+    truncated_dropped = 0  # prompt fits but prompt+completion exceeds max_length
+    labels: list[list[int]] = []
+    kept_input_ids: list[list[int]] = []
+    kept_attention_mask: list[list[int]] = []
+    kept_prompt_ends: list[int] = []
+    kept_completion_lens: list[int] = []
+    # Build labels with prompt masking (-100 for prompt tokens), dropping
+    # oversize rows instead of truncating (the gold tail is never cut).
     # No pad tokens exist here (padding=False); the trainer collator pads
     # batches and masks those pads to -100, so stored labels stay exact.
-    labels = []
-    for i, input_ids in enumerate(tokenized["input_ids"]):
-        prompt_end = prompt_ends[i] if i < len(prompt_ends) else 0
-        # Mask prompt tokens with -100
+    for input_ids, attention_mask, prompt_end in zip(
+        tokenized["input_ids"], tokenized["attention_mask"], prompt_ends, strict=True
+    ):
+        if len(input_ids) > max_length:
+            truncated_dropped += 1
+            continue
         label = [-100] * prompt_end + input_ids[prompt_end:]
         # Ensure same length (pad positions, if any, stay -100)
         if len(label) != len(input_ids):
             label = label[: len(input_ids)] + [-100] * max(0, len(input_ids) - len(label))
         labels.append(label)
+        kept_input_ids.append(input_ids)
+        kept_attention_mask.append(attention_mask)
+        kept_prompt_ends.append(prompt_end)
+        kept_completion_lens.append(len(input_ids) - prompt_end)
 
-    # Build dataset dict
-    data = {
-        INPUT_IDS_COL: tokenized["input_ids"],
-        ATTENTION_MASK_COL: tokenized["attention_mask"],
-        LABELS_COL: labels,
-    }
+    if truncated_dropped:
+        logger.warning(
+            "Tokenization: dropped %d/%d records in split '%s' "
+            "(prompt+completion exceeds max_length=%d, completion never truncated)",
+            truncated_dropped,
+            len(records),
+            split_name,
+            max_length,
+        )
 
-    dataset = Dataset.from_dict(data)
+    _log_tokenization_histograms(
+        split_name, kept_prompt_ends, kept_completion_lens, dropped, truncated_dropped, max_length
+    )
+
+    if not labels:
+        logger.error("No valid texts for split '%s'", split_name)
+        return Dataset.from_list([])
+
     logger.info(
         "Tokenized '%s' split: %d records → %d examples "
         "(max_length=%d, errors=%d, dropped_prompt=%d, dropped_truncated=%d)",
         split_name,
         len(records),
-        len(dataset),
+        len(labels),
         max_length,
         errors,
         dropped,
         truncated_dropped,
     )
-    return dataset
+    return Dataset.from_dict(
+        {
+            INPUT_IDS_COL: kept_input_ids,
+            ATTENTION_MASK_COL: kept_attention_mask,
+            LABELS_COL: labels,
+        }
+    )
 
 
 def tokenize_pipeline(  # noqa: PLR0913, PLR0917

@@ -683,3 +683,36 @@ class TestTokenizeAlignmentContract:
         assert "Tokenization histograms" in caplog.text
         assert "prompt_mean=" in caplog.text
         assert "completion_mean=" in caplog.text
+
+
+class TestSingleTokenizationPass:
+    """Each record's full text is tokenized exactly once (the batch pass).
+
+    The drop-check lengths come from that same pass; a separate per-record
+    full-text tokenization used to double the corpus tokenization cost.
+    """
+
+    class _CountingTokenizer:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+            self.calls = 0
+
+        def __call__(self, texts: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            return self._real(texts, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+    def test_invocation_count_drops_and_outputs_identical(
+        self, tokenizer: Any, prompt_loader: PromptLoader, sample_records: list[dict[str, Any]]
+    ) -> None:
+        counting = self._CountingTokenizer(tokenizer)
+        ds = tokenize_split(sample_records, counting, prompt_loader, max_length=1024)
+        # One prompt-only call per record + one batched full-text call
+        # (was 2N + 1: an extra full per-record pass just for drop checks).
+        assert counting.calls == len(sample_records) + 1
+
+        reference = tokenize_split(sample_records, tokenizer, prompt_loader, max_length=1024)
+        assert len(ds) == len(reference) == len(sample_records)
+        assert ds.to_list() == reference.to_list()
