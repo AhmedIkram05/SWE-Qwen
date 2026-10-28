@@ -90,7 +90,6 @@ def _save_dataset_to_gcs(
                     blob.upload_from_filename(str(file_path))
                     logger.info(f"Uploaded {key} to GCS")
 
-            prefix = f"tokenized/{bucket_name}/{prefix}"
             gcs_paths["dataset"] = f"gs://{bucket_name}/tokenized/{prefix}"
 
     except Exception as e:

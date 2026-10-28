@@ -401,9 +401,10 @@ class TestSaveDatasetToGcs:
             result = _save_dataset_to_gcs(ds, "test-bucket", "myprefix")
 
         assert "dataset" in result
-        assert "gs://" in result["dataset"]
-        assert "test-bucket" in result["dataset"]
-        mock_bucket.blob.assert_called()
+        keys = [call.args[0] for call in mock_bucket.blob.call_args_list]
+        assert keys and all(k.startswith("tokenized/myprefix/") for k in keys)
+        # The reported path must equal the actual uploaded key prefix.
+        assert result["dataset"] == "gs://test-bucket/tokenized/myprefix"
         mock_blob.upload_from_filename.assert_called()
 
     def test_bucket_not_exists_returns_empty(self, tmp_path: Path) -> None:
