@@ -21,7 +21,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -221,20 +221,27 @@ def _eval() -> Any:
 _TOKENIZER_CACHE: dict[str, Any] = {}
 
 
+@cache
+def _no_think_flag_cached(repo_root: Path, hf_id: str) -> bool:
+    from registry.loader import load_raw_models
+
+    for entry in load_raw_models(repo_root=repo_root).values():
+        if entry.get("hf_id") == hf_id:
+            prompt_behavior = entry.get("prompt_behavior") or {}
+            return bool(prompt_behavior.get("no_think", False))
+    return False
+
+
 def no_think_flag(hf_id: str) -> bool:
     """Registry ``prompt_behavior.no_think`` flag for *hf_id*'s entry.
 
     False when the entry or the flag is absent — unknown models take the
     plain path, since the Qwen-only gates raise on other tokenizers.
+    Cached per (repo_root, hf_id): ``load_raw_models`` re-parses the
+    registry yaml off disk, which otherwise ran once per rendered prompt.
     """
     state = _eval()
-    from registry.loader import load_raw_models
-
-    for entry in load_raw_models(repo_root=state._REPO_ROOT).values():
-        if entry.get("hf_id") == hf_id:
-            prompt_behavior = entry.get("prompt_behavior") or {}
-            return bool(prompt_behavior.get("no_think", False))
-    return False
+    return _no_think_flag_cached(state._REPO_ROOT, hf_id)
 
 
 def apply_no_think_raw(hf_id: str, prompt: str) -> str:
