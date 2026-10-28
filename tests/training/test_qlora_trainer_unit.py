@@ -339,8 +339,33 @@ class TestQLoRATrainerUnit:
 
         trainer._setup_data()
 
-        mock_train.select.assert_called_once_with(range(10))
+        # Even stride across the ingest-ordered rows, not the first N.
+        mock_train.select.assert_called_once_with([100 * i // 10 for i in range(10)])
         assert len(trainer.train_dataset) == 10
+
+    def test_setup_data_subsample_full_range_when_max_ge_len(self, mocker, tmp_path):
+        """max_train_samples >= dataset size selects every row, unchanged."""
+        from training.qlora_trainer import QLoRATrainer
+
+        mock_train = MagicMock()
+        mock_train.__len__.return_value = 10
+
+        mock_dataset = MagicMock()
+        mock_dataset.get.side_effect = lambda key, default=None: {"train": mock_train}.get(
+            key, default
+        )
+
+        mocker.patch(
+            "training.qlora_trainer.load_from_disk",
+            return_value=mock_dataset,
+        )
+
+        trainer = QLoRATrainer(data_dir=str(tmp_path), max_train_samples=100)
+        trainer.data_dir.mkdir(parents=True, exist_ok=True)
+
+        trainer._setup_data()
+
+        mock_train.select.assert_called_once_with(list(range(10)))
 
     def test_setup_data_happy_path(self, mocker, tmp_path):
         """Loads both train and eval datasets."""
