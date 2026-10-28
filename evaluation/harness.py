@@ -459,7 +459,8 @@ def _run_tests_swebench(
             len(missing),
             ", ".join(ex.instance_id for ex in missing),
         )
-    instances = [ex for ex in instances if ex not in missing]
+    missing_ids = {ex.instance_id for ex in missing}
+    instances = [ex for ex in instances if ex.instance_id not in missing_ids]
     if not instances:
         return {}
 
