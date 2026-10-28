@@ -153,6 +153,30 @@ class TestNoThinkFlagCaching:
         assert len(calls) == 2  # one registry parse per distinct hf_id
 
 
+class TestPromptLoaderHoisted:
+    def test_one_loader_per_template_dir(self, example, tmp_path, monkeypatch):
+        """render_patch_prompt reuses one PromptLoader per template dir."""
+        import shutil
+
+        from training.prompt_loader import PromptLoader
+
+        tdir = tmp_path / "prompts"
+        shutil.copytree(prompt_builder._PROMPTS_DIR, tdir)
+
+        real_init = PromptLoader.__init__
+        inits: list = []
+
+        def counting_init(self, template_dir=None):
+            inits.append(template_dir)
+            real_init(self, template_dir)
+
+        monkeypatch.setattr(PromptLoader, "__init__", counting_init)
+
+        prompt_builder.render_patch_prompt(example, template_dir=tdir)
+        prompt_builder.render_patch_prompt(example, template_dir=tdir)
+        assert len(inits) == 1
+
+
 class TestFilesFromDiff:
     def test_empty_patch(self):
         assert prompt_builder._files_from_diff("") == []

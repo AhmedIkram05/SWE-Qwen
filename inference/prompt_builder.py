@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PROMPTS_DIR = _REPO_ROOT / "training" / "prompts"
 
+# One PromptLoader per resolved template dir: PromptLoader builds a fresh
+# Jinja Environment, which render_patch_prompt used to rebuild per prompt.
+_PROMPT_LOADER_CACHE: dict[str, Any] = {}
+
 DEFAULT_TEMPLATE = "chat"
 
 
@@ -484,7 +488,11 @@ def render_patch_prompt(
     """
     from training.prompt_loader import PromptLoader
 
-    loader = PromptLoader(template_dir=template_dir or _PROMPTS_DIR)
+    dir_key = str(template_dir or _PROMPTS_DIR)
+    loader = _PROMPT_LOADER_CACHE.get(dir_key)
+    if loader is None:
+        loader = PromptLoader(template_dir=template_dir or _PROMPTS_DIR)
+        _PROMPT_LOADER_CACHE[dir_key] = loader
     system_kwargs = contract_system_kwargs(example.metadata)
     context_files: list[str] = [str(f) for f in (example.metadata or {}).get("context_files", [])][
         :CONTEXT_FILES_MAX
