@@ -327,6 +327,22 @@ def test_run_tests_swebench_raises_when_disabled(monkeypatch: pytest.MonkeyPatch
         harness_mod._run_tests_swebench([_input()], {"inst-1": ""}, _cfg(Path("/tmp/unused")))
 
 
+def test_run_split_empty_models_skips_pool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``_run_split`` with zero (model, variant) combos completes without a pool.
+
+    ThreadPoolExecutor raises ValueError on max_workers=0; the empty run must
+    skip the pool and still return a completed EvalRun.
+    """
+    harness = harness_mod.EvaluationHarness(_cfg(tmp_path))
+    monkeypatch.setattr(harness, "load_examples", lambda *a, **k: [])
+
+    run = harness._run_split([], "golden", ["chat"], sample=0, run_id="test-empty-combos")
+
+    assert run.results == []
+    assert run.models_evaluated == []
+    assert run.status == "completed"
+
+
 # ── _run_tests_batch: fallback dispatch ───────────────────────────────────
 
 

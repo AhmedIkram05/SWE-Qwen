@@ -1511,9 +1511,12 @@ class EvaluationHarness:
                 max_new_tokens=max_new_tokens,
             )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(combos)) as pool:
-            # ponytail: consume the lazy iterator so exceptions propagate
-            list(pool.map(_run_combo, range(len(combos))))
+        # No combos (empty models list) means no pool — ThreadPoolExecutor
+        # raises on max_workers=0 — and the empty-run EvalRun below is correct.
+        if combos:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(combos)) as pool:
+                # ponytail: consume the lazy iterator so exceptions propagate
+                list(pool.map(_run_combo, range(len(combos))))
 
         results: list[EvalResult] = []
         for batch_results in all_results:
