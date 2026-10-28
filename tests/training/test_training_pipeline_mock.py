@@ -634,6 +634,46 @@ class TestWandbCheckpointCallback:
         cb.on_train_end(args, state, control)  # flush — still no raise
         assert ckpt_dir.is_dir()
 
+    def test_on_save_metadata_uses_latest_eval_loss(self, mocker, tmp_path):
+        """eval_loss comes from the latest entry that HAS one, not the last row."""
+        mock_run = mocker.MagicMock()
+        mock_run.name = "test-run"
+        mocker.patch("wandb.run", mock_run)
+
+        captured: dict = {}
+        mock_artifact = mocker.MagicMock()
+
+        def fake_artifact(**kwargs):
+            captured.update(kwargs)
+            return mock_artifact
+
+        mocker.patch("wandb.Artifact", side_effect=fake_artifact)
+        mocker.patch("wandb.log_artifact")
+
+        ckpt_dir = tmp_path / "checkpoint-50"
+        ckpt_dir.mkdir()
+        (ckpt_dir / "adapter_model.safetensors").write_text("weights")
+
+        from transformers import TrainingArguments
+        from transformers.trainer_callback import TrainerControl, TrainerState
+
+        from training.callbacks import WandbCheckpointCallback
+
+        cb = WandbCheckpointCallback()
+        args = TrainingArguments(output_dir=str(tmp_path))
+        state = TrainerState()
+        state.epoch = 0.5
+        state.global_step = 50
+        state.max_steps = 500
+        # log_history ends with a train-loss row; the eval row is earlier.
+        state.log_history = [{"eval_loss": 0.5}, {"loss": 0.4}]
+        control = TrainerControl()
+
+        cb.on_save(args, state, control)
+        cb.on_train_end(args, state, control)  # join the upload thread
+
+        assert captured["metadata"]["eval_loss"] == 0.5
+
 
 class TestWandbLoggingCallback:
     """WandbLoggingCallback guard branches."""
