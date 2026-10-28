@@ -29,8 +29,10 @@ def _force_local_state(monkeypatch):
 @pytest.fixture(autouse=True)
 def _clear_lru_cache():
     prompt_builder.fetch_raw_file.cache_clear()
+    prompt_builder._no_think_flag_cached.cache_clear()
     yield
     prompt_builder.fetch_raw_file.cache_clear()
+    prompt_builder._no_think_flag_cached.cache_clear()
 
 
 @pytest.fixture
@@ -129,6 +131,50 @@ class TestApplyNoThinkRaw:
     def test_passthrough_when_not_flagged(self, monkeypatch):
         monkeypatch.setattr(prompt_builder, "no_think_flag", lambda hf_id: False)
         assert prompt_builder.apply_no_think_raw("m", "A\n### Response\nB") == "A\n### Response\nB"
+
+
+class TestNoThinkFlagCaching:
+    def test_flag_resolved_once_per_model(self, monkeypatch):
+        """load_raw_models runs once per hf_id, not once per rendered prompt."""
+        calls: list = []
+
+        def fake_load_raw_models(repo_root):
+            calls.append(repo_root)
+            return {
+                "a": {"hf_id": "Qwen/Qwen3-14B", "prompt_behavior": {"no_think": True}},
+                "b": {"hf_id": "Other/Model"},
+            }
+
+        monkeypatch.setattr("registry.loader.load_raw_models", fake_load_raw_models)
+
+        assert prompt_builder.no_think_flag("Qwen/Qwen3-14B") is True
+        assert prompt_builder.no_think_flag("Qwen/Qwen3-14B") is True
+        assert prompt_builder.no_think_flag("Other/Model") is False
+        assert len(calls) == 2  # one registry parse per distinct hf_id
+
+
+class TestPromptLoaderHoisted:
+    def test_one_loader_per_template_dir(self, example, tmp_path, monkeypatch):
+        """render_patch_prompt reuses one PromptLoader per template dir."""
+        import shutil
+
+        from training.prompt_loader import PromptLoader
+
+        tdir = tmp_path / "prompts"
+        shutil.copytree(prompt_builder._PROMPTS_DIR, tdir)
+
+        real_init = PromptLoader.__init__
+        inits: list = []
+
+        def counting_init(self, template_dir=None):
+            inits.append(template_dir)
+            real_init(self, template_dir)
+
+        monkeypatch.setattr(PromptLoader, "__init__", counting_init)
+
+        prompt_builder.render_patch_prompt(example, template_dir=tdir)
+        prompt_builder.render_patch_prompt(example, template_dir=tdir)
+        assert len(inits) == 1
 
 
 class TestFilesFromDiff:

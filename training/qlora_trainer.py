@@ -372,16 +372,19 @@ class QLoRATrainer:
         val = dataset_dict.get("val")
         self.eval_dataset = val if val is not None and len(val) > 0 else None
 
-        # Subsample for quick debugging
+        # Subsample for quick debugging: even stride over the ingest-ordered
+        # rows (grouped by repo) so the debug subset spans repos instead of
+        # repeating one repo's prefix. Deterministic — no RNG.
         if self.max_train_samples is not None and self.train_dataset is not None:
-            n = min(self.max_train_samples, len(self.train_dataset))
+            total = len(self.train_dataset)
+            n = min(self.max_train_samples, total)
             logger.info(
-                "Subsampling train dataset: %d -> %d (max_train_samples=%d)",
-                len(self.train_dataset),
+                "Subsampling train dataset: %d -> %d (max_train_samples=%d, even stride)",
+                total,
                 n,
                 self.max_train_samples,
             )
-            self.train_dataset = self.train_dataset.select(range(n))
+            self.train_dataset = self.train_dataset.select([total * i // n for i in range(n)])
 
         if self.train_dataset is None:
             raise ValueError(f"No 'train' split found in {self.data_dir}")

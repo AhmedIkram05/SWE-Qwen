@@ -90,7 +90,6 @@ def _save_dataset_to_gcs(
                     blob.upload_from_filename(str(file_path))
                     logger.info(f"Uploaded {key} to GCS")
 
-            prefix = f"tokenized/{bucket_name}/{prefix}"
             gcs_paths["dataset"] = f"gs://{bucket_name}/tokenized/{prefix}"
 
     except Exception as e:
@@ -327,9 +326,6 @@ def tokenize_split(  # noqa: PLR0915
             truncated_dropped += 1
             continue
         label = [-100] * prompt_end + input_ids[prompt_end:]
-        # Ensure same length (pad positions, if any, stay -100)
-        if len(label) != len(input_ids):
-            label = label[: len(input_ids)] + [-100] * max(0, len(input_ids) - len(label))
         labels.append(label)
         kept_input_ids.append(input_ids)
         kept_attention_mask.append(attention_mask)

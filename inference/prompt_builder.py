@@ -21,7 +21,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PROMPTS_DIR = _REPO_ROOT / "training" / "prompts"
+
+# One PromptLoader per resolved template dir: PromptLoader builds a fresh
+# Jinja Environment, which render_patch_prompt used to rebuild per prompt.
+_PROMPT_LOADER_CACHE: dict[str, Any] = {}
 
 DEFAULT_TEMPLATE = "chat"
 
@@ -221,20 +225,27 @@ def _eval() -> Any:
 _TOKENIZER_CACHE: dict[str, Any] = {}
 
 
+@cache
+def _no_think_flag_cached(repo_root: Path, hf_id: str) -> bool:
+    from registry.loader import load_raw_models
+
+    for entry in load_raw_models(repo_root=repo_root).values():
+        if entry.get("hf_id") == hf_id:
+            prompt_behavior = entry.get("prompt_behavior") or {}
+            return bool(prompt_behavior.get("no_think", False))
+    return False
+
+
 def no_think_flag(hf_id: str) -> bool:
     """Registry ``prompt_behavior.no_think`` flag for *hf_id*'s entry.
 
     False when the entry or the flag is absent — unknown models take the
     plain path, since the Qwen-only gates raise on other tokenizers.
+    Cached per (repo_root, hf_id): ``load_raw_models`` re-parses the
+    registry yaml off disk, which otherwise ran once per rendered prompt.
     """
     state = _eval()
-    from registry.loader import load_raw_models
-
-    for entry in load_raw_models(repo_root=state._REPO_ROOT).values():
-        if entry.get("hf_id") == hf_id:
-            prompt_behavior = entry.get("prompt_behavior") or {}
-            return bool(prompt_behavior.get("no_think", False))
-    return False
+    return _no_think_flag_cached(state._REPO_ROOT, hf_id)
 
 
 def apply_no_think_raw(hf_id: str, prompt: str) -> str:
@@ -477,7 +488,11 @@ def render_patch_prompt(
     """
     from training.prompt_loader import PromptLoader
 
-    loader = PromptLoader(template_dir=template_dir or _PROMPTS_DIR)
+    dir_key = str(template_dir or _PROMPTS_DIR)
+    loader = _PROMPT_LOADER_CACHE.get(dir_key)
+    if loader is None:
+        loader = PromptLoader(template_dir=template_dir or _PROMPTS_DIR)
+        _PROMPT_LOADER_CACHE[dir_key] = loader
     system_kwargs = contract_system_kwargs(example.metadata)
     context_files: list[str] = [str(f) for f in (example.metadata or {}).get("context_files", [])][
         :CONTEXT_FILES_MAX

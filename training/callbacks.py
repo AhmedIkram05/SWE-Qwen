@@ -110,12 +110,16 @@ class WandbCheckpointCallback(TrainerCallback):
             else f"checkpoint-step-{step}"
         )
 
+        # Latest eval_loss, not just the last log entry: log_history usually
+        # ends with a train-loss row at save time, which reported eval_loss=None.
+        eval_loss = next(
+            (log.get("eval_loss") for log in reversed(state.log_history) if "eval_loss" in log),
+            None,
+        )
         metadata = {
             "step": step,
             "epoch": state.epoch if state.epoch else 0,
-            "eval_loss": state.log_history[-1].get("eval_loss", None)
-            if state.log_history
-            else None,
+            "eval_loss": eval_loss,
             "global_step": state.global_step,
             "max_steps": state.max_steps,
         }
