@@ -688,6 +688,25 @@ class TestGetLLM:
         assert fake_vllm["llm_instances"] == 1
         assert fake_vllm["llm"]["enforce_eager"] is False
 
+    def test_env_override_pins_engine_mode(self, fake_vllm, monkeypatch):
+        # B12a: EVAL_EAGER_ENGINE is the stable process-wide signal — it wins
+        # over the caller's batch-size proposal, so mixed probe+full
+        # containers get a deterministic engine instead of whichever batch
+        # loaded first.
+        monkeypatch.setenv("EVAL_EAGER_ENGINE", "1")
+        _get_llm("Qwen/Qwen3-14B", eager=False)  # big-batch proposal
+        assert fake_vllm["llm"]["enforce_eager"] is True
+
+    def test_two_batch_sizes_cannot_conflict_engine_mode(self, fake_vllm, monkeypatch):
+        # B12a: the probe-sized batch loads first and its mode sticks — a
+        # later, differently-sized batch never rebuilds the engine with the
+        # other mode (documented first-load-wins contract).
+        monkeypatch.delenv("EVAL_EAGER_ENGINE", raising=False)
+        _get_llm("Qwen/Qwen3-14B", eager=True)  # probe-sized batch loads first
+        _get_llm("Qwen/Qwen3-14B", eager=False)  # full-sized batch arrives later
+        assert fake_vllm["llm_instances"] == 1
+        assert fake_vllm["llm"]["enforce_eager"] is True
+
     def test_cache_hit(self, fake_vllm):
         first = _get_llm("Qwen/Qwen3-14B")
         second = _get_llm("Qwen/Qwen3-14B")

@@ -106,6 +106,13 @@ class EvalConfig(BaseSettings):
     }
     # Inference GPU: A100-80GB is required for 14B bf16; a10g-24gb works for ≤7B
     inference_gpu: str = "a100-80gb"
+    # vLLM engine mode for the whole process (EVAL_EAGER_ENGINE). The engine is
+    # a per-model singleton — whichever mode the first load uses sticks for the
+    # container's lifetime — so the mode must be decided once. None (default)
+    # keeps the legacy batch-size heuristic (<32 examples → eager, saving the
+    # ~150s compile cold start for probe/smoke runs); set 1/0 to pin the mode
+    # explicitly for containers that mix probe and full batches.
+    eager_engine: bool | None = None
 
     @model_validator(mode="after")
     def _resolve_registry(self) -> EvalConfig:
