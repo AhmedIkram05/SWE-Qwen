@@ -213,6 +213,11 @@ def _build_with_unsloth(
 
     # Pass everything via peft_kwargs - DO NOT include task_type or padding_free
     # Unsloth wrapper passes to LoraConfig which doesn't support these
+    # PEFT-level checkpointing mode: "unsloth" (Unsloth's patched
+    # implementation, saves ~30% VRAM) unless the variant yaml overrides it
+    # via training.use_gradient_checkpointing ("unsloth" | true | false).
+    gradient_ckpt = variant_cfg.get("training", {}).get("use_gradient_checkpointing", "unsloth")
+
     peft_kwargs.update(
         {
             "r": r,
@@ -220,7 +225,7 @@ def _build_with_unsloth(
             "lora_dropout": lora_dropout,
             "target_modules": target_modules,
             "bias": bias,
-            "use_gradient_checkpointing": "unsloth",  # saves 30% VRAM
+            "use_gradient_checkpointing": gradient_ckpt,
         }
     )
 

@@ -301,6 +301,25 @@ class TestBuildWithUnsloth:
         assert peft_call_kwargs["use_gradient_checkpointing"] == "unsloth"
         assert peft_call_kwargs["extra_param"] == "should_pass"
 
+    def test_gradient_checkpointing_from_variant(self, mocker):
+        """training.use_gradient_checkpointing overrides the "unsloth" default."""
+        mock_flm = self._mock_unsloth(mocker)
+
+        from training.unsloth_factory import _build_with_unsloth
+
+        model_cfg = {"hf_id": "test"}
+        variant_cfg = {
+            "lora": {"r": 16},
+            "training": {"use_gradient_checkpointing": True},
+        }
+        _build_with_unsloth(model_cfg, variant_cfg, 4096, True)
+        assert mock_flm.get_peft_model.call_args[1]["use_gradient_checkpointing"] is True
+
+        # Default unchanged: absent key → "unsloth".
+        mock_flm.get_peft_model.reset_mock()
+        _build_with_unsloth(model_cfg, {"lora": {"r": 16}}, 4096, True)
+        assert mock_flm.get_peft_model.call_args[1]["use_gradient_checkpointing"] == "unsloth"
+
 
 class TestBuildFallback:
     """Test _build_fallback config with transformers/peft mocked."""

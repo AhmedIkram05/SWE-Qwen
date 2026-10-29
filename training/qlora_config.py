@@ -198,6 +198,10 @@ def build_qlora_config(
     packing = False
     max_seq_length = train_params.pop("max_seq_length", 32768)
 
+    # PEFT-level checkpointing mode ("unsloth"/true/false) — consumed by
+    # unsloth_factory.get_peft_model, not a valid SFTConfig kwarg.
+    train_params.pop("use_gradient_checkpointing", None)
+
     # Pop bf16/fp16 — transformers v5 validates these at init time against
     # CUDA availability, which may not be ready at config-build time on Modal.
     # Restored directly on the SFTConfig instance after init.
