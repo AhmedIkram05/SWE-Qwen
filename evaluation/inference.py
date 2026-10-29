@@ -149,15 +149,28 @@ def _get_llm(
             start for probe/smoke batches).  Only honoured on the first load;
             a cached engine is reused as-is so a container never holds two
             LLM instances for one model (27.5 GiB each — OOM risk).
+            ``EVAL_EAGER_ENGINE`` (``EvalConfig.eager_engine``) overrides the
+            caller's proposal when set, pinning the mode deterministically.
 
-    Returns:
-        A ``vllm.LLM`` instance (cached after first creation).
+        Returns:
+            A ``vllm.LLM`` instance (cached after first creation).
     """
     from vllm import LLM
+
+    from evaluation.config import EvalConfig
 
     with _LLM_LOCK:
         if model_name in _LLM_CACHE:
             return _LLM_CACHE[model_name]
+
+        # Engine mode is decided exactly once per process: the cache makes the
+        # first load's mode stick for the container lifetime, so an explicit
+        # EVAL_EAGER_ENGINE override must be consulted here — at the only
+        # point where the decision binds. The caller's batch-size heuristic
+        # is only the default proposal.
+        override = EvalConfig().eager_engine
+        if override is not None:
+            eager = override
 
         llm = LLM(
             model=resolve_hf_id(model_name),
@@ -171,6 +184,11 @@ def _get_llm(
         )
         # ponytail: one LLM per base model; LoRA adapters loaded on-demand
         # per generate() call via lora_request param.
+        logger.info(
+            "engine mode locked for %s: enforce_eager=%s for the rest of this process",
+            model_name,
+            eager,
+        )
         _LLM_CACHE[model_name] = llm
         return llm
 
@@ -419,9 +437,11 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     else:
         logger.info("no LoRA adapter for variant %s — using base model %s", variant, model_name)
 
-    # ponytail: engine compile pays off for big batches; probe/smoke tiers
-    # (<32 prompts) get enforce_eager instead — ~150s less cold start per run
-    # (~$0.14 saved).  First load wins; a cached engine is never rebuilt.
+    # Engine compile pays off for big batches; probe/smoke tiers (<32 prompts)
+    # propose enforce_eager instead — ~150s less cold start per run (~$0.14
+    # saved). This is only a proposal: the first load decides the mode and the
+    # cached engine keeps it for the process lifetime (see _get_llm);
+    # EVAL_EAGER_ENGINE overrides the heuristic for mixed probe+full runs.
     eager = len(examples) < 32  # noqa: PLR2004
     llm = _get_llm(model_name, eager=eager)
     hf_id = resolve_hf_id(model_name)

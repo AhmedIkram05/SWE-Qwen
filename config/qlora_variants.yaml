@@ -43,6 +43,9 @@ variants:
       report_to: "wandb"
       ddp_find_unused_parameters: false
       gradient_checkpointing: true
+      # PEFT-level checkpointing mode for get_peft_model ("unsloth" | true |
+      # false); defaults to "unsloth" (~30% VRAM saving) when absent.
+      # use_gradient_checkpointing: "unsloth"
       dataloader_num_workers: 2
       remove_unused_columns: false
       # False for pre-tokenized input_ids/labels: packing concatenates

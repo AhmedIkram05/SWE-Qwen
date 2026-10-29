@@ -122,6 +122,33 @@ class TestBuildQLoraConfig:
         assert training_args.gradient_checkpointing is True
         assert training_args.max_length == 4096
 
+    def test_use_gradient_checkpointing_popped_from_sft_config(self, mocker):
+        """The PEFT-level checkpointing key is factory-only, never an SFTConfig kwarg.
+
+        A variant yaml may set training.use_gradient_checkpointing for
+        unsloth_factory.get_peft_model; build_qlora_config must pop it so
+        SFTConfig(**train_params) doesn't reject it as an unknown kwarg.
+        """
+        variant_cfg = {
+            "lora": {"r": 16, "lora_alpha": 32, "lora_dropout": 0.0},
+            "training": {
+                "learning_rate": 2.0e-5,
+                "num_train_epochs": 1,
+                "gradient_checkpointing": True,
+                "use_gradient_checkpointing": "unsloth",
+            },
+        }
+        mocker.patch("training.qlora_config._get_variant_config", return_value=variant_cfg)
+
+        lora_config, training_args = build_qlora_config(
+            variant="baseline_14b",
+            model_name="qwen3-14b",
+        )
+
+        assert lora_config.r == 16
+        assert training_args.gradient_checkpointing is True
+        assert not hasattr(training_args, "use_gradient_checkpointing")
+
     def test_build_higher_rank_14b_config(self):
         """Higher rank: r=32, alpha=64, batch=1, grad_accum=16."""
         lora_config, training_args = build_qlora_config(
