@@ -14,6 +14,7 @@ installation.
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -1027,8 +1028,14 @@ _VERIFIED_DIR = Path("/test_cache") / ".verified"
 
 
 def _baseline_cache_path(instance_id: str) -> Path:
-    """Path to the cached baseline for *instance_id*."""
-    return _BASELINE_CACHE_DIR / f"{instance_id}.json"
+    """Path to the cached baseline for *instance_id*.
+
+    The id is hashed instead of embedded verbatim: ids originate from dataset
+    records and may contain ``/`` or ``..``, which would let a crafted id
+    escape the shared cache dir.  Hashing keeps hits deterministic per id.
+    """
+    digest = hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
+    return _BASELINE_CACHE_DIR / f"{digest}.json"
 
 
 def _load_baseline_cache(instance_id: str, base_sha: str) -> dict[str, Any] | None:
@@ -1334,8 +1341,11 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
         else:
             logger.info("no test_patch for %s — skipping ground truth verification", repo_name)
 
-        # Save baseline cache for reuse across variants
-        if instance_id and not error:
+        # Save baseline cache for reuse across variants. A once_per_repo skip
+        # fabricates ground truth (f2p=1.0 with an empty tests_head); caching
+        # it would let a later run reuse that unverified claim as real ground
+        # truth, so skipped runs are never persisted.
+        if instance_id and not error and not ground_truth.get("skipped"):
             _save_baseline_cache(
                 instance_id,
                 {

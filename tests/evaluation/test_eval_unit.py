@@ -923,7 +923,7 @@ def test_baseline_cache_hit_when_matching_base_sha(tmp_path: Path) -> None:
             "ground_truth": {},
         }
         tr_mod._save_baseline_cache("inst-1", data)
-        assert (cache_root / "inst-1.json").is_file()
+        assert tr_mod._baseline_cache_path("inst-1").is_file()
 
         loaded = tr_mod._load_baseline_cache("inst-1", "abc123")
         assert loaded is not None
@@ -958,8 +958,8 @@ def test_baseline_cache_corrupt_json(tmp_path: Path) -> None:
     original = tr_mod._BASELINE_CACHE_DIR
     cache_root = tmp_path / "test_cache"
     cache_root.mkdir(parents=True, exist_ok=True)
-    (cache_root / "bad-inst.json").write_text("{{not json", encoding="utf-8")
     tr_mod._BASELINE_CACHE_DIR = cache_root
+    tr_mod._baseline_cache_path("bad-inst").write_text("{{not json", encoding="utf-8")
     try:
         result = tr_mod._load_baseline_cache("bad-inst", "abc")
         assert result is None
@@ -974,11 +974,38 @@ def test_baseline_cache_missing_base_sha_field(tmp_path: Path) -> None:
     original = tr_mod._BASELINE_CACHE_DIR
     cache_root = tmp_path / "test_cache"
     cache_root.mkdir(parents=True, exist_ok=True)
-    (cache_root / "no-sha.json").write_text('{"tests_before": []}', encoding="utf-8")
     tr_mod._BASELINE_CACHE_DIR = cache_root
+    tr_mod._baseline_cache_path("no-sha").write_text('{"tests_before": []}', encoding="utf-8")
     try:
         result = tr_mod._load_baseline_cache("no-sha", "abc")
         assert result is None  # base_sha missing → can't match
+    finally:
+        tr_mod._BASELINE_CACHE_DIR = original
+
+
+def test_baseline_cache_hostile_id_stays_inside_cache_dir(tmp_path: Path) -> None:
+    """A hostile instance id cannot traverse out; the cache still round-trips."""
+    import evaluation.test_runner as tr_mod
+
+    original = tr_mod._BASELINE_CACHE_DIR
+    cache_root = tmp_path / "test_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    tr_mod._BASELINE_CACHE_DIR = cache_root
+    try:
+        hostile = "../../../etc/instance..id"
+        path = tr_mod._baseline_cache_path(hostile)
+        assert path.resolve().parent == cache_root.resolve()
+        assert "/" not in path.name and ".." not in path.name
+
+        tr_mod._save_baseline_cache(
+            hostile,
+            {"base_sha": "abc", "tests_before": [], "tests_head": [], "ground_truth": {}},
+        )
+        # exactly one file, inside the cache dir — nothing escaped
+        assert list(cache_root.glob("*.json")) == [path]
+        loaded = tr_mod._load_baseline_cache(hostile, "abc")
+        assert loaded is not None
+        assert loaded["base_sha"] == "abc"
     finally:
         tr_mod._BASELINE_CACHE_DIR = original
 
