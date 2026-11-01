@@ -78,6 +78,12 @@ def is_instance_resolved(result: EvalResult) -> bool:
     counts for the legacy mean ``f2p_rate`` but NOT for resolve: a patch
     that fixes half the F2P tests is still a failure for Wilson/McNemar,
     which require binary outcomes.
+
+    An instance with an empty ``fail_to_pass`` scores ``F2P==0.0`` (see
+    :func:`compute_f2p`) and is therefore never resolved.  This is the
+    conservative choice: a P2P-only instance signals malformed F2P metadata
+    (SWE-bench Verified always ships a non-empty ``FAIL_TO_PASS``), so it
+    flags bad data instead of crediting a vacuous pass.
     """
     return result.error is None and result.f2p == 1.0
 

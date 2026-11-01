@@ -17,6 +17,7 @@ from evaluation.comparison import compare_and_report
 from evaluation.metrics import (
     aggregate_metrics,
     apply_rate,
+    compute_f2p,
     conditional_resolve_rate,
     is_instance_resolved,
 )
@@ -61,6 +62,13 @@ class TestInstanceResolved:
 
     def test_errored_result_not_resolved(self):
         assert is_instance_resolved(_result("i1", 1.0, error="boom")) is False
+
+    def test_empty_fail_to_pass_never_resolves(self):
+        # Documented choice: an empty fail_to_pass yields F2P 0.0 (compute_f2p),
+        # so a P2P-only instance is never resolved — it flags malformed F2P
+        # metadata rather than crediting a vacuous pass.
+        f2p_rate, _, _, _ = compute_f2p([], [], [], [])
+        assert is_instance_resolved(_result("i1", f2p_rate)) is False
 
 
 class TestRateHelpers:
