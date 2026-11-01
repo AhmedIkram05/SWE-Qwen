@@ -3,13 +3,13 @@
 ``promotion/`` composes ``evaluation/`` (spec decision 1): this module calls
 ``evaluation.comparison`` and ``evaluation.stats`` directly instead of
 reimplementing aggregation or significance.  It bridges two single-variant
-``EvalRun`` objects from the same evaluation window — same ``dataset_run_id``
-and ``tier_seed``, asserted from the embedded ``EvalConfig`` — into one
-auditable :class:`PairEval`:
+``EvalRun`` objects from the same evaluation window — same (non-empty)
+``dataset_run_id`` and ``tier_seed``, enforced from the embedded ``EvalConfig``
+— into one auditable :class:`PairEval`:
 
-- per-instance 0/1 F2P vectors built from ``run.results``, filtered by the
-  run's variant and intersected on ``instance_id`` so both sides are paired
-  over the same instance set (spec §4.2);
+- per-instance strict 0/1 resolve vectors (error-free ``F2P == 1.0``) built
+  from ``run.results``, filtered by the run's variant and intersected on
+  ``instance_id`` so both sides are paired over the same instance set (spec §4.2);
 - significance from :func:`evaluation.stats.paired_bootstrap_ci` with the
   candidate as argument ``a`` (``ci_lower > 0`` means the candidate beats the
   champion) plus the exact two-sided McNemar p-value;
@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from evaluation import comparison
 from evaluation.comparison import extract_model_metrics
 from evaluation.config import EvalConfig
+from evaluation.metrics import is_instance_resolved
 from evaluation.schema import EvalRun, F2PMetrics
 from evaluation.stats import mcnamar_p, paired_bootstrap_ci
 
@@ -81,8 +82,18 @@ def _run_key(run: EvalRun) -> str:
 
 
 def _f2p_vector(run: EvalRun, variant: str) -> dict[str, float]:
-    """Per-instance 0/1 F2P vector for one variant (spec §4.2 formula)."""
-    return {r.instance_id: 1.0 if r.f2p > 0 else 0.0 for r in run.results if r.variant == variant}
+    """Per-instance strict 0/1 resolve vector for one variant (spec §4.2).
+
+    Uses the documented binary predicate :func:`evaluation.metrics.is_instance_resolved`
+    (error-free AND ``f2p == 1.0``), not ``f2p > 0``: partial credit feeds the
+    legacy mean ``f2p_rate`` but must NOT count as a win in the paired
+    bootstrap / McNemar, which require binary outcomes (see metrics.py).
+    """
+    return {
+        r.instance_id: 1.0 if is_instance_resolved(r) else 0.0
+        for r in run.results
+        if r.variant == variant
+    }
 
 
 def _gains(champion: F2PMetrics | None, candidate: F2PMetrics | None) -> tuple[float, float]:
@@ -99,8 +110,8 @@ def evaluate_pair(
 ) -> PairEval:
     """Evaluate a candidate head-to-head against the champion on paired instances.
 
-    Both runs must come from the same evaluation window: equal
-    ``dataset_run_id`` and ``tier_seed`` are asserted from the embedded run
+    Both runs must come from the same evaluation window: equal (non-empty)
+    ``dataset_run_id`` and ``tier_seed`` are enforced from the embedded run
     configs (spec decision 4) so the seed-42 instance subsets coincide.
     Per-instance 0/1 F2P vectors are built per variant and intersected on
     ``instance_id``; significance is computed with the candidate as argument
@@ -119,21 +130,34 @@ def evaluate_pair(
         The frozen :class:`PairEval` snapshot.
 
     Raises:
-        AssertionError: if the runs' ``dataset_run_id`` or ``tier_seed``
-            differ — they are not from the same evaluation window.
-        ValueError: if either run has no results, evaluates zero-or-many
-            variants, or the instance intersection is empty.
+        ValueError: if the runs' ``dataset_run_id`` or ``tier_seed`` differ, if
+            either ``dataset_run_id`` is empty (the window cannot be verified),
+            if either run has no results, evaluates zero-or-many variants, or
+            the instance intersection is empty.
     """
-    assert champion_run.config.dataset_run_id == candidate_run.config.dataset_run_id, (
-        f"unpaired runs: champion={champion_run.run_id} dataset_run_id="
-        f"{champion_run.config.dataset_run_id!r} != candidate={candidate_run.run_id} "
-        f"dataset_run_id={candidate_run.config.dataset_run_id!r}"
-    )
-    assert champion_run.config.tier_seed == candidate_run.config.tier_seed, (
-        f"unpaired runs: champion={champion_run.run_id} tier_seed="
-        f"{champion_run.config.tier_seed} != candidate={candidate_run.run_id} "
-        f"tier_seed={candidate_run.config.tier_seed}"
-    )
+    champion_window = champion_run.config.dataset_run_id
+    candidate_window = candidate_run.config.dataset_run_id
+    if not champion_window or not candidate_window:
+        # An empty dataset_run_id (the EvalConfig default) means load_examples
+        # fell back to a positional run_id, so two runs from *different*
+        # datasets could otherwise pair as "" == "" — mispaired significance.
+        raise ValueError(
+            f"unpaired runs: missing dataset_run_id: champion={champion_run.run_id} "
+            f"dataset_run_id={champion_window!r}, candidate={candidate_run.run_id} "
+            f"dataset_run_id={candidate_window!r} — the pairing window cannot be verified"
+        )
+    if champion_window != candidate_window:
+        raise ValueError(
+            f"unpaired runs: champion={champion_run.run_id} dataset_run_id="
+            f"{champion_window!r} != candidate={candidate_run.run_id} "
+            f"dataset_run_id={candidate_window!r}"
+        )
+    if champion_run.config.tier_seed != candidate_run.config.tier_seed:
+        raise ValueError(
+            f"unpaired runs: champion={champion_run.run_id} tier_seed="
+            f"{champion_run.config.tier_seed} != candidate={candidate_run.run_id} "
+            f"tier_seed={candidate_run.config.tier_seed}"
+        )
     if not champion_run.results or not candidate_run.results:
         raise ValueError(
             f"cannot pair runs with no results: champion={champion_run.run_id} "

@@ -236,6 +236,21 @@ def _normalize_patch_prefixes(patch: str) -> str:
     return text + "\n" if text else ""
 
 
+def _lora_int_id(adapter_path: str) -> int:
+    """Stable positive vLLM LoRA id derived from the resolved adapter path.
+
+    Modal reuses warm containers, so a constant id makes a second variant's
+    ``LoRARequest`` collide with the first (vLLM keys its loaded adapters by
+    ``lora_int_id``): a load error, or the wrong adapter silently serving a
+    request.  Hashing the path gives each adapter a distinct, reproducible id
+    — same adapter → same id across processes (correct warm-container reuse),
+    different adapter → different id.  Masked to 31 bits (vLLM's int id) and
+    floored at 1 (0 is not a valid LoRA id).
+    """
+    digest = hashlib.sha256(adapter_path.encode("utf-8")).digest()
+    return (int.from_bytes(digest[:4], "big") & 0x7FFFFFFF) or 1
+
+
 def extract_patch_with_flag(text: str) -> tuple[str, bool]:
     """Extract a unified diff, returning (patch, extraction_failed).
 
@@ -343,7 +358,12 @@ def generate_patches_batch(  # noqa: PLR0913, PLR0917
     from evaluation.config import EvalConfig
 
     config = EvalConfig()
-    gpu = _GPU_MAP.get(config.inference_gpu, "A100-80GB")
+    gpu = _GPU_MAP.get(config.inference_gpu)
+    if gpu is None:
+        # A typo in inference_gpu must not silently pick A100-80GB (~3x A10G cost).
+        raise ValueError(
+            f"unknown inference_gpu {config.inference_gpu!r}; expected one of {sorted(_GPU_MAP)}"
+        )
     fn = _get_inference_fn(gpu)
     return fn.remote(  # type: ignore[no-any-return]
         model_name,
@@ -483,7 +503,7 @@ def _generate_patches_batch_body(  # noqa: PLR0913, PLR0917
     lora_req = (
         LoRARequest(
             lora_name=f"{model_name}-{variant}",
-            lora_int_id=1,
+            lora_int_id=_lora_int_id(adapter_path),
             lora_path=adapter_path,
         )
         if adapter_path is not None

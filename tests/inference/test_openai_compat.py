@@ -94,13 +94,12 @@ class TestResolveEngineModel:
         with pytest.raises(ModelNotFoundError):
             resolve_engine_model("model-qwen3-14b-does_not_exist", ServeConfig())
 
-    def test_adapter_unavailable_falls_back_to_base(self, monkeypatch):
+    def test_adapter_unavailable_raises(self, monkeypatch):
+        # A known variant whose adapter cannot be resolved must fail loudly,
+        # never serve the base model under the variant's label.
         _patch_adapter(monkeypatch, path=None)
-        assert resolve_engine_model("baseline_14b", ServeConfig()) == (
-            _BASE_HF_ID,
-            "qwen3-14b-baseline_14b",
-            None,
-        )
+        with pytest.raises(ModelNotFoundError):
+            resolve_engine_model("baseline_14b", ServeConfig())
 
     def test_fresh_model_bare_base_serves_plain(self, monkeypatch):
         # A freshly registered model (no variants, empty default_variant)

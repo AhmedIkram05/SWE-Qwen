@@ -469,10 +469,13 @@ def _run_tests_swebench(
     # .remote() raises ExecutionError. Pre-register every per-repo function
     # (all share one module-level body; one image per repo) first, then enter.
     # If the app is already running (earlier batch path in this process), the
-    # functions are already registered and the guard skips.
-    if _test_runner_app not in _APP_RUN_STACKS:
-        for example in instances:
-            swebench_fn(example.repo, example.instance_id)
+    # functions are already registered and the guard skips.  Held under
+    # _APP_LOCK so concurrent combo threads make the check-and-register atomic
+    # (a double registration otherwise; swebench_fn is itself idempotent).
+    with _APP_LOCK:
+        if _test_runner_app not in _APP_RUN_STACKS:
+            for example in instances:
+                swebench_fn(example.repo, example.instance_id)
 
     _ensure_app_running(_test_runner_app)
     if _test_runner_app in _APP_RUN_FAILED:

@@ -1739,6 +1739,29 @@ class TestSwebenchFn:
         fn2 = tr.swebench_fn("sympy/sympy", "sympy__sympy-100")
         assert fn1 is not fn2
 
+    def test_concurrent_registration_yields_one_function(self, monkeypatch):
+        # T1 combo parallelism calls swebench_fn for the same repo from several
+        # threads; the lock must make the check-and-register atomic (one
+        # app.function, one cached fn) instead of double-registering.
+        import threading
+
+        monkeypatch.setattr(tr, "_swebench_fns", {})
+        barrier = threading.Barrier(2)
+        results: list = []
+
+        def _register() -> None:
+            barrier.wait()
+            results.append(tr.swebench_fn("django/django", "django__django-10554"))
+
+        threads = [threading.Thread(target=_register) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert results[0] is results[1]
+        assert set(tr._swebench_fns) == {"django/django"}
+
 
 # ── run_tests_batch (via .local()) ──────────────────────────────────────────
 

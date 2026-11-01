@@ -72,8 +72,13 @@ REASON_EVAL_FAILED = "eval-failed"
 
 
 def _decision_id() -> str:
-    """Timestamped decision id (spec §4.6 example): ``promote-YYYYMMDD-HHMMSS``."""
-    return f"promote-{datetime.now():%Y%m%d-%H%M%S}"
+    """Timestamped decision id (spec §4.6): ``promote-YYYYMMDD-HHMMSS-ffffff``.
+
+    Microsecond precision: the second-resolution form collided for same-second
+    decisions, overwriting the earlier W&B ``promotion-decision-<id>`` artifact
+    (and its local staging files) — the durable audit record.
+    """
+    return f"promote-{datetime.now():%Y%m%d-%H%M%S-%f}"
 
 
 def _unique_run_ids() -> list[str]:
@@ -235,9 +240,10 @@ def _finalize(record: dict, config: EvalConfig) -> None:
     tests assert it); scalar emission happens only inside
     ``audit.log_decision_metrics`` — never here.  Spec §4.10 L179 (approver
     clarity): the full decision markdown is appended to ``$GITHUB_STEP_SUMMARY``
-    in the decide job, and decision.md/decision.json are persisted to
-    ``data/promotion_decisions/`` for the workflow's ``actions/upload-artifact``
-    step (``promotion-decision-<id>``, retention 7).  The files are written
+    in the decide job, and ``decision-<id>.md``/``decision-<id>.json`` are
+    persisted to ``data/promotion_decisions/`` for the workflow's
+    ``actions/upload-artifact`` step (``promotion-decision-<id>``, retention 7).
+    The files are written
     unconditionally — the Actions artifact is the durable local copy even when
     the W&B upload degrades.  ``--no-eval`` never reaches here.
     """
@@ -247,8 +253,11 @@ def _finalize(record: dict, config: EvalConfig) -> None:
     _write_step_summary(decision_md)
     decision_dir = Path("data/promotion_decisions")
     decision_dir.mkdir(parents=True, exist_ok=True)
-    (decision_dir / "decision.md").write_text(decision_md, encoding="utf-8")
-    (decision_dir / "decision.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    # Keyed by decision_id: fixed filenames let a second decision in the same
+    # dir overwrite the earlier audit artifact.
+    stem = f"decision-{record['decision_id']}"
+    (decision_dir / f"{stem}.md").write_text(decision_md, encoding="utf-8")
+    (decision_dir / f"{stem}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     reasons = " ".join(record["reasons"]) if record["reasons"] else ""
     print(f"promote={record['outcome'] == OUTCOME_PROMOTE}" + (f" {reasons}" if reasons else ""))
 
@@ -283,7 +292,10 @@ def _launch_evals(pairs: list[tuple[str, str, str]], mode: str) -> list[subproce
 
 
 def _wait_for_pair(
-    champion_run_id: str, candidate_run_id: str, config: EvalConfig
+    champion_run_id: str,
+    candidate_run_id: str,
+    config: EvalConfig,
+    procs: list[subprocess.Popen[str]] | None = None,
 ) -> tuple[tuple[EvalRun, EvalRun] | None, str]:
     """Poll until both paired runs are terminal.
 
@@ -291,9 +303,23 @@ def _wait_for_pair(
     ``completed``, ``(None, "eval-failed")`` as soon as either reports
     ``failed``/``partial``, or ``(None, "eval-timeout")`` at the deadline.
     Absent or still-``running`` runs keep the poll going (spec §4.6 step 3).
+
+    *procs* (the launched eval subprocesses) are polled each round: a child
+    that exits non-zero at startup (bad args, missing ``uv``, import error)
+    aborts the wait immediately instead of burning the full ``EVAL_TIMEOUT_S``
+    (3 h) on an eval that can never land.  A child exiting 0 is left to the
+    normal run-status polling — its results may simply not be loaded yet.
     """
     deadline = time.monotonic() + EVAL_TIMEOUT_S
     while time.monotonic() < deadline:
+        for index, proc in enumerate(procs or []):
+            code = proc.poll()
+            if code not in (None, 0):
+                print(
+                    f"eval subprocess {index} exited early (code {code}) — aborting pair wait",
+                    file=sys.stderr,
+                )
+                return None, REASON_EVAL_FAILED
         runs = load_all_eval_runs([champion_run_id, candidate_run_id], config)
         by_id = {run.run_id: run for run in runs}
         champion_run = by_id.get(champion_run_id)
@@ -438,7 +464,7 @@ def _decide_main(args: argparse.Namespace) -> int:
         args.mode,
     )
     try:
-        pair_runs, wait_reason = _wait_for_pair(champion_run_id, candidate_run_id, config)
+        pair_runs, wait_reason = _wait_for_pair(champion_run_id, candidate_run_id, config, procs)
     finally:
         _reap(procs)
     if pair_runs is None:

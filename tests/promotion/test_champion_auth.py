@@ -35,6 +35,13 @@ def _stub_tokenizer(monkeypatch):
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("MODAL_SERVE_TOKEN", TOKEN)
+    # These tests cover auth, not adapter resolution: the default variant is a
+    # registered champion, and an unresolvable adapter is now a loud 404 (it
+    # used to silently serve the base model), so stub the resolution here.
+    monkeypatch.setattr(
+        "inference.prompt_builder.resolve_adapter_path",
+        lambda *args, **kwargs: "/tmp/stub-adapter",
+    )
     return TestClient(create_app(StubEngine(), ServeConfig()))
 
 

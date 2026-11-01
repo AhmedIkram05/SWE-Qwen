@@ -250,9 +250,10 @@ class TestDecideJobE2E:
         assert "## Reasons" in text
 
     def test_promote_persists_decision_files_for_upload(self, tmp_path, monkeypatch, capsys):
-        # F1 (spec §4.10 L179): decision.md/decision.json land in
+        # F1 (spec §4.10 L179): decision-<id>.md/decision-<id>.json land in
         # data/promotion_decisions/ so the decide job's actions/upload-artifact
-        # step (name promotion-decision-<id>, retention 7) ships them.
+        # step (name promotion-decision-<id>, retention 7) ships them.  The
+        # id-keyed names make a second decision collision-free.
         path = _seed_champion(tmp_path)
         champion_run = _f2p_run("champion-run", CHAMPION, solved={"i1", "i2"})
         candidate_run = _f2p_run("candidate-run", CANDIDATE, solved=set(INSTANCES[:6]))
@@ -263,9 +264,11 @@ class TestDecideJobE2E:
 
         assert rc == 0
         decisions = tmp_path / "data" / "promotion_decisions"
-        md = (decisions / "decision.md").read_text(encoding="utf-8")
-        record = json.loads((decisions / "decision.json").read_text(encoding="utf-8"))
+        jsons = list(decisions.glob("decision-*.json"))
+        assert len(jsons) == 1
+        record = json.loads(jsons[0].read_text(encoding="utf-8"))
         assert record == calls["decisions"][0]
+        md = (decisions / f"decision-{record['decision_id']}.md").read_text(encoding="utf-8")
         assert f"# Promotion decision: {record['decision_id']}" in md
 
     def test_step_summary_noop_when_env_unset(self, tmp_path, monkeypatch):

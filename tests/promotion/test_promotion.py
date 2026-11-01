@@ -274,23 +274,63 @@ class TestEvaluatePair:
         assert pair.f2p_gain == pytest.approx(0.2)
         assert pair.mcnemar_p == pytest.approx(0.6875)
 
-    def test_evaluate_pair_asserts_same_dataset_run_id(self):
+    def test_evaluate_pair_rejects_different_dataset_run_id(self):
         champion = _make_run("champion-run", _pair_config(), [_result("i1", f2p=1.0)])
         other_window = EvalConfig(dataset_run_id="other-repos", tier_seed=42)
         candidate = _make_run(
             "candidate-run", other_window, [_result("i1", f2p=1.0, variant=CANDIDATE_VARIANT)]
         )
-        with pytest.raises(AssertionError, match="dataset_run_id"):
+        with pytest.raises(ValueError, match="dataset_run_id"):
             evaluate_pair(champion, candidate, _pair_config())
 
-    def test_evaluate_pair_asserts_same_tier_seed(self):
+    def test_evaluate_pair_rejects_empty_dataset_run_id(self):
+        # Both sides empty (EvalConfig default): "" == "" must NOT pass — the
+        # runs could be from different datasets entirely.
+        empty = EvalConfig(dataset_run_id="", tier_seed=42)
+        champion = _make_run("champion-run", empty, [_result("i1", f2p=1.0)])
+        candidate = _make_run(
+            "candidate-run", empty, [_result("i1", f2p=1.0, variant=CANDIDATE_VARIANT)]
+        )
+        with pytest.raises(ValueError, match="missing dataset_run_id"):
+            evaluate_pair(champion, candidate, _pair_config())
+
+    def test_evaluate_pair_rejects_different_tier_seed(self):
         champion = _make_run("champion-run", _pair_config(), [_result("i1", f2p=1.0)])
         other_window = EvalConfig(dataset_run_id="expanded-repos", tier_seed=7)
         candidate = _make_run(
             "candidate-run", other_window, [_result("i1", f2p=1.0, variant=CANDIDATE_VARIANT)]
         )
-        with pytest.raises(AssertionError, match="tier_seed"):
+        with pytest.raises(ValueError, match="tier_seed"):
             evaluate_pair(champion, candidate, _pair_config())
+
+    def test_evaluate_pair_partial_fix_is_not_a_resolve_win(self):
+        # Champion fully solves i1; candidate only half-fixes it (f2p=0.5).
+        # Strict resolve (error-free, f2p==1.0) means neither side is resolved:
+        # no discordant pair, no candidate win — even though the mean f2p gain
+        # is positive (partial credit feeds f2p_rate only).
+        config = _pair_config()
+        champion = _make_run("champion-run", config, [_result("i1", f2p=1.0)])
+        candidate = _make_run(
+            "candidate-run", config, [_result("i1", f2p=0.5, variant=CANDIDATE_VARIANT)]
+        )
+        pair = evaluate_pair(champion, candidate, config)
+        assert pair.f2p_gain == pytest.approx(-0.5)  # mean still sees the partial fix
+        assert pair.mcnemar_p == 1.0  # no discordance: champion 1.0, candidate 0.0
+        assert pair.ci_lower == -1.0  # candidate-minus-champion on the strict vector
+        assert pair.ci_high == -1.0
+
+    def test_evaluate_pair_error_result_not_resolved(self):
+        # error is not None fails the resolve predicate even at f2p == 1.0.
+        config = _pair_config()
+        champion = _make_run("champion-run", config, [_result("i1", f2p=1.0)])
+        candidate = _make_run(
+            "candidate-run", config, [_result("i1", f2p=1.0, variant=CANDIDATE_VARIANT)]
+        )
+        candidate.results[0].error = "boom"
+        pair = evaluate_pair(champion, candidate, config)
+        # candidate vector is 0.0 -> champion-only resolve is not a candidate win
+        assert pair.mcnemar_p == 1.0
+        assert pair.ci_lower == -1.0
 
     def test_evaluate_pair_pairs_only_the_instance_intersection(self):
         # Champion-only instance i5 must stay out of the paired vectors: the
@@ -553,6 +593,22 @@ class TestRegistry:
         assert data["previous"]["previous"] is None
         # round-trip through the parsed dict reproduces the record exactly
         assert from_dict(data) == read_champion(path)
+
+    def test_write_failure_leaves_existing_file_intact(self, tmp_path, monkeypatch):
+        # Atomic write: a crash mid-serialization must not truncate the live
+        # champion.json (read_champion would otherwise choke and stall the loop).
+        path = tmp_path / "champion.json"
+        write_champion(path, self._record())
+        original = path.read_text(encoding="utf-8")
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("serialization failed")
+
+        monkeypatch.setattr("promotion.registry.json.dumps", _boom)
+        with pytest.raises(RuntimeError, match="serialization failed"):
+            write_champion(path, self._record(variant="v2"))
+        assert path.read_text(encoding="utf-8") == original
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["champion.json"]
 
     @pytest.fixture
     def _fake_comparison(self):
@@ -1212,6 +1268,37 @@ class TestLaunchEvictions:
         assert reason == "eval-timeout"
         assert sleeps  # at least one full poll round ran before the deadline
 
+    def test_wait_for_pair_fails_fast_on_dead_child(self, monkeypatch):
+        # A subprocess that died at startup (bad args / missing uv / import
+        # error) must not be invisible for the full EVAL_TIMEOUT_S.
+        monkeypatch.setattr(run_mod, "load_all_eval_runs", lambda _ids, _cfg: [])
+
+        class _Exited:
+            def poll(self) -> int:
+                return 2
+
+        procs: list[Any] = [_Exited()]
+        pair, reason = run_mod._wait_for_pair("run-1", "run-2", self._config(), procs)
+
+        assert pair is None
+        assert reason == "eval-failed"
+
+    def test_wait_for_pair_keeps_polling_zero_exit_child(self, monkeypatch):
+        # Exit 0 is not a failure: the run may simply not be loaded yet.
+        monkeypatch.setattr(run_mod, "load_all_eval_runs", lambda _ids, _cfg: [])
+        monkeypatch.setattr(run_mod.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(run_mod, "EVAL_TIMEOUT_S", 0.001)
+
+        class _Exited:
+            def poll(self) -> int:
+                return 0
+
+        procs: list[Any] = [_Exited()]
+        pair, reason = run_mod._wait_for_pair("run-1", "run-2", self._config(), procs)
+
+        assert pair is None
+        assert reason == "eval-timeout"
+
     # ── reap (best-effort cleanup after the poll) ──────────────────────────
 
     def test_reap_terminates_still_running_procs(self):
@@ -1231,6 +1318,15 @@ class TestLaunchEvictions:
         assert procs[0].terminated is True
 
     # ── GITHUB_OUTPUT (spec §4.6 step 6) ───────────────────────────────────
+
+    def test_decision_id_carries_subsecond_precision(self):
+        # promote-YYYYMMDD-HHMMSS-ffffff: microsecond precision keeps
+        # same-second decisions from overwriting the earlier audit artifact.
+        decision_id = run_mod._decision_id()
+        parts = decision_id.split("-")
+        assert parts[0] == "promote"
+        assert len(parts) == 4
+        assert all(part.isdigit() for part in parts[1:])
 
     def test_write_github_output_appends_when_env_set(self, tmp_path, monkeypatch):
         out = tmp_path / "github_output.txt"
