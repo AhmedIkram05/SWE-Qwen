@@ -797,9 +797,20 @@ class TestGeneratePatchesBatch:
         assert lora_req is not None
         assert lora_req.kwargs == {
             "lora_name": "qwen3-14b-baseline_14b",
-            "lora_int_id": 1,
+            "lora_int_id": inf._lora_int_id("/tmp/lora-adapter"),
             "lora_path": "/tmp/lora-adapter",
         }
+
+    def test_lora_int_id_is_stable_distinct_and_positive(self):
+        # Distinct adapter paths must not collide on the warm container's vLLM
+        # LoRA id; the same path must reproduce the same id across processes.
+        import evaluation.inference as inf
+
+        first = inf._lora_int_id("/tmp/adapter-a")
+        assert first == inf._lora_int_id("/tmp/adapter-a")
+        assert first != inf._lora_int_id("/tmp/adapter-b")
+        assert first > 0
+        assert first <= 0x7FFFFFFF
 
     def test_lora_prompt_skips_no_think_insert_when_not_flagged(
         self, fake_vllm, monkeypatch, tmp_path
@@ -986,6 +997,14 @@ class TestSharedLLM:
 
         assert hasattr(generate_patches_batch, "local")
         assert callable(generate_patches_batch.local)
+
+    def test_unknown_inference_gpu_raises(self, monkeypatch):
+        # A typo in inference_gpu must not silently fall back to A100-80GB.
+        import evaluation.inference as inf
+
+        monkeypatch.setenv("EVAL_INFERENCE_GPU", "a100-08gb")  # typo: 08 not 80
+        with pytest.raises(ValueError, match="unknown inference_gpu"):
+            inf.generate_patches_batch("qwen3-14b", "baseline_14b", "chat", [])
 
 
 # ── P0-5: unified prompt wrapping ──────────────────────────────────────────
