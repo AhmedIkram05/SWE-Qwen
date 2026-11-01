@@ -1407,6 +1407,56 @@ class TestExecuteInstance:
         assert resets == ["sha"]
 
 
+class TestExecuteInstanceSkipGroundTruth:
+    """once_per_repo skips fabricate GT; that claim must never be reused."""
+
+    def test_skipped_ground_truth_not_reused_for_another_base_sha(self, tmp_path, monkeypatch):
+        import evaluation.metrics
+        import evaluation.patch_applier
+
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir(parents=True)
+        monkeypatch.setattr(tr, "_reset_to_base", lambda d, s: None)
+        state = {"n": 0}
+
+        def fake_collect(repo_path, names, timeout=30, max_retries=0, python_cmd=None):
+            state["n"] += 1
+            return [TestResult(name="test_a", status="failed", duration=0.1)]
+
+        monkeypatch.setattr(tr, "collect_test_results", fake_collect)
+        monkeypatch.setattr(evaluation.metrics, "compute_f2p", lambda *a: (1.0, 1.0, 1, 1))
+        monkeypatch.setattr(
+            evaluation.patch_applier, "apply_patch", lambda *a, **k: _fake_apply(True)
+        )
+        cache_root = tmp_path / "baselines"
+        monkeypatch.setattr(tr, "_BASELINE_CACHE_DIR", cache_root)
+        monkeypatch.setattr(tr, "_is_repo_verified", lambda repo: True)
+
+        result = tr._execute_instance(
+            repo_dir,
+            "sha-A",
+            "--- a/t\n+++ b/t\n",
+            "--- a/s\n+++ b/s\n",
+            ["test_a"],
+            [],
+            timeout=30,
+            max_retries=2,
+            instance_id="inst-skip",
+            verify_mode="once_per_repo",
+        )
+        assert result["ground_truth"] == {
+            "f2p": 1.0,
+            "p2p": 1.0,
+            "warning": False,
+            "skipped": True,
+        }
+        # fabricated GT was not persisted, so it cannot apply to this base_sha…
+        assert tr._load_baseline_cache("inst-skip", "sha-A") is None
+        # …nor be reused for a different base_sha
+        assert tr._load_baseline_cache("inst-skip", "sha-B") is None
+        assert not cache_root.exists() or not list(cache_root.glob("*.json"))
+
+
 class TestPatchTamperGuard:
     """_execute_instance rejects patches that touch the tests they are graded on."""
 
