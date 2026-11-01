@@ -129,7 +129,8 @@ def resolve_engine_model(
     configured ``default_variant`` (the champion) instead of the raw base.
     An unknown model (or an unknown variant) raises
     ``ModelNotFoundError``; a known variant whose adapter cannot be resolved
-    falls back to the base model with a warning.
+    also raises ``ModelNotFoundError`` (never a silent base-model substitution
+    under the requested variant's label).
 
     Args:
         request_model: The ``model`` field from a chat completion request.
@@ -166,7 +167,9 @@ def resolve_engine_model(
     # duck-typed fields ServeConfig mirrors (lora_artifact_pattern, wandb_*).
     lora_path = prompt_builder.resolve_adapter_path(variant, cast(Any, config))
     if lora_path is None:
-        logger.warning("no LoRA adapter available for variant %s — serving base model", variant)
+        # Fail loudly: serving the base model under the requested variant's
+        # label would silently return a different model's completions.
+        raise ModelNotFoundError(request_model)
     return hf_id, lora_name, lora_path
 
 
