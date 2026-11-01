@@ -162,7 +162,7 @@ jobs:
           fi
 
       # Spec §4.10 L179 / approver-clarity AC: run.py persists
-      # data/promotion_decisions/decision.{md,json} in the decide job; ship them
+      # data/promotion_decisions/decision-<id>.{md,json} in the decide job; ship them
       # as a downloadable artifact (name promotion-decision-<id>, retention 7) so
       # the human approving the deploy gate reads exactly what they approve —
       # same affordance cd.yml's terraform-plan artifact. `if: always()`: a
