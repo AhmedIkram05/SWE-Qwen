@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
@@ -1635,6 +1636,10 @@ def _run_swebench_instance_body(  # noqa: PLR0913, PLR0917
 
 
 _swebench_fns: dict[str, Any] = {}
+# Serializes the check-and-register below: parallel worker threads can call
+# swebench_fn for the same repo at once, and a double app.function() call
+# registers twice (or lazily once the app is running → unhydrated handle).
+_swebench_fns_lock = threading.Lock()
 
 
 def swebench_fn(repo: str, instance_id: str) -> Any:
@@ -1651,18 +1656,23 @@ def swebench_fn(repo: str, instance_id: str) -> Any:
     LAST repo would silently override the others — wrong image per repo.
     ``name`` affects only the tag; container-side lookup still resolves the
     body by ``implementation_name``.
+
+    Thread-safe: the check-and-register runs under ``_swebench_fns_lock`` so
+    concurrent worker threads (T1 combo parallelism) never register the same
+    repo twice.
     """
-    fn = _swebench_fns.get(repo)
-    if fn is None:
-        fn = app.function(
-            image=swebench_image(instance_id),
-            volumes={"/test_cache": test_volume},
-            timeout=900,  # 15 min per instance (conda install of 2 plugins + tests)
-            gpu=None,  # CPU only for test execution
-            name=f"_run_swebench_{repo.replace('/', '_')}",
-        )(_run_swebench_instance_body)
-        _swebench_fns[repo] = fn
-    return fn
+    with _swebench_fns_lock:
+        fn = _swebench_fns.get(repo)
+        if fn is None:
+            fn = app.function(
+                image=swebench_image(instance_id),
+                volumes={"/test_cache": test_volume},
+                timeout=900,  # 15 min per instance (conda install of 2 plugins + tests)
+                gpu=None,  # CPU only for test execution
+                name=f"_run_swebench_{repo.replace('/', '_')}",
+            )(_run_swebench_instance_body)
+            _swebench_fns[repo] = fn
+        return fn
 
 
 # Modal function timeout for run_tests_batch (seconds). The truncation
