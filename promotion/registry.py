@@ -31,6 +31,7 @@ Only ``evaluation.comparison`` is composed (lazy ``wandb`` import inside
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -133,10 +134,29 @@ def write_champion(path: str | Path, record: ChampionRecord) -> None:
 
     Parent directories are created on demand; the file mirrors
     ``smoke_baseline.json`` style (indent=2, gsutil-friendly).
+
+    Written atomically (temp file in the same dir + ``Path.replace``): a crash
+    mid-write must never leave a truncated champion.json for ``read_champion``
+    to choke on — the promotion loop and the GCS mirror both read this file.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(to_dict(record), indent=2) + "\n", encoding="utf-8")
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            tmp_path = Path(handle.name)
+            handle.write(json.dumps(to_dict(record), indent=2) + "\n")
+        tmp_path.replace(path)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def sync_alias(champion_key: str, config: EvalConfig) -> str | None:
