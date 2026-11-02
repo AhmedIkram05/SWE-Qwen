@@ -29,6 +29,7 @@ from inference.config import ServeConfig
 from promotion import audit
 from promotion import deploy as deploy_mod
 from promotion import run as run_mod
+from promotion.config import PromotionConfig
 from promotion.deploy import (
     ConfigGapError,
     ProbeError,
@@ -153,6 +154,52 @@ class TestDecide:
         assert REASON_FATAL_FLAW == "fatal-flaw"
         assert REASON_REGRESSION == "regression"
         assert REASON_MICRO_GAIN == "micro-gain"
+
+
+class TestPromotionConfig:
+    """Gate margins are explicit config, recorded in the decision (ADR-014).
+
+    Env overrides stay supported (``PROMOTE_*``, same names as before) but are
+    now resolved once by ``PromotionConfig`` and reported via ``overridden()``,
+    so a weakened gate is auditable instead of an ambient import-time read.
+    """
+
+    def test_defaults_match_rules_literals(self):
+        config = PromotionConfig(_env_file=None)
+        assert config.min_f2p_gain == PROMOTE_MIN_F2P_GAIN == 0.05
+        assert config.max_p2p_regression == PROMOTE_MAX_P2P_REGRESSION == 0.02
+        assert config.overridden() == []
+
+    def test_env_override_is_applied_and_reported(self, monkeypatch):
+        monkeypatch.setenv("PROMOTE_MIN_F2P_GAIN", "0")
+        config = PromotionConfig()
+        assert config.min_f2p_gain == 0.0
+        assert config.overridden() == ["min_f2p_gain"]
+
+    def test_explicit_zero_margin_reaches_decide(self):
+        # A zeroed margin is a deliberate, passed-in value: equality passes the
+        # strict ``<`` gates, so a flat candidate can promote only when the
+        # caller explicitly zeroes the margin.
+        outcome, reasons = decide(
+            CHAMPION_F2P,
+            CHAMPION_F2P,
+            CHAMPION_P2P,
+            CHAMPION_P2P,
+            ci_lower=0.05,
+            min_f2p_gain=0.0,
+            max_p2p_regression=0.0,
+        )
+        assert outcome == "promote"
+        assert reasons == []
+
+    def test_default_margin_still_rejects_zero_gain(self):
+        # Same flat inputs, default margins: 0.0 gain does not clear 0.05 —
+        # behaviour is unchanged when nothing is configured.
+        outcome, reasons = decide(
+            CHAMPION_F2P, CHAMPION_F2P, CHAMPION_P2P, CHAMPION_P2P, ci_lower=0.05
+        )
+        assert outcome == "reject"
+        assert reasons == ["fatal-flaw"]
 
 
 # ── in-memory EvalRun/EvalResult fixtures (no LLM, no Ollama, no network) ──
@@ -766,7 +813,12 @@ class TestAudit:
         }
         assert set(record["metrics"]["candidate"]) == {"f2p_rate", "p2p_rate"}
         assert set(record["metrics"]["incumbent"]) == {"f2p_rate", "p2p_rate"}
-        assert set(record["thresholds"]) == {"min_f2p_gain", "max_p2p_regression", "floors"}
+        assert set(record["thresholds"]) == {
+            "min_f2p_gain",
+            "max_p2p_regression",
+            "floors",
+            "overridden",
+        }
         assert set(record["thresholds"]["floors"]) == {"f2p", "p2p"}
         assert set(record["timestamps"]) == {"created_utc"}
 
@@ -791,8 +843,23 @@ class TestAudit:
         assert record["thresholds"]["min_f2p_gain"] == PROMOTE_MIN_F2P_GAIN == 0.05
         assert record["thresholds"]["max_p2p_regression"] == PROMOTE_MAX_P2P_REGRESSION == 0.02
         assert record["thresholds"]["floors"] == {"f2p": 0.15, "p2p": 0.90}
+        assert record["thresholds"]["overridden"] == []  # defaults: no override
         created = datetime.fromisoformat(record["timestamps"]["created_utc"])
         assert created.tzinfo == UTC
+
+    def test_build_decision_record_records_resolved_margins_and_overrides(self):
+        # A resolved non-default gate must be visible in the record and the
+        # approver markdown, not silently applied.
+        record = self._record(
+            min_f2p_gain=0.0, max_p2p_regression=0.0, threshold_overrides=["min_f2p_gain"]
+        )
+        assert record["thresholds"]["min_f2p_gain"] == 0.0
+        assert record["thresholds"]["max_p2p_regression"] == 0.0
+        assert record["thresholds"]["overridden"] == ["min_f2p_gain"]
+        assert "**Overridden from env/init**: min_f2p_gain" in audit.render_markdown(record)
+
+    def test_render_markdown_omits_override_line_by_default(self):
+        assert "Overridden" not in audit.render_markdown(self._record())
 
     def test_render_markdown_summary(self):
         md = audit.render_markdown(self._record())
@@ -1226,7 +1293,15 @@ class TestLaunchEvictions:
         assert len(procs) == 2
         for _args, kwargs in spawned:
             assert kwargs["stdout"] is subprocess.DEVNULL
-            assert kwargs["stderr"] is subprocess.DEVNULL
+            # stderr goes to a per-process temp file (never a pipe/DEVNULL), so
+            # an early exit can report its reason without a deadlock risk.
+            assert kwargs["stderr"] is not subprocess.DEVNULL
+            assert hasattr(kwargs["stderr"], "name")
+        # clean up the captured stderr files the launch created
+        for proc in procs:
+            path = run_mod._eval_stderr_paths.pop(proc, None)
+            if path is not None:
+                path.unlink(missing_ok=True)
 
     # ── poll (spec §4.6 step 3: completed/failed/absent/timeout) ───────────
 
@@ -1282,6 +1357,28 @@ class TestLaunchEvictions:
 
         assert pair is None
         assert reason == "eval-failed"
+
+    def test_wait_for_pair_reports_child_stderr_tail(self, monkeypatch, tmp_path, capsys):
+        # A child that dies at startup leaves a reason in its captured stderr;
+        # the failure path must surface a bounded tail of it, not just the code.
+        monkeypatch.setattr(run_mod, "load_all_eval_runs", lambda _ids, _cfg: [])
+
+        class _Exited:
+            def poll(self) -> int:
+                return 1
+
+        procs: list[Any] = [_Exited()]
+        stderr_file = tmp_path / "child.log"
+        stderr_file.write_text("boom: unknown flag --nope\n", encoding="utf-8")
+        run_mod._eval_stderr_paths[procs[0]] = stderr_file
+        try:
+            pair, reason = run_mod._wait_for_pair("run-1", "run-2", self._config(), procs)
+        finally:
+            run_mod._eval_stderr_paths.pop(procs[0], None)
+
+        assert pair is None
+        assert reason == "eval-failed"
+        assert "unknown flag --nope" in capsys.readouterr().err
 
     def test_wait_for_pair_keeps_polling_zero_exit_child(self, monkeypatch):
         # Exit 0 is not a failure: the run may simply not be loaded yet.
