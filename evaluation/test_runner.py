@@ -25,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
@@ -1023,7 +1024,12 @@ _BASELINE_CACHE_DIR = Path("/test_cache") / "instance_baselines"
 # v3: invalidates v2 payloads written by the batch path, which stored an
 # empty tests_before (divergent schema — a later single-instance cache hit
 # would report an empty tests_before as ground-truth context).
-_BASELINE_CACHE_VERSION = 3
+# v4: invalidates v3 payloads because the entry schema was fixed WITHOUT a
+# version bump — v3 caches may hold fabricated/skipped ground truth persisted
+# by the pre-fix path (once_per_repo skip and empty tests_before), and a bad
+# v3 entry is indistinguishable from a good one. Cost: every cached baseline
+# recomputes once. Correctness beats the recompute.
+_BASELINE_CACHE_VERSION = 4
 _VERIFIED_DIR = Path("/test_cache") / ".verified"
 
 
@@ -1202,7 +1208,231 @@ def _test_tamper_error(generated_patch: str, test_patch: str | None) -> str | No
     return None
 
 
-def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
+@dataclass
+class _BaselineState:
+    """Baseline-stage output: before/head tests, ground truth, fatal error."""
+
+    tests_before: list[TestResult]
+    tests_head: list[TestResult]
+    ground_truth: dict[str, Any]
+    error: str | None
+
+
+def _resolve_repo_name(repo_dir: Path, repo_name: str | None, instance_id: str) -> str:
+    """Repo label for the result, keyed off the real repo for swebench images.
+
+    /testbed is the same name in every swebench image, so the once-per-repo
+    marker key must come from the instance id, not the filesystem name.
+    """
+    if repo_name is not None:
+        return repo_name
+    if str(repo_dir) == "/testbed":
+        return _swebench_repo_key(instance_id) if instance_id else "testbed"
+    return str(repo_dir)
+
+
+def _resolve_baseline(  # noqa: PLR0913
+    repo_dir: Path,
+    base_sha: str,
+    *,
+    test_patch: str | None,
+    gold_patch: str | None,
+    fail_to_pass: list[str],
+    pass_to_pass: list[str],
+    test_names: list[str],
+    timeout: int,
+    python_cmd: list[str] | None,
+    instance_id: str,
+    repo_name: str,
+    verify_mode: str,
+    gt_error_hint: str,
+) -> _BaselineState:
+    """Compute or reuse tests_before/tests_head/ground_truth for one instance.
+
+    On a cache hit the recorded before/head/ground-truth are reused verbatim.
+    Otherwise: apply the ground-truth ``test_patch`` so the F2P tests EXIST,
+    collect ``tests_before``, apply ``gold_patch`` on top, collect
+    ``tests_head`` and derive ground truth.  The result is persisted (never a
+    once_per_repo-skipped or errored one) for reuse across variants.
+    """
+    from evaluation.metrics import compute_f2p
+    from evaluation.patch_applier import apply_patch
+    from evaluation.schema import TestResult
+
+    tests_before: list[TestResult] = []
+    tests_head: list[TestResult] = []
+    ground_truth: dict[str, Any] = {}
+    error: str | None = None
+    cached_baseline: dict[str, Any] | None = None
+
+    if instance_id:
+        cached_baseline = _load_baseline_cache(instance_id, base_sha)
+
+    if cached_baseline is not None:
+        # Reuse cached before/head — identical across variants.
+        tests_before = [
+            TestResult.model_validate(t) for t in (cached_baseline.get("tests_before") or [])
+        ]
+        tests_head = [
+            TestResult.model_validate(t) for t in (cached_baseline.get("tests_head") or [])
+        ]
+        ground_truth = cached_baseline.get("ground_truth") or {}
+        logger.info(
+            "baseline cache HIT for %s (%d before, %d head tests)",
+            instance_id or repo_name,
+            len(tests_before),
+            len(tests_head),
+        )
+        return _BaselineState(tests_before, tests_head, ground_truth, error)
+
+    # Baseline runs use max_retries=0 — flaky detection only matters for the final eval.
+    test_patch_result = None
+    if test_patch:
+        test_patch_result = apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
+        if not test_patch_result.success:
+            logger.warning(
+                "test_patch application failed for %s: %s", repo_dir, test_patch_result.error
+            )
+
+    tests_before = collect_test_results(
+        repo_dir, test_names, timeout=timeout, max_retries=0, python_cmd=python_cmd
+    )
+
+    # Ground-truth verification: base + test_patch + gold_patch → F2P PASS
+    skip_gt = verify_mode == "once_per_repo" and _is_repo_verified(repo_name)
+    if test_patch_result is not None and test_patch_result.success and not skip_gt:
+        if gold_patch:
+            gold_result = apply_patch(repo_dir, gold_patch, base_sha, skip_checkout=True)
+            if not gold_result.success:
+                logger.warning(
+                    "gold_patch application failed for %s: %s", repo_dir, gold_result.error
+                )
+        tests_head = collect_test_results(
+            repo_dir, test_names, timeout=timeout, max_retries=0, python_cmd=python_cmd
+        )
+        f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
+            tests_before, tests_head, fail_to_pass, pass_to_pass
+        )
+        ground_truth = {
+            "f2p": f2p,
+            "p2p": p2p,
+            "warning": f2p < _GT_F2P_THRESHOLD,
+        }
+        if f2p < _GT_F2P_THRESHOLD:
+            error = f"ground truth F2P<100% (env drift or {gt_error_hint})"
+            logger.error("%s for %s", error, repo_dir)
+        # First successful verification → mark repo as verified
+        elif verify_mode == "once_per_repo" and not _is_repo_verified(repo_name):
+            _mark_repo_verified(repo_name)
+            logger.info("repo %s verified (marker written)", repo_name)
+    elif skip_gt:
+        logger.info(
+            "ground truth SKIPPED for %s (repo already verified, verify_mode=%s)",
+            repo_name,
+            verify_mode,
+        )
+        ground_truth = {"f2p": 1.0, "p2p": 1.0, "warning": False, "skipped": True}
+    else:
+        logger.info("no test_patch for %s — skipping ground truth verification", repo_name)
+
+    # Save baseline cache for reuse across variants. A once_per_repo skip
+    # fabricates ground truth (f2p=1.0 with an empty tests_head); caching
+    # it would let a later run reuse that unverified claim as real ground
+    # truth, so skipped runs are never persisted.
+    if instance_id and not error and not ground_truth.get("skipped"):
+        _save_baseline_cache(
+            instance_id,
+            {
+                "base_sha": base_sha,
+                "tests_before": [t.model_dump() for t in tests_before],
+                "tests_head": [t.model_dump() for t in tests_head],
+                "ground_truth": ground_truth,
+            },
+        )
+    return _BaselineState(tests_before, tests_head, ground_truth, error)
+
+
+def _run_candidate_phase(  # noqa: PLR0913
+    repo_dir: Path,
+    base_sha: str,
+    *,
+    test_patch: str | None,
+    generated_patch: str | None,
+    test_names: list[str],
+    timeout: int,
+    max_retries: int,
+    python_cmd: list[str] | None,
+    repo_name: str,
+) -> tuple[list[TestResult], Any]:
+    """Apply the candidate patch and collect ``tests_after``.
+
+    Returns ``(tests_after, patch_result)``.  A tampering or non-applying
+    patch never runs pytest: the tree stays untouched and every requested test
+    is reported errored (SWE-bench patch_failure semantics).
+    """
+    from evaluation.patch_applier import apply_patch
+    from evaluation.schema import PatchApplicationResult, TestResult
+
+    test_names_after: list[TestResult] = []
+    tamper_error = _test_tamper_error(generated_patch, test_patch) if generated_patch else None
+    if generated_patch and tamper_error is not None:
+        logger.warning("generated patch rejected for %s: %s", repo_dir, tamper_error)
+        patch_result = PatchApplicationResult(
+            success=False,
+            method_used="failed",
+            error=tamper_error,
+        )
+        test_names_after = [
+            TestResult(
+                name=n,
+                status="errored",
+                duration=0.0,
+                output=tamper_error,
+                retry_count=0,
+            )
+            for n in test_names
+        ]
+    elif generated_patch:
+        if test_patch:
+            apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
+        patch_result = apply_patch(repo_dir, generated_patch, base_sha, skip_checkout=True)
+        if patch_result.success:
+            test_names_after = collect_test_results(
+                repo_dir,
+                test_names,
+                timeout=timeout,
+                max_retries=max_retries,
+                python_cmd=python_cmd,
+            )
+        else:
+            logger.warning(
+                "generated patch application failed for %s: %s",
+                repo_dir,
+                patch_result.error,
+            )
+            # SWE-bench patch_failure semantics: don't run pytest on a broken
+            # tree; mark every requested test as errored instead.
+            test_names_after = [
+                TestResult(
+                    name=n,
+                    status="errored",
+                    duration=0.0,
+                    output="patch did not apply",
+                    retry_count=0,
+                )
+                for n in test_names
+            ]
+    else:
+        patch_result = PatchApplicationResult(
+            success=False,
+            method_used="failed",
+            error="no generated patch provided",
+        )
+        logger.info("no generated patch for %s — skipping patch tests", repo_name)
+    return test_names_after, patch_result
+
+
+def _execute_instance(  # noqa: PLR0913, PLR0917
     repo_dir: Path,
     base_sha: str,
     test_patch: str | None,
@@ -1241,210 +1471,69 @@ def _execute_instance(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915
 
     Returns the same result-dict shape as ``run_tests_in_container``.
     """
-    from evaluation.metrics import compute_f2p
-    from evaluation.patch_applier import apply_patch
-    from evaluation.schema import PatchApplicationResult, TestResult
-
     fail_to_pass = fail_to_pass or []
     pass_to_pass = pass_to_pass or []
     test_names = [*fail_to_pass, *pass_to_pass]
     _t0 = time.time()
     logger.info("── instance %s (%d tests) ──", instance_id or repo_dir.name, len(test_names))
-    # ponytail: /testbed is the same name in every swebench image — key the
-    # once-per-repo marker on the instance's real repo, not the filesystem name
-    if repo_name is None:
-        if str(repo_dir) == "/testbed":
-            repo_name = _swebench_repo_key(instance_id) if instance_id else "testbed"
-        else:
-            repo_name = str(repo_dir)
+    repo_name = _resolve_repo_name(repo_dir, repo_name, instance_id)
 
     if reset_first:
         _reset_to_base(repo_dir, base_sha)
 
-    # ── Load or compute tests_before + tests_head (baseline cache) ──
-    tests_before: list[TestResult] = []
-    tests_head: list[TestResult] = []
-    ground_truth: dict[str, Any] = {}
-    error: str | None = None
-    cached_baseline: dict[str, Any] | None = None
-
-    if instance_id:
-        cached_baseline = _load_baseline_cache(instance_id, base_sha)
-
-    if cached_baseline is not None:
-        # ponytail: reuse cached before/head — identical across variants
-        from evaluation.schema import TestResult
-
-        tests_before = [
-            TestResult.model_validate(t) for t in (cached_baseline.get("tests_before") or [])
-        ]
-        tests_head = [
-            TestResult.model_validate(t) for t in (cached_baseline.get("tests_head") or [])
-        ]
-        ground_truth = cached_baseline.get("ground_truth") or {}
-        logger.info(
-            "baseline cache HIT for %s (%d before, %d head tests)",
-            instance_id or repo_name,
-            len(tests_before),
-            len(tests_head),
-        )
-
-    else:
-        # ponytail: baseline runs use max_retries=0 — flaky detection only matters for final eval
-        test_patch_result = None
-        if test_patch:
-            test_patch_result = apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
-            if not test_patch_result.success:
-                logger.warning(
-                    "test_patch application failed for %s: %s", repo_dir, test_patch_result.error
-                )
-
-        tests_before = collect_test_results(
-            repo_dir, test_names, timeout=timeout, max_retries=0, python_cmd=python_cmd
-        )
-
-        # Ground-truth verification: base + test_patch + gold_patch → F2P PASS
-        repo_key = repo_name
-        skip_gt = verify_mode == "once_per_repo" and _is_repo_verified(repo_key)
-        if test_patch_result is not None and test_patch_result.success and not skip_gt:
-            if gold_patch:
-                gold_result = apply_patch(repo_dir, gold_patch, base_sha, skip_checkout=True)
-                if not gold_result.success:
-                    logger.warning(
-                        "gold_patch application failed for %s: %s", repo_dir, gold_result.error
-                    )
-            tests_head = collect_test_results(
-                repo_dir, test_names, timeout=timeout, max_retries=0, python_cmd=python_cmd
-            )
-            f2p, p2p, _f2p_count, _p2p_count = compute_f2p(
-                tests_before, tests_head, fail_to_pass, pass_to_pass
-            )
-            ground_truth = {
-                "f2p": f2p,
-                "p2p": p2p,
-                "warning": f2p < _GT_F2P_THRESHOLD,
-            }
-            if f2p < _GT_F2P_THRESHOLD:
-                error = f"ground truth F2P<100% (env drift or {gt_error_hint})"
-                logger.error("%s for %s", error, repo_dir)
-            # First successful verification → mark repo as verified
-            elif verify_mode == "once_per_repo" and not _is_repo_verified(repo_key):
-                _mark_repo_verified(repo_key)
-                logger.info("repo %s verified (marker written)", repo_key)
-        elif skip_gt:
-            logger.info(
-                "ground truth SKIPPED for %s (repo already verified, verify_mode=%s)",
-                repo_name,
-                verify_mode,
-            )
-            ground_truth = {"f2p": 1.0, "p2p": 1.0, "warning": False, "skipped": True}
-        else:
-            logger.info("no test_patch for %s — skipping ground truth verification", repo_name)
-
-        # Save baseline cache for reuse across variants. A once_per_repo skip
-        # fabricates ground truth (f2p=1.0 with an empty tests_head); caching
-        # it would let a later run reuse that unverified claim as real ground
-        # truth, so skipped runs are never persisted.
-        if instance_id and not error and not ground_truth.get("skipped"):
-            _save_baseline_cache(
-                instance_id,
-                {
-                    "base_sha": base_sha,
-                    "tests_before": [t.model_dump() for t in tests_before],
-                    "tests_head": [t.model_dump() for t in tests_head],
-                    "ground_truth": ground_truth,
-                },
-            )
+    state = _resolve_baseline(
+        repo_dir,
+        base_sha,
+        test_patch=test_patch,
+        gold_patch=gold_patch,
+        fail_to_pass=fail_to_pass,
+        pass_to_pass=pass_to_pass,
+        test_names=test_names,
+        timeout=timeout,
+        python_cmd=python_cmd,
+        instance_id=instance_id,
+        repo_name=repo_name,
+        verify_mode=verify_mode,
+        gt_error_hint=gt_error_hint,
+    )
 
     _reset_to_base(repo_dir, base_sha)
 
-    if error is not None:
+    if state.error is not None:
         return {
             "repo": repo_name,
             "base_sha": base_sha,
-            "tests_before": [t.model_dump() for t in tests_before],
-            "tests_head": [t.model_dump() for t in tests_head],
+            "tests_before": [t.model_dump() for t in state.tests_before],
+            "tests_head": [t.model_dump() for t in state.tests_head],
             "tests_after": [],
             "patch_application": {},
-            "ground_truth": ground_truth,
-            "error": error,
+            "ground_truth": state.ground_truth,
+            "error": state.error,
         }
 
-    tests_after: list[TestResult] = []
-    tamper_error = _test_tamper_error(generated_patch, test_patch) if generated_patch else None
-    if generated_patch and tamper_error is not None:
-        logger.warning(
-            "generated patch rejected for %s: %s",
-            repo_dir,
-            tamper_error,
-        )
-        # Same patch-failure semantics as a failed apply below: the tree stays
-        # untouched and every requested test reports errored, so downstream
-        # metrics treat tampering like any non-applying patch.
-        patch_result = PatchApplicationResult(
-            success=False,
-            method_used="failed",
-            error=tamper_error,
-        )
-        tests_after = [
-            TestResult(
-                name=n,
-                status="errored",
-                duration=0.0,
-                output=tamper_error,
-                retry_count=0,
-            )
-            for n in test_names
-        ]
-    elif generated_patch:
-        if test_patch:
-            apply_patch(repo_dir, test_patch, base_sha, skip_checkout=True)
-        patch_result = apply_patch(repo_dir, generated_patch, base_sha, skip_checkout=True)
-        if patch_result.success:
-            tests_after = collect_test_results(
-                repo_dir,
-                test_names,
-                timeout=timeout,
-                max_retries=max_retries,
-                python_cmd=python_cmd,
-            )
-        else:
-            logger.warning(
-                "generated patch application failed for %s: %s",
-                repo_dir,
-                patch_result.error,
-            )
-            # SWE-bench patch_failure semantics: don't run pytest on a broken
-            # tree; mark every requested test as errored instead.
-            tests_after = [
-                TestResult(
-                    name=n,
-                    status="errored",
-                    duration=0.0,
-                    output="patch did not apply",
-                    retry_count=0,
-                )
-                for n in test_names
-            ]
-    else:
-        patch_result = PatchApplicationResult(
-            success=False,
-            method_used="failed",
-            error="no generated patch provided",
-        )
-        logger.info("no generated patch for %s — skipping patch tests", repo_name)
+    tests_after, patch_result = _run_candidate_phase(
+        repo_dir,
+        base_sha,
+        test_patch=test_patch,
+        generated_patch=generated_patch,
+        test_names=test_names,
+        timeout=timeout,
+        max_retries=max_retries,
+        python_cmd=python_cmd,
+        repo_name=repo_name,
+    )
 
     _elapsed = time.time() - _t0
     logger.info("  total: %.1fs for %s", _elapsed, instance_id or repo_name)
     return {
         "repo": repo_name,
         "base_sha": base_sha,
-        "tests_before": [t.model_dump() for t in tests_before],
-        "tests_head": [t.model_dump() for t in tests_head],
+        "tests_before": [t.model_dump() for t in state.tests_before],
+        "tests_head": [t.model_dump() for t in state.tests_head],
         "tests_after": [t.model_dump() for t in tests_after],
         "patch_application": patch_result.model_dump(),
-        "ground_truth": ground_truth,
-        "error": error,
+        "ground_truth": state.ground_truth,
+        "error": state.error,
         "latency_seconds": _elapsed,
     }
 

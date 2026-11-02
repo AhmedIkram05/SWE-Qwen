@@ -1972,3 +1972,27 @@ class TestRunTestsBatch:
         assert cached["tests_before"][0]["status"] == "failed"
         assert len(cached["tests_head"]) == 2
         assert cached["ground_truth"] == {"f2p": 1.0, "p2p": 1.0, "warning": False}
+
+
+class TestBaselineCacheVersion:
+    """v3 payloads may hold pre-fix fabricated ground truth; v4 ignores them."""
+
+    def _write(self, tmp_path, monkeypatch, version: int, base_sha: str = "sha") -> None:
+        monkeypatch.setattr(tr, "_BASELINE_CACHE_DIR", tmp_path / "baselines")
+        path = tr._baseline_cache_path("inst-ver")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"version": version, "base_sha": base_sha, "tests_before": []}),
+            encoding="utf-8",
+        )
+
+    def test_old_v3_entry_is_ignored(self, tmp_path, monkeypatch):
+        # The bump must move past the poisoned v3 schema, and any non-current
+        # version must be treated as stale (recompute, never reuse).
+        self._write(tmp_path, monkeypatch, version=3)
+        assert tr._BASELINE_CACHE_VERSION != 3
+        assert tr._load_baseline_cache("inst-ver", "sha") is None
+
+    def test_current_version_entry_loads(self, tmp_path, monkeypatch):
+        self._write(tmp_path, monkeypatch, version=tr._BASELINE_CACHE_VERSION)
+        assert tr._load_baseline_cache("inst-ver", "sha") is not None
