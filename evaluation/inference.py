@@ -76,10 +76,17 @@ app = modal.App("swe-qwen-eval-inference")
 # fails with exit 127) and Modal cannot detect its Python version, so
 # FunctionCreate fails. Rebuilt from debian_slim per training/modal_train.py
 # precedent; vllm>=0.26.0 ships manylinux wheels, so no build-essential needed.
+# Bounds mirror pyproject.toml exactly: image-build-time pins must not drift
+# sampling/LoRA semantics past the versions the lock/eval were validated on.
 vllm_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "wget", "curl")
-    .pip_install("vllm>=0.26.0", "peft", "wandb", "trl")
+    .pip_install(
+        "vllm>=0.26.0,<0.29.0",
+        "peft>=0.19.0,<0.20.0",
+        "wandb>=0.28.0",
+        "trl>=1.9.0,<1.10.0",
+    )
     # FlashInfer's top-k/top-p sampler JIT-compiles with nvcc at startup; the
     # Modal container has no CUDA toolkit. vLLM 0.26 honors
     # VLLM_USE_FLASHINFER_SAMPLER=0 to fall back to the torch sampler.
