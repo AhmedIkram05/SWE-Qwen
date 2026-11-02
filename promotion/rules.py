@@ -1,9 +1,12 @@
 """Pure Champion/Challenger promotion decision rules (Phase 9, ADR-007/ADR-014).
 
 No I/O, no cloud dependencies, no side effects: ``decide`` is a pure function
-of five scalars so it is offline-testable and auditable.  The gain/regression
-thresholds are env-overridable at import time; the absolute quality floors are
-hardcoded (ADR-014): a candidate below either floor can never be promoted.
+of five scalars (plus the two gate margins, passed in) so it is
+offline-testable and auditable.  The gain/regression margins are explicit
+configuration — ``promotion.config.PromotionConfig`` resolves them once and
+they are threaded into ``decide`` and the decision record, so a non-default
+gate is recorded rather than silently applied.  The absolute quality floors
+are hardcoded (ADR-014): a candidate below either floor can never be promoted.
 
 Decision gates (checked in order — first failing gate wins, one reason):
 
@@ -22,14 +25,16 @@ Decision gates (checked in order — first failing gate wins, one reason):
 
 from __future__ import annotations
 
-import os
-
+# Gate margins (ADR-014). Defaults are literals, not env reads: the resolved
+# values come from ``promotion.config.PromotionConfig`` and are passed
+# explicitly to ``decide`` and the decision record, so a weakened gate is
+# recorded (see ``PromotionConfig.overridden``) instead of applied silently.
 # Gain the candidate must achieve over the champion to be promotable.
-PROMOTE_MIN_F2P_GAIN: float = float(os.getenv("PROMOTE_MIN_F2P_GAIN", "0.05"))
+PROMOTE_MIN_F2P_GAIN: float = 0.05
 # Maximum P2P drop the candidate may show relative to the champion.
-PROMOTE_MAX_P2P_REGRESSION: float = float(os.getenv("PROMOTE_MAX_P2P_REGRESSION", "0.02"))
+PROMOTE_MAX_P2P_REGRESSION: float = 0.02
 
-# Absolute quality floors (ADR-014) — hardcoded literals, not env-overridable.
+# Absolute quality floors (ADR-014) — hardcoded literals, not configurable.
 MIN_F2P_FLOOR: float = 0.15
 MIN_P2P_FLOOR: float = 0.90
 
@@ -54,12 +59,15 @@ __all__ = [
 ]
 
 
-def decide(
+def decide(  # noqa: PLR0913 — five gate inputs plus the two explicit margins
     champion_f2p: float,
     candidate_f2p: float,
     champion_p2p: float,
     candidate_p2p: float,
     ci_lower: float,
+    *,
+    min_f2p_gain: float = PROMOTE_MIN_F2P_GAIN,
+    max_p2p_regression: float = PROMOTE_MAX_P2P_REGRESSION,
 ) -> tuple[str, list[str]]:
     """Decide whether the candidate may be promoted over the champion.
 
@@ -68,9 +76,9 @@ def decide(
 
     1. Floors: ``candidate_f2p < MIN_F2P_FLOOR`` or
        ``candidate_p2p < MIN_P2P_FLOOR`` -> ``("reject", ["fatal-flaw"])``.
-    2. Margin: ``candidate_f2p < champion_f2p + PROMOTE_MIN_F2P_GAIN``
+    2. Margin: ``candidate_f2p < champion_f2p + min_f2p_gain``
        (strict ``<``; exact equality passes) -> ``("reject", ["fatal-flaw"])``.
-    3. P2P ceiling: ``candidate_p2p < champion_p2p - PROMOTE_MAX_P2P_REGRESSION``
+    3. P2P ceiling: ``candidate_p2p < champion_p2p - max_p2p_regression``
        (strict ``<``; exact equality passes) -> ``("reject", ["regression"])``.
     4. Significance: ``ci_lower <= 0`` (equality fails) ->
        ``("reject", ["micro-gain"])``.
@@ -84,6 +92,11 @@ def decide(
         candidate_p2p: Candidate P2P rate (proportion in [0, 1]).
         ci_lower: Lower bound of the paired-bootstrap CI of the F2P gain
             (candidate minus champion); > 0 required for promotion.
+        min_f2p_gain: Gain the candidate must clear over the champion.
+            Defaults to the module literal; callers pass the resolved
+            ``PromotionConfig`` value so the gate is explicit and recorded.
+        max_p2p_regression: Largest tolerated P2P drop. Same provenance as
+            *min_f2p_gain*.
 
     Returns:
         ``(outcome, reasons)`` where ``outcome`` is ``"promote"`` or
@@ -92,9 +105,9 @@ def decide(
     """
     if candidate_f2p < MIN_F2P_FLOOR or candidate_p2p < MIN_P2P_FLOOR:
         return OUTCOME_REJECT, [REASON_FATAL_FLAW]
-    if candidate_f2p < champion_f2p + PROMOTE_MIN_F2P_GAIN:
+    if candidate_f2p < champion_f2p + min_f2p_gain:
         return OUTCOME_REJECT, [REASON_FATAL_FLAW]
-    if candidate_p2p < champion_p2p - PROMOTE_MAX_P2P_REGRESSION:
+    if candidate_p2p < champion_p2p - max_p2p_regression:
         return OUTCOME_REJECT, [REASON_REGRESSION]
     if ci_lower <= 0:
         return OUTCOME_REJECT, [REASON_MICRO_GAIN]

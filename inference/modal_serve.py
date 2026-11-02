@@ -124,7 +124,9 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "wget", "curl")
     .pip_install(
-        "vllm>=0.26.0",
+        # Bound mirrors pyproject.toml (sampling/LoRA behaviour must not drift
+        # on an image rebuild); the other pins match their pyproject floors.
+        "vllm>=0.26.0,<0.29.0",
         "fastapi>=0.115.0",
         "uvicorn>=0.34.0",
         "sse-starlette>=2.2.0",

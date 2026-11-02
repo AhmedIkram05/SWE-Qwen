@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
+import pytest
+
 from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import IssueRecord, Splits
-from data_engineering.split import extract_golden, stratified_split
+from data_engineering.split import _check_golden_isolation, extract_golden, stratified_split
 
 
 def _make_record(
@@ -256,3 +260,73 @@ class TestGoldenIsolation:
         train_repos = {r.repo for r in splits.train}
         assert golden_repos <= test_repos
         assert golden_repos.isdisjoint(train_repos)
+
+
+class TestCheckGoldenIsolation:
+    """Direct unit tests for ``_check_golden_isolation`` (the leakage guard).
+
+    Contract (``data_engineering/split.py``): golden repos must be a subset of
+    the test repos, with no train overlap. A violation raises ``RuntimeError``
+    unless ``source_split="all"`` (the explicit operator opt-in to leakage),
+    which logs an error instead.
+    """
+
+    def test_clean_split_passes(self) -> None:
+        splits = Splits(
+            train=[_make_record("t1", repo="org/train-repo")],
+            val=[_make_record("v1", repo="org/val-repo")],
+            test=[_make_record("g1", repo="org/test-repo")],
+        )
+        golden = [_make_record("g1", repo="org/test-repo")]
+        assert _check_golden_isolation(splits, golden, "test", 1) is None
+
+    def test_golden_repo_overlapping_train_raises(self) -> None:
+        # Same repo in train and test (a split-integrity bug): a golden record
+        # drawn from test therefore leaks the training repo.
+        splits = Splits(
+            train=[_make_record("t1", repo="org/leaky")],
+            test=[_make_record("g1", repo="org/leaky")],
+        )
+        golden = [_make_record("g1", repo="org/leaky")]
+        with pytest.raises(RuntimeError, match="GOLDEN ISOLATION VIOLATION"):
+            _check_golden_isolation(splits, golden, "test", 1)
+
+    def test_golden_repo_only_in_val_raises(self) -> None:
+        # The guard's val coverage is the subset rule: a golden repo that is
+        # not ⊆ test (here it lives in val) is a violation even without a
+        # train overlap.
+        splits = Splits(
+            val=[_make_record("v1", repo="org/val-repo")],
+            test=[_make_record("t1", repo="org/test-repo")],
+        )
+        golden = [_make_record("v1", repo="org/val-repo")]
+        with pytest.raises(RuntimeError, match="not ⊆ test repos"):
+            _check_golden_isolation(splits, golden, "test", 1)
+
+    def test_golden_repo_shared_with_val_and_test_passes(self) -> None:
+        # Boundary documented by the implementation: the guard keys on
+        # "golden ⊆ test" plus "no train overlap", so a repo shared across val
+        # AND test is not flagged (it is a split bug, not a leak the guard
+        # covers). Asserting the real contract keeps the guard's scope honest.
+        splits = Splits(
+            val=[_make_record("v1", repo="org/shared")],
+            test=[_make_record("g1", repo="org/shared")],
+        )
+        golden = [_make_record("g1", repo="org/shared")]
+        assert _check_golden_isolation(splits, golden, "test", 1) is None
+
+    def test_source_all_logs_and_does_not_raise(self, caplog) -> None:
+        # source_split="all" is the explicit opt-in to leakage: it logs loud
+        # but returns instead of raising.
+        splits = Splits(
+            train=[_make_record("t1", repo="org/leaky")],
+            test=[_make_record("g1", repo="org/leaky")],
+        )
+        golden = [_make_record("g1", repo="org/leaky")]
+        caplog.set_level(logging.ERROR)
+        assert _check_golden_isolation(splits, golden, "all", 1) is None
+        assert any("GOLDEN ISOLATION VIOLATION" in message for message in caplog.messages)
+
+    def test_empty_golden_passes(self) -> None:
+        splits = Splits(test=[_make_record("t1", repo="org/test-repo")])
+        assert _check_golden_isolation(splits, [], "test", 1) is None
