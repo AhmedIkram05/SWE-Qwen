@@ -37,6 +37,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +50,7 @@ from inference.config import ServeConfig
 from promotion import audit
 from promotion import deploy as deploy_mod
 from promotion.audit import render_markdown
+from promotion.config import PromotionConfig
 from promotion.deploy import ConfigGapError, ProbeError
 from promotion.gate import PairEval, evaluate_pair
 from promotion.registry import ChampionRecord, read_champion, write_champion
@@ -165,6 +167,7 @@ def _abort_record(  # noqa: PLR0913 — spec §4.4 record fields, keyword-only (
     candidate_model_ref: str,
     champion: ChampionRecord | None,
     reason: str,
+    promo: PromotionConfig,
 ) -> dict:
     """Decision record for an abort path (config-gap / no-challenger / eval failure).
 
@@ -192,6 +195,9 @@ def _abort_record(  # noqa: PLR0913 — spec §4.4 record fields, keyword-only (
         mcnemar_p=0.0,
         outcome=OUTCOME_REJECT,
         reasons=[reason],
+        min_f2p_gain=promo.min_f2p_gain,
+        max_p2p_regression=promo.max_p2p_regression,
+        threshold_overrides=promo.overridden(),
     )
 
 
@@ -207,6 +213,7 @@ def _build_decided_record(  # noqa: PLR0913 — spec §4.4 record fields, keywor
     pair: PairEval,
     outcome: str,
     reasons: list[str],
+    promo: PromotionConfig,
 ) -> dict:
     """Decision record for a completed paired eval (spec §4.4 frozen field set)."""
     champion_metrics, candidate_metrics = pair.champion_metrics, pair.candidate_metrics
@@ -230,6 +237,9 @@ def _build_decided_record(  # noqa: PLR0913 — spec §4.4 record fields, keywor
         mcnemar_p=pair.mcnemar_p,
         outcome=outcome,
         reasons=reasons,
+        min_f2p_gain=promo.min_f2p_gain,
+        max_p2p_regression=promo.max_p2p_regression,
+        threshold_overrides=promo.overridden(),
     )
 
 
@@ -262,6 +272,12 @@ def _finalize(record: dict, config: EvalConfig) -> None:
     print(f"promote={record['outcome'] == OUTCOME_PROMOTE}" + (f" {reasons}" if reasons else ""))
 
 
+# Per-child stderr capture files, keyed by the Popen object. A file (never
+# subprocess.PIPE) so a long-running eval cannot fill a pipe buffer and
+# deadlock; _wait_for_pair reads a bounded tail from it on early exit.
+_eval_stderr_paths: dict[subprocess.Popen[str], Path] = {}
+
+
 def _launch_evals(pairs: list[tuple[str, str, str]], mode: str) -> list[subprocess.Popen[str]]:
     """Spawn one ``eval run`` subprocess per ``(variant, run_id, model_base)`` triple, in parallel.
 
@@ -270,6 +286,10 @@ def _launch_evals(pairs: list[tuple[str, str, str]], mode: str) -> list[subproce
     ``--resume`` pins the run id so the poll loop knows what to load.  The
     model base is carried per pair: the champion pair evaluates the *champion
     record's* model, which may differ from the candidate-resolved base.
+
+    stdout is discarded; stderr is redirected to a per-process temp file so a
+    child that dies at startup leaves a reason behind (see
+    ``_bounded_stderr_tail``) without risking a pipe-buffer deadlock.
     """
     procs: list[subprocess.Popen[str]] = []
     for variant, run_id, base_model in pairs:
@@ -285,10 +305,30 @@ def _launch_evals(pairs: list[tuple[str, str, str]], mode: str) -> list[subproce
             "--resume",
             run_id,
         ]
-        procs.append(  # pragma: no cover — real subprocess exec (plan §4.11)
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
-        )
+        with tempfile.NamedTemporaryFile(
+            prefix="eval-stderr-", suffix=".log", delete=False
+        ) as stderr_file:
+            proc = subprocess.Popen(  # pragma: no cover — real subprocess exec (plan §4.11)
+                cmd, stdout=subprocess.DEVNULL, stderr=stderr_file, text=True
+            )
+        _eval_stderr_paths[proc] = Path(stderr_file.name)
+        procs.append(proc)
     return procs
+
+
+def _bounded_stderr_tail(proc: subprocess.Popen[str], max_bytes: int = 2000) -> str:
+    """Last *max_bytes* of a launched child's captured stderr, or "".
+
+    Bounded so a child that spewed megabytes cannot flood the decide log.
+    """
+    path = _eval_stderr_paths.get(proc)
+    if path is None:
+        return ""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    return data[-max_bytes:].decode("utf-8", "replace").strip()
 
 
 def _wait_for_pair(
@@ -315,10 +355,11 @@ def _wait_for_pair(
         for index, proc in enumerate(procs or []):
             code = proc.poll()
             if code not in (None, 0):
-                print(
-                    f"eval subprocess {index} exited early (code {code}) — aborting pair wait",
-                    file=sys.stderr,
-                )
+                message = f"eval subprocess {index} exited early (code {code}) — aborting pair wait"
+                tail = _bounded_stderr_tail(proc)
+                if tail:
+                    message += f"\n--- child stderr (tail) ---\n{tail}"
+                print(message, file=sys.stderr)
                 return None, REASON_EVAL_FAILED
         runs = load_all_eval_runs([champion_run_id, candidate_run_id], config)
         by_id = {run.run_id: run for run in runs}
@@ -335,13 +376,16 @@ def _wait_for_pair(
 
 
 def _reap(procs: list[subprocess.Popen[str]]) -> None:
-    """Best-effort cleanup of the eval subprocesses after the poll."""
+    """Best-effort cleanup of the eval subprocesses and their stderr files."""
     for proc in procs:
         if proc.poll() is None:
             proc.terminate()
         # the eval may still be finishing its final W&B upload
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=30)
+        path = _eval_stderr_paths.pop(proc, None)
+        if path is not None:
+            path.unlink(missing_ok=True)
 
 
 def _write_github_output(lines: list[str]) -> None:
@@ -399,6 +443,9 @@ def _decide_main(args: argparse.Namespace) -> int:
     """The decide job (spec §4.6): validate challenger, paired eval, rules, record."""
     serve = ServeConfig()
     config = EvalConfig()
+    # Gate margins resolved once, explicitly (env PROMOTE_* / .env > defaults),
+    # and threaded into decide() + the record so a non-default gate is audited.
+    promo = PromotionConfig()
     candidate = args.candidate_variant
     assert candidate is not None  # enforced by _parse_args
 
@@ -416,6 +463,7 @@ def _decide_main(args: argparse.Namespace) -> int:
                 candidate_model_ref=f"{base_model}:{candidate}",
                 champion=champion,
                 reason=REASON_CONFIG_GAP,
+                promo=promo,
             ),
             config,
         )
@@ -449,6 +497,7 @@ def _decide_main(args: argparse.Namespace) -> int:
                 candidate_model_ref=f"{base_model}:{candidate}",
                 champion=champion,
                 reason=REASON_NO_CHALLENGER,
+                promo=promo,
             ),
             config,
         )
@@ -476,6 +525,7 @@ def _decide_main(args: argparse.Namespace) -> int:
                 candidate_model_ref=f"{base_model}:{candidate}",
                 champion=champion,
                 reason=wait_reason,
+                promo=promo,
             ),
             config,
         )
@@ -494,6 +544,8 @@ def _decide_main(args: argparse.Namespace) -> int:
             pair.champion_metrics.p2p_rate,
             pair.candidate_metrics.p2p_rate,
             pair.ci_lower,
+            min_f2p_gain=promo.min_f2p_gain,
+            max_p2p_regression=promo.max_p2p_regression,
         )
     record = _build_decided_record(
         decision_id=_decision_id(),
@@ -506,6 +558,7 @@ def _decide_main(args: argparse.Namespace) -> int:
         pair=pair,
         outcome=outcome,
         reasons=reasons,
+        promo=promo,
     )
     _finalize(record, config)
     if outcome == OUTCOME_PROMOTE:

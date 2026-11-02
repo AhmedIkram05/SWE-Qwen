@@ -59,14 +59,19 @@ def build_decision_record(  # noqa: PLR0913 — spec §4.4 fixed field set, keyw
     outcome: str,
     reasons: list[str],
     git_sha: str | None = None,
+    min_f2p_gain: float = PROMOTE_MIN_F2P_GAIN,
+    max_p2p_regression: float = PROMOTE_MAX_P2P_REGRESSION,
+    threshold_overrides: list[str] | None = None,
 ) -> dict:
     """Build the spec §4.4 decision record with a frozen field set.
 
     ``incumbent`` is the champion (the incumbent baseline of the paired eval).
-    Threshold values come from ``promotion.rules`` constants — never
-    re-hardcoded — so threshold tuning stays auditable in the record.
-    ``deployed`` starts ``False``; the deploy job flips it (and the workflow
-    re-uploads the artifact metadata).
+    The gate margins are passed in from the resolved ``PromotionConfig`` (or
+    default to the ``promotion.rules`` literals) — never re-hardcoded — so the
+    exact gate that ran is recorded.  ``threshold_overrides`` names any margin
+    field that was set from env/init, so a non-default gate is visible in the
+    audit trail.  ``deployed`` starts ``False``; the deploy job flips it (and
+    the workflow re-uploads the artifact metadata).
     """
     return {
         "decision_id": decision_id,
@@ -91,9 +96,10 @@ def build_decision_record(  # noqa: PLR0913 — spec §4.4 fixed field set, keyw
             "mcnemar_p": mcnemar_p,
         },
         "thresholds": {
-            "min_f2p_gain": PROMOTE_MIN_F2P_GAIN,
-            "max_p2p_regression": PROMOTE_MAX_P2P_REGRESSION,
+            "min_f2p_gain": min_f2p_gain,
+            "max_p2p_regression": max_p2p_regression,
             "floors": {"f2p": MIN_F2P_FLOOR, "p2p": MIN_P2P_FLOOR},
+            "overridden": list(threshold_overrides or []),
         },
         "outcome": outcome,
         "reasons": reasons,
@@ -111,40 +117,45 @@ def render_markdown(record: dict) -> str:
     thresholds = record["thresholds"]
     floors = thresholds["floors"]
     reasons = ", ".join(record["reasons"]) if record["reasons"] else "none"
-    return "\n".join(
-        [
-            f"# Promotion decision: {record['decision_id']}",
-            "",
-            f"- **Outcome**: `{record['outcome']}`",
-            f"- **Pipeline version**: {record['pipeline_version']}",
-            (
-                f"- **Candidate**: {candidate['variant']} ({candidate['model_ref']}, "
-                f"run {candidate['run_id']})"
-            ),
-            (
-                f"- **Incumbent (champion)**: {incumbent['variant']} "
-                f"({incumbent['model_ref']}, run {incumbent['run_id']})"
-            ),
-            "",
-            "## Metrics",
-            f"- F2P rate: candidate {metrics['candidate']['f2p_rate']:.3f} vs "
-            f"incumbent {metrics['incumbent']['f2p_rate']:.3f}",
-            f"- P2P rate: candidate {metrics['candidate']['p2p_rate']:.3f} vs "
-            f"incumbent {metrics['incumbent']['p2p_rate']:.3f}",
-            f"- **F2P gain**: {metrics['f2p_gain']:+.3f}",
-            f"- **P2P delta**: {metrics['p2p_delta']:+.3f}",
-            f"- **CI (lower, upper)**: {metrics['ci_lower']:.3f}, {metrics['ci_high']:.3f}",
-            f"- **McNemar p**: {metrics['mcnemar_p']:.4f}",
-            "",
-            "## Thresholds",
-            f"- Min F2P gain: {thresholds['min_f2p_gain']:.3f}",
-            f"- Max P2P regression: {thresholds['max_p2p_regression']:.3f}",
-            f"- Floors: F2P {floors['f2p']:.2f}, P2P {floors['p2p']:.2f}",
-            "",
-            "## Reasons",
-            reasons,
-        ]
-    )
+    lines = [
+        f"# Promotion decision: {record['decision_id']}",
+        "",
+        f"- **Outcome**: `{record['outcome']}`",
+        f"- **Pipeline version**: {record['pipeline_version']}",
+        (
+            f"- **Candidate**: {candidate['variant']} ({candidate['model_ref']}, "
+            f"run {candidate['run_id']})"
+        ),
+        (
+            f"- **Incumbent (champion)**: {incumbent['variant']} "
+            f"({incumbent['model_ref']}, run {incumbent['run_id']})"
+        ),
+        "",
+        "## Metrics",
+        f"- F2P rate: candidate {metrics['candidate']['f2p_rate']:.3f} vs "
+        f"incumbent {metrics['incumbent']['f2p_rate']:.3f}",
+        f"- P2P rate: candidate {metrics['candidate']['p2p_rate']:.3f} vs "
+        f"incumbent {metrics['incumbent']['p2p_rate']:.3f}",
+        f"- **F2P gain**: {metrics['f2p_gain']:+.3f}",
+        f"- **P2P delta**: {metrics['p2p_delta']:+.3f}",
+        f"- **CI (lower, upper)**: {metrics['ci_lower']:.3f}, {metrics['ci_high']:.3f}",
+        f"- **McNemar p**: {metrics['mcnemar_p']:.4f}",
+        "",
+        "## Thresholds",
+        f"- Min F2P gain: {thresholds['min_f2p_gain']:.3f}",
+        f"- Max P2P regression: {thresholds['max_p2p_regression']:.3f}",
+    ]
+    # Only when a margin was overridden: keeps the default rendering unchanged
+    # but makes a weakened gate loud in the approver's step summary.
+    if overrides := thresholds.get("overridden"):
+        lines.append(f"- **Overridden from env/init**: {', '.join(overrides)}")
+    lines += [
+        f"- Floors: F2P {floors['f2p']:.2f}, P2P {floors['p2p']:.2f}",
+        "",
+        "## Reasons",
+        reasons,
+    ]
+    return "\n".join(lines)
 
 
 def write_decision_record(record: dict, *, entity: str, project: str) -> str | None:
