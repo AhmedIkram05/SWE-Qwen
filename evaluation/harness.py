@@ -1190,7 +1190,7 @@ class EvaluationHarness:
             error=error,
         )
 
-    def run_batch(  # noqa: PLR0912, PLR0915, PLR0913, PLR0917
+    def run_batch(  # noqa: PLR0913, PLR0917
         self,
         examples: list[EvalInput],
         model_name: str,
@@ -1212,6 +1212,42 @@ class EvaluationHarness:
             return []
         if not run_id:
             raise ValueError("run_id is required for checkpointing")
+
+        loaded, pending_repos, patches_map, per_instance_latency = self._prepare_batch_state(
+            examples, model_name, variant, prompt_template, run_id, max_new_tokens
+        )
+        # Batch/parallelism coordination: one swebench pool call over every
+        # pending instance, per-(repo, base_sha) fallback for anything it misses.
+        swebench_results = self._collect_test_results_for_batch(pending_repos, patches_map)
+        # Result aggregation: raw payloads → EvalResult, tracing, checkpointing.
+        new = self._assemble_results(
+            pending_repos,
+            swebench_results,
+            patches_map,
+            per_instance_latency,
+            run_id,
+            model_name,
+            variant,
+            prompt_template,
+        )
+        return [*loaded, *new]
+
+    def _prepare_batch_state(  # noqa: PLR0913, PLR0917
+        self,
+        examples: list[EvalInput],
+        model_name: str,
+        variant: str,
+        prompt_template: str,
+        run_id: str,
+        max_new_tokens: int,
+    ) -> tuple[list[EvalResult], dict[str, list[EvalInput]], dict[str, str], float]:
+        """Load checkpoints, keep pending repos, and generate missing patches.
+
+        Returns ``(loaded, pending_repos, patches_map, per_instance_latency)``.
+        Swebench images first — ONE generation call covers every non-completed
+        instance, and the generation time amortizes over the instances actually
+        generated (audit finding 12), not the checkpoint-restored ones.
+        """
         loaded = [
             r
             for r in self.checkpoint_mgr.load_results(run_id)
@@ -1259,16 +1295,29 @@ class EvaluationHarness:
                 dataset_run_id=self.config.dataset_run_id or None,
             )
             gen_seconds = max(time.monotonic() - _gen_start, 0.0)
-            # Amortize over the instances actually generated (audit finding
-            # 12): all_instances includes checkpoint-restored patches, which
-            # understated avg_latency ~10x on cache-heavy resumed runs.
             per_instance_latency = gen_seconds / len(new_instances)
             for i, example in enumerate(new_instances):
                 patches_map[example.instance_id] = patches[i] if i < len(patches) else ""
+        return loaded, pending_repos, patches_map, per_instance_latency
 
-        # Phase 2: test execution.  Swebench images first — ONE pool call over
-        # ALL pending instances (both freshly-generated and cached patches).
+    def _collect_test_results_for_batch(
+        self,
+        pending_repos: dict[str, list[EvalInput]],
+        patches_map: dict[str, str],
+    ) -> dict[str, dict[str, Any]]:
+        """Run every pending instance; return ``{instance_id: result_dict}``.
+
+        The swebench pool is ONE call over ALL pending instances (both
+        freshly-generated and cached patches); instances it does not cover
+        (unpublished image, pool failure) are routed to the per-(repo,
+        base_sha) batch path.  Per-repo swebench registration locking lives in
+        ``_run_tests_swebench``/``swebench_fn`` and is preserved unchanged.
+        """
         swebench_results: dict[str, dict[str, Any]] = {}
+        all_instances: list[EvalInput] = []
+        for repo in sorted(pending_repos):
+            all_instances.extend(pending_repos[repo])
+
         if self.config.use_swebench_images:
             _id_instances = [ex for ex in all_instances if ex.instance_id]
             if _id_instances:
@@ -1281,13 +1330,9 @@ class EvaluationHarness:
                         len(_id_instances),
                     )
 
-        new: list[EvalResult] = []
-        results_by_repo: dict[str, list[EvalResult]] = {repo: [] for repo in pending_repos}
         for repo in sorted(pending_repos):
-            repo_examples = pending_repos[repo]
-
             by_base: dict[str, list[EvalInput]] = {}
-            for example in repo_examples:
+            for example in pending_repos[repo]:
                 by_base.setdefault(example.base_sha, []).append(example)
 
             for base_sha in sorted(by_base):
@@ -1323,85 +1368,138 @@ class EvaluationHarness:
                     )
                     for example, fallback_result in zip(missing, _fallback_results):  # noqa: B905
                         swebench_results[example.instance_id] = fallback_result
+        return swebench_results
 
-                for example in group:
-                    result = swebench_results.get(example.instance_id)
-                    if result is not None:
-                        eval_result = self.run_example_from_output(
-                            example,
-                            model_name,
-                            variant,
-                            prompt_template,
-                            patches_map.get(example.instance_id, ""),
-                            result,
-                            latency_seconds=per_instance_latency,
-                        )
-                    else:
-                        eval_result = self.run_example(
-                            example,
-                            model_name,
-                            variant,
-                            prompt_template,
-                            generated_patch=patches_map.get(example.instance_id, ""),
-                        )
-                    results_by_repo[repo].append(eval_result)
-
-                    # Observability (Phase 8 §5.5 dual-write): one Langfuse
-                    # trace per completed example, cross-linked to W&B by
-                    # run_id/instance_id. trace_generation itself swallows SDK
-                    # errors; the try/except guards attribute surprises on
-                    # eval_result. Import kept lazy (use-site), matching the
-                    # cost/langfuse precedent in harness/telemetry.
-                    try:
-                        from observability.langfuse import trace_generation
-
-                        trace_generation(
-                            name=f"eval/{model_name}/{variant}/{prompt_template}",
-                            model=model_name,
-                            # The exact rendered prompt (few-shot golden, no-think
-                            # wrap, file contents) is built inside the Modal
-                            # container and never returned to the harness, so the
-                            # problem statement is the closest per-example text in
-                            # run_batch's scope.
-                            prompt=example.issue_body,
-                            completion=eval_result.generated_patch,
-                            metadata={
-                                "run_id": run_id,
-                                "instance_id": example.instance_id,
-                                "prompt_template": prompt_template,
-                                "variant": variant,
-                                "model": model_name,
-                            },
-                            scores={
-                                "f2p": float(eval_result.f2p),
-                                "p2p": float(eval_result.p2p),
-                            },
-                        )
-                    except Exception as exc:  # noqa: BLE001 — observability never breaks eval
-                        logger.warning("langfuse trace failed for %s: %s", example.instance_id, exc)
-
-            repo_results = results_by_repo[repo]
-            new.extend(repo_results)
-            key = self.checkpoint_mgr.get_checkpoint_key(
-                run_id, repo, model_name, variant, prompt_template
+    def _assemble_results(  # noqa: PLR0913, PLR0917
+        self,
+        pending_repos: dict[str, list[EvalInput]],
+        swebench_results: dict[str, dict[str, Any]],
+        patches_map: dict[str, str],
+        per_instance_latency: float,
+        run_id: str,
+        model_name: str,
+        variant: str,
+        prompt_template: str,
+    ) -> list[EvalResult]:
+        """Turn raw test payloads into ``EvalResult``s and checkpoint per repo."""
+        new: list[EvalResult] = []
+        for repo in sorted(pending_repos):
+            repo_results = self._build_repo_results(
+                pending_repos[repo],
+                swebench_results,
+                patches_map,
+                per_instance_latency,
+                run_id,
+                model_name,
+                variant,
+                prompt_template,
             )
-            errored = sum(1 for r in repo_results if r.error)
-            if repo_results and errored == 0:
-                payload: EvalResult | list[EvalResult] = (
-                    repo_results[0] if len(repo_results) == 1 else repo_results
-                )
-                self.checkpoint_mgr.save_result(key, payload)
-                logger.info(
-                    "checkpointed %d result(s) for %s under %s", len(repo_results), repo, key
-                )
-            elif repo_results:
-                logger.warning(
-                    "NOT checkpointing %s: %d/%d result(s) have errors — resume will retry",
-                    repo,
-                    errored,
-                    len(repo_results),
-                )
-        return [*loaded, *new]
+            new.extend(repo_results)
+            self._checkpoint_repo(repo, repo_results, run_id, model_name, variant, prompt_template)
+        return new
+
+    def _build_repo_results(  # noqa: PLR0913, PLR0917
+        self,
+        repo_examples: list[EvalInput],
+        swebench_results: dict[str, dict[str, Any]],
+        patches_map: dict[str, str],
+        per_instance_latency: float,
+        run_id: str,
+        model_name: str,
+        variant: str,
+        prompt_template: str,
+    ) -> list[EvalResult]:
+        """Build one ``EvalResult`` per example (base-sha order, then input order)."""
+        by_base: dict[str, list[EvalInput]] = {}
+        for example in repo_examples:
+            by_base.setdefault(example.base_sha, []).append(example)
+
+        results: list[EvalResult] = []
+        for _base_sha in sorted(by_base):
+            for example in by_base[_base_sha]:
+                result = swebench_results.get(example.instance_id)
+                if result is not None:
+                    eval_result = self.run_example_from_output(
+                        example,
+                        model_name,
+                        variant,
+                        prompt_template,
+                        patches_map.get(example.instance_id, ""),
+                        result,
+                        latency_seconds=per_instance_latency,
+                    )
+                else:
+                    eval_result = self.run_example(
+                        example,
+                        model_name,
+                        variant,
+                        prompt_template,
+                        generated_patch=patches_map.get(example.instance_id, ""),
+                    )
+                results.append(eval_result)
+
+                # Observability (Phase 8 §5.5 dual-write): one Langfuse
+                # trace per completed example, cross-linked to W&B by
+                # run_id/instance_id. trace_generation itself swallows SDK
+                # errors; the try/except guards attribute surprises on
+                # eval_result. Import kept lazy (use-site), matching the
+                # cost/langfuse precedent in harness/telemetry.
+                try:
+                    from observability.langfuse import trace_generation
+
+                    trace_generation(
+                        name=f"eval/{model_name}/{variant}/{prompt_template}",
+                        model=model_name,
+                        # The exact rendered prompt (few-shot golden, no-think
+                        # wrap, file contents) is built inside the Modal
+                        # container and never returned to the harness, so the
+                        # problem statement is the closest per-example text in
+                        # run_batch's scope.
+                        prompt=example.issue_body,
+                        completion=eval_result.generated_patch,
+                        metadata={
+                            "run_id": run_id,
+                            "instance_id": example.instance_id,
+                            "prompt_template": prompt_template,
+                            "variant": variant,
+                            "model": model_name,
+                        },
+                        scores={
+                            "f2p": float(eval_result.f2p),
+                            "p2p": float(eval_result.p2p),
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001 — observability never breaks eval
+                    logger.warning("langfuse trace failed for %s: %s", example.instance_id, exc)
+        return results
+
+    def _checkpoint_repo(  # noqa: PLR0913, PLR0917
+        self,
+        repo: str,
+        repo_results: list[EvalResult],
+        run_id: str,
+        model_name: str,
+        variant: str,
+        prompt_template: str,
+    ) -> None:
+        """Checkpoint a repo's results iff none errored (resume would skip them)."""
+        key = self.checkpoint_mgr.get_checkpoint_key(
+            run_id, repo, model_name, variant, prompt_template
+        )
+        errored = sum(1 for r in repo_results if r.error)
+        if repo_results and errored == 0:
+            payload: EvalResult | list[EvalResult] = (
+                repo_results[0] if len(repo_results) == 1 else repo_results
+            )
+            self.checkpoint_mgr.save_result(key, payload)
+            logger.info("checkpointed %d result(s) for %s under %s", len(repo_results), repo, key)
+        elif repo_results:
+            logger.warning(
+                "NOT checkpointing %s: %d/%d result(s) have errors — resume will retry",
+                repo,
+                errored,
+                len(repo_results),
+            )
 
     def run_golden(
         self,
