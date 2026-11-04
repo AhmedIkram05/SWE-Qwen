@@ -144,7 +144,8 @@ def evaluate_pair(
         raise ValueError(
             f"unpaired runs: missing dataset_run_id: champion={champion_run.run_id} "
             f"dataset_run_id={champion_window!r}, candidate={candidate_run.run_id} "
-            f"dataset_run_id={candidate_window!r} — the pairing window cannot be verified"
+            f"dataset_run_id={candidate_window!r} — the pairing window cannot be verified; "
+            f"set EVAL_DATASET_RUN_ID (e.g. expanded-repos) so both runs share one eval window"
         )
     if champion_window != candidate_window:
         raise ValueError(
