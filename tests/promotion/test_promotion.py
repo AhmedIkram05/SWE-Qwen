@@ -338,8 +338,11 @@ class TestEvaluatePair:
         candidate = _make_run(
             "candidate-run", empty, [_result("i1", f2p=1.0, variant=CANDIDATE_VARIANT)]
         )
-        with pytest.raises(ValueError, match="missing dataset_run_id"):
+        with pytest.raises(ValueError, match="missing dataset_run_id") as excinfo:
             evaluate_pair(champion, candidate, _pair_config())
+        # The failure must tell the operator which env var to set, or the
+        # guidance disappears silently on a refactor.
+        assert "EVAL_DATASET_RUN_ID" in str(excinfo.value)
 
     def test_evaluate_pair_rejects_different_tier_seed(self):
         champion = _make_run("champion-run", _pair_config(), [_result("i1", f2p=1.0)])

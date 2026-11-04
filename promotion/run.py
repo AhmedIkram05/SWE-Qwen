@@ -15,7 +15,9 @@ Two mutually exclusive entrypoints behind one module:
   NOT written here (single writer: the deploy job).  Rejections exit 0 —
   rejection is a successful outcome.  ``--no-eval`` is the
   ``RUN_MODAL_EVAL=false`` kill switch: no eval, no W&B artifact check, zero
-  Modal spend.
+  Modal spend.  Both paired runs must carry the same non-empty
+  ``EVAL_DATASET_RUN_ID`` window (``promote.yml`` sets it; export it for a
+  local decide run) — ``evaluate_pair`` rejects an empty window.
 - ``python -m promotion.run --deploy --variant <v> [--decision-id <id>]`` —
   the ``deploy`` job (``environment: production``): pin the variant, deploy to
   Modal, probe it, and only after the probe is green write champion.json and
