@@ -18,6 +18,7 @@ import pytest
 from observability.dashboards import PANELS, PanelSpec
 from observability.metrics import METRIC_REGISTRY, assert_registered
 from observability.slo import SLO_TARGETS
+from promotion.config import PromotionConfig
 from scripts import build_dashboards, log_deploy, seed_dashboards
 
 pytestmark = pytest.mark.unit
@@ -128,6 +129,15 @@ def test_build_step_cadences():
 
     single = seed_dashboards.build_step(0, 1, random.Random(0))  # total == 1 edge
     assert single["deploy/status"] == 1
+
+
+def test_seed_thresholds_match_gate_defaults(monkeypatch):
+    """Seed margins equal the gate's resolved defaults, so they cannot drift."""
+    monkeypatch.delenv("PROMOTE_MIN_F2P_GAIN", raising=False)
+    monkeypatch.delenv("PROMOTE_MAX_P2P_REGRESSION", raising=False)
+    config = PromotionConfig()
+    assert config.min_f2p_gain == seed_dashboards._PROMOTE_MIN_F2P_GAIN
+    assert -config.max_p2p_regression == seed_dashboards._PROMOTE_MAX_P2P_REGRESSION
 
 
 def _make_seed_run(

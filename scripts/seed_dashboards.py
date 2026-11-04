@@ -29,6 +29,7 @@ import sys
 import yaml
 
 from observability.metrics import METRIC_REGISTRY
+from promotion.config import PromotionConfig
 
 
 def _default_model_key() -> str:
@@ -47,9 +48,13 @@ _DEFAULT_VARIANT = "baseline_14b"  # ponytail: seeded dashboards predate registr
 _SEGMENT = f"{_DEFAULT_MODEL}/{_DEFAULT_VARIANT}/template_v1"  # eval/{model}/{variant}/{template}
 _EVAL_OFFSET = 7  # eval checkpoints fire at step % 15 == this
 _DEPLOY_FAIL_STEP = 30  # one deploy failure per 45-step cycle (red dot)
-# promotion gate thresholds, mirroring promotion.rules (spec §4.4)
-_PROMOTE_MIN_F2P_GAIN = 0.05
-_PROMOTE_MAX_P2P_REGRESSION = -0.02
+# promotion gate thresholds, read from the same resolved config the gate uses
+# (spec §4.4) so the dashboard cannot show margins that differ from the gate.
+# max_p2p_regression is stored negated to match the delta sign convention in
+# build_step (p2p_delta = candidate - champion).
+_gate_config = PromotionConfig()
+_PROMOTE_MIN_F2P_GAIN = _gate_config.min_f2p_gain
+_PROMOTE_MAX_P2P_REGRESSION = -_gate_config.max_p2p_regression
 
 
 def expected_keys(segment: str | None = None) -> set[str]:
