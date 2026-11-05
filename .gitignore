@@ -291,3 +291,5 @@ artifacts/
 
 # Stray Hugging Face datasets cache (lands in ./None/ when cache_dir resolves unset)
 None/
+
+graphify-out/
