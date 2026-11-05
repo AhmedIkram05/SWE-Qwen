@@ -21,7 +21,7 @@ dependencies = [
     # Core ML/AI
     "torch==2.13.0",  # pinned: vllm 0.28 requires torch==2.13.0, torch 2.14 unsatisfiable
     "transformers>=5.5.0,<5.23.0",
-    "peft>=0.19.0,<0.20.0",  # upper bound: LoRA adapter semantics must not drift
+    "peft>=0.19.0,<0.22.0",  # upper bound: LoRA adapter semantics must not drift
     "bitsandbytes>=0.49.0",
     "accelerate>=1.14.0",
     "trl>=1.9.0,<1.18.0",  # upper bound: SFT trainer behaviour must not drift
