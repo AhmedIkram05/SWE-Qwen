@@ -82,7 +82,7 @@ def _decision_id() -> str:
     decisions, overwriting the earlier W&B ``promotion-decision-<id>`` artifact
     (and its local staging files) — the durable audit record.
     """
-    return f"promote-{datetime.now():%Y%m%d-%H%M%S-%f}"
+    return f"promote-{datetime.now(UTC):%Y%m%d-%H%M%S-%f}"
 
 
 def _unique_run_ids() -> list[str]:
