@@ -19,6 +19,7 @@ _DIFF_GIT_RE = re.compile(r'^diff --git\s+(?:"a/(.+?)"|a/(\S+))\s+(?:"b/(.+?)"|b
 
 
 def _strip_quotes(path: str) -> str:
+    """Strip surrounding double quotes from a diff path, if present."""
     path = path.strip()
     if not path or not path.startswith('"') or not path.endswith('"'):
         return path
@@ -26,6 +27,7 @@ def _strip_quotes(path: str) -> str:
 
 
 def _strip_ab_prefix(path: str) -> str:
+    """Strip the a/ or b/ prefix from a diff header path."""
     if path.startswith(("a/", "b/")):
         return path[2:]
     if path.startswith(('"a/', '"b/')) and path.endswith('"'):
