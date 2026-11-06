@@ -1,6 +1,6 @@
 # SWE-Qwen
 
-w> A registry-driven and config-swappable LLMOps platform (any Hugging Face causal LM plugs in via `model add` - Qwen3-14B run end-to-end) that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **QLoRA variants on per-model Modal GPUs** (3 evaluated from 5 configured), evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (20-instance smoke CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **4-condition statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **5 GitHub Actions workflows** (CI/CD, eval gate, promotion, CodeQL).
+A registry-driven and config-swappable LLMOps platform (any Hugging Face causal LM plugs in via `model add` - Qwen3-14B run end-to-end) that turns **20,477 SWE-bench software issues** into a **17,456-example training corpus**, fine-tunes **QLoRA variants on per-model Modal GPUs** (3 evaluated from 5 configured), evaluates them with **execution-based fail-to-pass / pass-to-pass testing inside real SWE-bench Docker images** (20-instance smoke CI gate, Wilson CIs, McNemar + paired-bootstrap significance), gates every promotion behind a **4-condition statistical champion/challenger flow**, and serves the winner through an **OpenAI-compatible, scale-to-zero inference API with per-request LoRA adapters** - all orchestrated by **Terraform IaC on Google Cloud**, tracked end-to-end in **Weights & Biases**, and gated by **5 GitHub Actions workflows** (CI/CD, eval gate, promotion, CodeQL).
 
 <p align="center">
 <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&labelColor=000000&logo=python"></a>
@@ -128,7 +128,7 @@ Every stage is a first-class, independently runnable step with typed schemas (`p
 | **$0.00 idle + per-request adapters** | One scale-to-zero server hosts all 3 LoRA variants: the first request per model pulls its 1.4 GB adapter from W&B into cache with zero engine restarts. Bursty GPU workloads cost nothing between bursts. |
 | **Execution over proxies** | A patch is only "correct" if it flips the real failing tests inside the real repo: official SWE-bench Docker images, FAIL_TO_PASS + PASS_TO_PASS, hunk-header repair + 3 patch-apply strategies with the winning `method_used` recorded, flaky retries capped at 2. No unit-test proxies, no leaderboard games. |
 | **You can't self-certify** | `eval.yml` runs evaluation on PRs with read-only repo access and only `main` may write baselines; `promote.yml` re-runs the paired comparison before flipping the champion - and only a *successful* deploy publishes the champion record. CodeQL scans Python + workflow code weekly. A green personal scoreboard is impossible by construction. |
-| **Tests are part of the pitch** | 1,753 offline tests (~4 min), 90% coverage gate in CI, mypy across 8 packages, and *contract tests* that pin cross-stage invariants: tokenize-length ≤ training window, exact loss masks, train/eval prompt parity, and an AST walk proving every W&B metric is registry-registered. |
+| **Tests are part of the pitch** | 1,833 offline tests (~4 min), 90% coverage gate in CI, mypy across 8 packages, and *contract tests* that pin cross-stage invariants: tokenize-length ≤ training window, exact loss masks, train/eval prompt parity, and an AST walk proving every W&B metric is registry-registered. |
 
 ## Key Metrics at a Glance
 
@@ -150,8 +150,8 @@ Every stage is a first-class, independently runnable step with typed schemas (`p
 | **Serving** | OpenAI-compatible endpoint | `POST /v1/chat/completions` |
 | | Adapter switching | Per-request LoRA, zero engine restarts |
 | | Idle cost | $0.00 (scale-to-zero) |
-| **Quality** | Test suite (offline) | **1753 tests passed (1755 collected: 1 skipped, 1 deselected)** in ~4 min |
-| | Lint / type-check | `ruff check` clean · `mypy` clean across 8 packages (76 files) |
+| **Quality** | Test suite (offline) | **1833 tests passed (1833 collected: 1 skipped, 1 deselected)** in ~4 min |
+| | Lint / type-check | `ruff check` clean · `mypy` clean across 8 packages (77 files) |
 | | Infrastructure as code | 100% Terraform (storage + IAM modules, 13 GCP APIs) |
 
 > **Final results** On the **100-instance held-out set**, the promoted **`higher_rank_14b`** champion scores **17.20% F2P (95% Wilson CI 11.1-25.8%)** with **90.10% P2P** at **8.92 s/instance** - up from the base Qwen3-14B's **2.46% F2P / 28.54% P2P** (**7.0× F2P gain**, +61.6pt P2P, McNemar p ≈ 6e-05, paired-bootstrap 95% CI lower bound > 0). Full table verbatim in [assets/results.txt](assets/results.txt); methodology in [docs/evaluation.md](docs/evaluation.md). The champion adapter ships on the Hugging Face Hub: **[`ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b`](https://huggingface.co/ahmedikram/SWE-Qwen-qwen3-14b-higher_rank_14b)**.
@@ -222,13 +222,13 @@ Everything below was captured against **live systems** - the real GCS bucket, th
 ### Quality & observability receipts
 
 <p align="center">
-  <img src="assets/media/pytest-summary.png" width="700" alt="pytest summary · 1753 passed, 1 skipped, 1 deselected" />
-  <br/><em>The offline test suite: <strong>1753 tests passed, 1 skipped, 1 deselected</strong> (1755 collected) in 4:19.</em>
+  <img src="assets/media/pytest-summary.png" width="700" alt="pytest summary · 1833 passed, 1 skipped, 1 deselected" />
+  <br/><em>The offline test suite: <strong>1833 tests passed, 1 skipped, 1 deselected</strong> (1833 collected) in 4:19.</em>
 </p>
 
 <p align="center">
   <img src="assets/media/quality-gates.png" width="700" alt="quality gates: ruff · ruff format · mypy · pytest" />
-  <br/><em>All four quality gates on the current tree: <code>ruff check</code> clean · <code>ruff format</code> clean (184 files) · <code>mypy</code> clean (76 source files) · <strong>1753 tests passed, 1 skipped, 1 deselected</strong> in 4:19.</em>
+  <br/><em>All four quality gates on the current tree: <code>ruff check</code> clean · <code>ruff format</code> clean (185 files) · <code>mypy</code> clean (77 source files) · <strong>1833 tests passed, 1 skipped, 1 deselected</strong> in 4:19.</em>
 </p>
 
 <p align="center">

@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 def make_run_id() -> str:
     """Generate a timestamped eval run id (e.g. ``eval-20260731-143000``)."""
-    return f"eval-{datetime.now():%Y%m%d-%H%M%S}"
+    return f"eval-{datetime.now(UTC):%Y%m%d-%H%M%S}"
 
 
 # ── Modal app lifecycle ──────────────────────────────────────────────────────
