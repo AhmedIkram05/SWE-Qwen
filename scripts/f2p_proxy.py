@@ -132,3 +132,7 @@ def select_champion(
         raise ValueError("cannot select a champion from empty scores")
     best = max(scores, key=lambda v: scores[v].get("mean_f2p", 0.0))
     return best
+
+
+if __name__ == "__main__":
+    print(__doc__)

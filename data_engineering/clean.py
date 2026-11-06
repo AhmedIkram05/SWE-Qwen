@@ -124,16 +124,19 @@ _FILTER_ATTRS = {
 
 
 def _check_no_test_files(record: IssueRecord) -> str | None:
+    """Return 'no_test_files' if the record changed no test files."""
     return "no_test_files" if not record.test_files_changed else None
 
 
 def _check_patch_size(record: IssueRecord, max_lines: int) -> str | None:
+    """Return 'patch_too_large' if the patch exceeds max_lines."""
     if len(record.patch_diff.splitlines()) > max_lines:
         return "patch_too_large"
     return None
 
 
 def _check_binary(record: IssueRecord) -> str | None:
+    """Return 'binary' if the patch diff is binary."""
     return "binary" if _is_binary_diff(record.patch_diff) else None
 
 
@@ -148,16 +151,19 @@ def _check_non_python(record: IssueRecord) -> tuple[str | None, str | None]:
 
 
 def _check_empty_body(record: IssueRecord) -> str | None:
+    """Return 'empty_body' if the issue body is missing or blank."""
     if not record.issue_body or not record.issue_body.strip():
         return "empty_body"
     return None
 
 
 def _check_f2p(record: IssueRecord) -> str | None:
+    """Return 'no_f2p_signal' if the record has no F2P keywords."""
     return "no_f2p_signal" if not _has_f2p_keywords(record) else None
 
 
 def _apply_filter(stats: CleanStats, reason: str) -> None:
+    """Increment the filter counter for the given removal reason."""
     attr = _FILTER_ATTRS.get(reason)
     if attr:
         setattr(stats, attr, getattr(stats, attr, 0) + 1)
