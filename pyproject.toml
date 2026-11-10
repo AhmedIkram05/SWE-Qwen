@@ -40,7 +40,7 @@ dependencies = [
     # Langfuse for LLM observability
     "langfuse>=2.60.0",
     # Inference serving
-    "vllm>=0.26.0,<0.33.0; sys_platform == 'linux'",  # upper bound: sampling/LoRA behaviour (lock holds 0.28.0)
+    "vllm>=0.26.0,<0.34.0; sys_platform == 'linux'",  # upper bound: sampling/LoRA behaviour (lock holds 0.28.0)
     "openai>=1.70.0",
     # Utilities
     "jinja2>=3.1.0",
