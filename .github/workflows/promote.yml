@@ -25,6 +25,11 @@ concurrency:
   group: promote-decision-${{ github.ref }}
   cancel-in-progress: false
 
+# Least privilege for jobs that do not declare their own (init-wandb); the
+# decide/deploy jobs add id-token: write for GCP workload identity.
+permissions:
+  contents: read
+
 env:
   PYTHON_VERSION: "3.11"
   # Same run id consumed by tokenize, training, and eval. EvalConfig reads
