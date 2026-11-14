@@ -103,3 +103,71 @@ def test_bootstrap_reproducible() -> None:
     assert obs1 == obs2
     assert lo1 == lo2
     assert hi1 == hi2
+
+
+# ── Bulk-sampling contract and edges ──────────────────────────────────────────
+
+
+def test_bootstrap_single_pair() -> None:
+    lo, hi, obs = paired_bootstrap_ci([0.75], [0.25], seed=1)
+    assert obs == pytest.approx(0.5)
+    assert lo == pytest.approx(0.5)
+    assert hi == pytest.approx(0.5)  # one sample resamples to itself
+
+
+def test_bootstrap_constant_difference_is_point_mass() -> None:
+    a = [0.4, 0.6, 0.8, 0.2, 1.0]
+    b = [0.1, 0.3, 0.5, -0.1, 0.7]
+    lo, hi, obs = paired_bootstrap_ci(a, b, seed=42)
+    assert obs == pytest.approx(0.3)
+    assert lo == pytest.approx(0.3)
+    assert hi == pytest.approx(0.3)
+
+
+def test_bootstrap_rejects_empty_resample_count() -> None:
+    with pytest.raises(ValueError, match="n_boot"):
+        paired_bootstrap_ci([0.0, 1.0], [1.0, 0.0], n_boot=0)
+
+
+def test_bootstrap_rejects_negative_resample_count() -> None:
+    with pytest.raises(ValueError, match="n_boot"):
+        paired_bootstrap_ci([0.0, 1.0], [1.0, 0.0], n_boot=-5)
+
+
+def test_bootstrap_rejects_length_mismatch() -> None:
+    with pytest.raises(ValueError):
+        paired_bootstrap_ci([0.0, 1.0], [1.0])
+
+
+def test_bootstrap_single_resample() -> None:
+    lo, hi, obs = paired_bootstrap_ci([0.2, 0.9], [0.1, 0.4], n_boot=1, seed=3)
+    assert lo <= hi
+    assert lo <= obs <= hi or obs == pytest.approx(0.3)
+
+
+def test_bootstrap_does_not_draw_one_sample_at_a_time(monkeypatch) -> None:
+    """Per-sample ``rng.choice`` in a 10k x n loop is the slow path.
+
+    Guard against reintroducing it: bulk ``choices`` keeps the same
+    percentile-bootstrap semantics at a fraction of the cost.
+    """
+    import random
+
+    def _explode(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("paired_bootstrap_ci must sample in bulk, not per draw")
+
+    monkeypatch.setattr(random.Random, "choice", _explode)
+    lo, hi, obs = paired_bootstrap_ci([0.2, 0.9, 0.4], [0.1, 0.4, 0.3], n_boot=50, seed=2)
+    assert lo <= hi
+    assert obs == pytest.approx(0.2333333333)
+
+
+def test_bootstrap_ci_width_shrinks_with_more_pairs() -> None:
+    import random as _random
+
+    rng = _random.Random(0)
+    a = [rng.random() for _ in range(200)]
+    b = [rng.random() for _ in range(200)]
+    lo_small, hi_small, _ = paired_bootstrap_ci(a[:20], b[:20], seed=42)
+    lo_large, hi_large, _ = paired_bootstrap_ci(a, b, seed=42)
+    assert (hi_large - lo_large) < (hi_small - lo_small)
