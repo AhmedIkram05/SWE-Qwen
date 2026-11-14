@@ -48,6 +48,7 @@ from data_engineering.schema import (
     PipelineStats,
     RepoResult,
     Splits,
+    ValidationError,
 )
 from observability.metrics import log_metrics
 
@@ -277,6 +278,41 @@ def _load_stage(
 
 # SWE-bench pipeline
 
+# Records converted to dicts per validation batch. Bounds the transient dict
+# copy to one batch instead of the whole corpus (~1.2 GB at 20k records).
+_VALIDATE_CHUNK = 1000
+
+
+def _validate_in_chunks(
+    raw_records: list[IssueRecord],
+) -> tuple[list[IssueRecord], list[ValidationError]]:
+    """Validate records in bounded batches, preserving input order.
+
+    ``validate_batch`` needs dicts, so one call would materialise a dict copy
+    of the whole corpus alongside the raw and validated record lists. Chunking
+    keeps only one batch's dicts alive at a time.
+    """
+    validated: list[IssueRecord] = []
+    errors: list[ValidationError] = []
+    for start in range(0, len(raw_records), _VALIDATE_CHUNK):
+        chunk = raw_records[start : start + _VALIDATE_CHUNK]
+        batch_dicts = [r.model_dump() for r in chunk]
+        try:
+            valid, batch_errors = validate.validate_batch(batch_dicts, log_summary=False)
+        finally:
+            del batch_dicts
+        validated.extend(valid)
+        errors.extend(batch_errors)
+
+    if errors:
+        logger.warning(
+            "Validation: %d valid, %d errors across %d records",
+            len(validated),
+            len(errors),
+            len(raw_records),
+        )
+    return validated, errors
+
 
 class SwebenchPhaseResult(NamedTuple):
     """In-memory products of the SWE-bench phase.
@@ -348,24 +384,17 @@ def run_pipeline_swebench(
 
             if resume_from and resume_from in ("validated", "cleaned"):
                 logger.info("Resuming from '%s' -- skipping SWE-bench ingest", resume_from)
-                raw_dicts = _load_stage(config, run_id, "swebench", "raw")
-                raw_records = [IssueRecord(**r) for r in raw_dicts]
+                raw_records = [
+                    IssueRecord(**r) for r in _load_stage(config, run_id, "swebench", "raw")
+                ]
             elif not ingest_enabled:
                 raw_records = []
             else:
                 progress.update(task, description="Ingesting SWE-bench dataset...")
                 logger.info("Ingesting SWE-bench dataset...")
                 raw_records = swebench_ingest.ingest_swebench(config)
-                _save_stage(
-                    [r.model_dump() for r in raw_records],
-                    config,
-                    run_id,
-                    "swebench",
-                    "raw",
-                )
-
-            # Convert to dicts for validation (validate_batch expects dicts)
-            raw_dicts = [r.model_dump() for r in raw_records]
+                # _save_stage serialises records directly; no temporary dump list.
+                _save_stage(raw_records, config, run_id, "swebench", "raw")
 
             logger.info("SWE-bench raw records: %d", len(raw_records))
             progress.update(task, advance=1, description=f"Raw: {len(raw_records)} records")
@@ -385,13 +414,7 @@ def run_pipeline_swebench(
             if config.bigquery_enabled:
                 progress.update(task, description="Augmenting with BigQuery...")
                 raw_records = swebench_ingest.augment_with_bigquery(raw_records, config)
-                _save_stage(
-                    [r.model_dump() for r in raw_records],
-                    config,
-                    run_id,
-                    "swebench",
-                    "bigquery_augmented",
-                )
+                _save_stage(raw_records, config, run_id, "swebench", "bigquery_augmented")
                 wandb_run.log({"stage_bigquery_augmented": len(raw_records)})
 
             # Stage 2: Validate
@@ -403,19 +426,11 @@ def run_pipeline_swebench(
                 validated = []
             else:
                 progress.update(task, description="Validating records...")
-                # Use augmented records if BigQuery enabled, otherwise use raw
-                validation_dicts = (
-                    [r.model_dump() for r in raw_records] if config.bigquery_enabled else raw_dicts
-                )
-                validated, validation_errors = validate.validate_batch(validation_dicts)
-                _save_stage(
-                    [r.model_dump() for r in validated],
-                    config,
-                    run_id,
-                    "swebench",
-                    "validated",
-                )
+                validated, validation_errors = _validate_in_chunks(raw_records)
+                _save_stage(validated, config, run_id, "swebench", "validated")
                 if validation_errors:
+                    # ValidationError.raw_value is arbitrary Any; keep the
+                    # dict path so default=str can serialise it.
                     _save_stage(
                         [e.model_dump() for e in validation_errors],
                         config,
@@ -608,8 +623,6 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
     _save_splits_jsonl(splits, golden_set, config, run_id)
 
     # Collect validation errors
-    from data_engineering.schema import ValidationError
-
     all_validation_errors: list[ValidationError] = []
     for d in _load_stage(config, run_id, "swebench", "validation_errors"):
         try:

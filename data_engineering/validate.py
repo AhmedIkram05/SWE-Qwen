@@ -116,11 +116,18 @@ def validate_record(record: dict[str, Any]) -> ValidationResult:
 
 def validate_batch(
     records: list[dict[str, Any]],
+    *,
+    log_summary: bool = True,
 ) -> tuple[list[IssueRecord], list[ValidationError]]:
     """Validate a batch of records.
 
     Returns a tuple of ``(valid_records, all_validation_errors)``.
     Invalid records are silently skipped (errors are collected).
+
+    Args:
+        records: Raw record dicts to validate.
+        log_summary: Emit the aggregate warning. Chunked callers pass False
+            and log one summary for the whole corpus instead.
     """
     valid: list[IssueRecord] = []
     all_errors: list[ValidationError] = []
@@ -132,7 +139,7 @@ def validate_batch(
         else:
             all_errors.extend(result.errors)
 
-    if all_errors:
+    if all_errors and log_summary:
         logger.warning(
             "Validation: %d valid, %d errors across %d records",
             len(valid),

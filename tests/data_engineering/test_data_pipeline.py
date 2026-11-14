@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -177,6 +178,74 @@ class TestCheckpoint:
         config = DataPipelineConfig(output_dir=tmp_path)
         _save_stage([{"issue_id": "dict#1"}], config, "runD", "swebench", "raw")
         assert _load_stage(config, "runD", "swebench", "raw") == [{"issue_id": "dict#1"}]
+
+
+class TestValidateInChunks:
+    """Validation converts records in bounded batches instead of one
+    full-corpus dict copy (raw_records + raw_dicts + validated peaked at
+    several GB on the 20k-record corpus)."""
+
+    def test_empty_input_does_not_call_validate(self, monkeypatch) -> None:
+        from data_engineering import run_pipeline as rp
+
+        calls: list[int] = []
+        monkeypatch.setattr(
+            rp.validate, "validate_batch", lambda *a, **k: calls.append(1) or ([], [])
+        )
+        assert rp._validate_in_chunks([]) == ([], [])
+        assert calls == []
+
+    def test_batches_are_bounded_and_ordered(self, monkeypatch) -> None:
+        from data_engineering import run_pipeline as rp
+
+        seen: list[list[str]] = []
+
+        def _fake(batch, **kwargs):
+            assert kwargs.get("log_summary") is False
+            seen.append([r["issue_id"] for r in batch])
+            return ([IssueRecord(**r) for r in batch], [])
+
+        monkeypatch.setattr(rp.validate, "validate_batch", _fake)
+        monkeypatch.setattr(rp, "_VALIDATE_CHUNK", 2)
+        records = [_make_record(f"t#{i}") for i in range(5)]
+        validated, errors = rp._validate_in_chunks(records)
+        assert [len(chunk) for chunk in seen] == [2, 2, 1]
+        assert [r.issue_id for r in validated] == [f"t#{i}" for i in range(5)]
+        assert errors == []
+
+    def test_converts_each_record_exactly_once(self, monkeypatch) -> None:
+        from data_engineering import run_pipeline as rp
+
+        monkeypatch.setattr(rp, "_VALIDATE_CHUNK", 2)
+        monkeypatch.setattr(rp.validate, "validate_batch", lambda batch, **k: ([], []))
+        converted: list[str] = []
+        original = IssueRecord.model_dump
+
+        def _counting(self, *args, **kwargs):
+            converted.append(self.issue_id)
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(IssueRecord, "model_dump", _counting)
+        rp._validate_in_chunks([_make_record(f"t#{i}") for i in range(5)])
+        assert converted == [f"t#{i}" for i in range(5)]
+
+    def test_aggregates_errors_and_logs_one_summary(self, monkeypatch, caplog) -> None:
+        from data_engineering import run_pipeline as rp
+
+        caplog.set_level(logging.WARNING)
+        monkeypatch.setattr(rp, "_VALIDATE_CHUNK", 2)
+
+        def _fake(batch, **kwargs):
+            batch_errors = [
+                ValidationError(record_id=r["issue_id"], field="x", error="bad") for r in batch
+            ]
+            return ([], batch_errors)
+
+        monkeypatch.setattr(rp.validate, "validate_batch", _fake)
+        validated, errors = rp._validate_in_chunks([_make_record(f"t#{i}") for i in range(5)])
+        assert validated == []
+        assert len(errors) == 5
+        assert caplog.text.count("Validation:") == 1
 
 
 class TestRunPipelineSWEBench:

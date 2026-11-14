@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from data_engineering.schema import IssueRecord, ValidationError
@@ -57,6 +58,18 @@ class TestValidateBatch:
         valid, errors = validate_batch(data)
         assert len(valid) == 0
         assert any("body" in e.field or "issue_body" in e.field for e in errors)
+
+
+class TestValidateBatchSummary:
+    def test_log_summary_enabled_warns_once(self, caplog) -> None:
+        caplog.set_level(logging.WARNING)
+        validate_batch(_load("sample_invalid_issues.json"))
+        assert caplog.text.count("Validation:") == 1
+
+    def test_log_summary_disabled_suppresses_warning(self, caplog) -> None:
+        caplog.set_level(logging.WARNING)
+        validate_batch(_load("sample_invalid_issues.json"), log_summary=False)
+        assert "Validation:" not in caplog.text
 
     def test_malformed_hunks_skipped(self) -> None:
         """Malformed hunk dicts should be silently skipped, valid ones kept."""
