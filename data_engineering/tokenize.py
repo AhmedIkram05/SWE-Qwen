@@ -23,9 +23,11 @@ from transformers import AutoTokenizer
 from data_engineering.config import DataPipelineConfig
 from inference.prompt_builder import (
     CONTEXT_FILES_MAX,
+    SNIPPET_MAX_FILES,
     TEST_FILES_MAX,
     contract_file_snippets,
     contract_snippet_candidates,
+    prefetch_raw_files,
     render_system_and_user,
 )
 from training.prompt_loader import PromptLoader
@@ -45,6 +47,10 @@ def _default_model_name() -> str:
 
 # Max errors to log before suppressing
 _MAX_LOG_ERRORS = 5
+
+# Records rendered per snippet-prefetch batch. Bounded so the chunk's file
+# content stays inside fetch_raw_file's LRU cache (256 records * 5 files).
+_PREFETCH_CHUNK = 256
 
 # Column names in the output dataset
 INPUT_IDS_COL = "input_ids"
@@ -110,6 +116,71 @@ def load_jsonl_split(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _snippet_request(
+    record: dict[str, Any],
+) -> tuple[str, str, list[str]] | None:
+    """Return ``(repo, base_sha, candidate_paths)`` for snippet fetching.
+
+    ``None`` when the record has no changed files or no base commit — the
+    same conditions under which ``_format_parts`` fetches nothing.
+    """
+    files_changed: list[str] = record.get("files_changed", []) or []
+    if not files_changed:
+        return None
+    metadata = record.get("metadata") or {}
+    base_sha = metadata.get("base_sha") or record.get("base_sha")
+    if not base_sha:
+        return None
+    paths = contract_snippet_candidates(
+        files_changed[:CONTEXT_FILES_MAX],
+        (record.get("test_files_changed", []) or [])[:TEST_FILES_MAX],
+        record.get("issue_body", ""),
+    )
+    return record.get("repo", "unknown"), base_sha, paths
+
+
+def _snippet_keys(record: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """``(repo, base_sha, path)`` keys ``_format_parts`` will fetch, in order.
+
+    Mirrors ``file_snippets``: first ``SNIPPET_MAX_FILES`` unique non-empty
+    candidates. Used to warm the fetch cache; fetching a later fallback after
+    a failure stays synchronous and is still correct.
+    """
+    request = _snippet_request(record)
+    if request is None:
+        return []
+    repo, base_sha, paths = request
+    keys: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for path in paths:
+        if len(keys) >= SNIPPET_MAX_FILES:
+            break
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        keys.append((repo, base_sha, path))
+    return keys
+
+
+def _prefetch_snippets(records: list[dict[str, Any]]) -> int:
+    """Warm the snippet cache for one chunk of records (deduplicated)."""
+    keys: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for record in records:
+        for key in _snippet_keys(record):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+    if not keys:
+        return 0
+    try:
+        return prefetch_raw_files(keys)
+    except Exception as exc:
+        # Best-effort: a failed prefetch only costs synchronous fallbacks.
+        logger.warning("Snippet prefetch failed (continuing): %s", exc)
+        return 0
+
+
 def _format_parts(record: dict[str, Any], prompt_loader: PromptLoader) -> tuple[str, str]:
     """Render a record's (full_text, prompt_only_text) training prompts.
 
@@ -135,18 +206,14 @@ def _format_parts(record: dict[str, Any], prompt_loader: PromptLoader) -> tuple[
     test_files_capped = test_files[:TEST_FILES_MAX]
 
     context_snippets: list[dict[str, str]] = []
-    metadata = record.get("metadata") or {}
-    base_sha = metadata.get("base_sha") or record.get("base_sha")
-    if base_sha and files_changed:
+    request = _snippet_request(record)
+    if request is not None:
+        request_repo, base_sha, paths = request
         try:
             # Snippet caps (5 files x 150 lines) come from the shared
             # contract: the gold patch must survive the training context
             # window, and eval uses the same bound.
-            context_snippets = contract_file_snippets(
-                repo,
-                base_sha,
-                contract_snippet_candidates(context_files, test_files_capped, issue_body),
-            )
+            context_snippets = contract_file_snippets(request_repo, base_sha, paths)
         except Exception as exc:
             logger.warning("Failed to fetch file contents for %s: %s", issue_id, exc)
 
@@ -243,34 +310,41 @@ def tokenize_split(  # noqa: PLR0915
     errors = 0
     dropped = 0  # examples whose prompt alone fills the window (no room for the gold patch)
 
-    for i, rec in enumerate(records):
-        try:
-            text, prompt_only = _format_parts(rec, prompt_loader)
+    for chunk_start in range(0, len(records), _PREFETCH_CHUNK):
+        chunk = records[chunk_start : chunk_start + _PREFETCH_CHUNK]
+        # Warm this chunk's file contents concurrently before the sequential
+        # render loop; a prefetch failure only costs synchronous fallbacks.
+        _prefetch_snippets(chunk)
 
-            # Identical tokenization settings for both sides so BOS/EOS counts
-            # match; no truncation here — oversize is dropped below, never cut.
-            prompt_ids = tokenizer(
-                prompt_only,
-                add_special_tokens=True,
-                truncation=False,
-            )["input_ids"]
-            prompt_len = len(prompt_ids)
-            if prompt_len >= max_length:
-                dropped += 1
+        for offset, rec in enumerate(chunk):
+            i = chunk_start + offset
+            try:
+                text, prompt_only = _format_parts(rec, prompt_loader)
+
+                # Identical tokenization settings for both sides so BOS/EOS counts
+                # match; no truncation here — oversize is dropped below, never cut.
+                prompt_ids = tokenizer(
+                    prompt_only,
+                    add_special_tokens=True,
+                    truncation=False,
+                )["input_ids"]
+                prompt_len = len(prompt_ids)
+                if prompt_len >= max_length:
+                    dropped += 1
+                    continue
+                texts.append(text)
+                prompt_ends.append(prompt_len)
+
+            except Exception as exc:
+                errors += 1
+                if errors <= _MAX_LOG_ERRORS:
+                    logger.warning(
+                        "Failed to format record %s (%s): %s",
+                        rec.get("issue_id", f"index-{i}"),
+                        split_name,
+                        exc,
+                    )
                 continue
-            texts.append(text)
-            prompt_ends.append(prompt_len)
-
-        except Exception as exc:
-            errors += 1
-            if errors <= _MAX_LOG_ERRORS:
-                logger.warning(
-                    "Failed to format record %s (%s): %s",
-                    rec.get("issue_id", f"index-{i}"),
-                    split_name,
-                    exc,
-                )
-            continue
 
     if errors:
         logger.warning(

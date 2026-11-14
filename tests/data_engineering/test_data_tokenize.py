@@ -604,6 +604,136 @@ class TestTrainingPromptFileContents:
         assert "### File Contents" not in text
 
 
+# ── snippet prefetch (concurrent file fetches) ───────────────────────────────
+
+
+class TestSnippetPrefetch:
+    """Prefetch keys must mirror exactly what prompt rendering will fetch."""
+
+    @staticmethod
+    def _record(**overrides: Any) -> dict[str, Any]:
+        rec: dict[str, Any] = {
+            "issue_id": "x#1",
+            "repo": "r",
+            "issue_body": "body",
+            "patch_diff": "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-x\n+y\n",
+            "files_changed": ["a.py", "b.py"],
+            "test_files_changed": ["tests/test_a.py"],
+            "metadata": {"base_sha": "s" * 40},
+        }
+        rec.update(overrides)
+        return rec
+
+    def test_keys_require_base_sha(self) -> None:
+        from data_engineering.tokenize import _snippet_keys
+
+        assert _snippet_keys(self._record(metadata={})) == []
+
+    def test_keys_require_files_changed(self) -> None:
+        from data_engineering.tokenize import _snippet_keys
+
+        assert _snippet_keys(self._record(files_changed=[])) == []
+
+    def test_keys_prefer_metadata_base_sha(self) -> None:
+        from data_engineering.tokenize import _snippet_keys
+
+        rec = self._record(base_sha="top-level", metadata={"base_sha": "meta"})
+        assert {k[1] for k in _snippet_keys(rec)} == {"meta"}
+
+    def test_keys_fall_back_to_top_level_base_sha(self) -> None:
+        from data_engineering.tokenize import _snippet_keys
+
+        rec = self._record(base_sha="top-level", metadata={})
+        assert {k[1] for k in _snippet_keys(rec)} == {"top-level"}
+
+    def test_keys_cap_and_dedup_like_file_snippets(self) -> None:
+        from data_engineering.tokenize import _snippet_keys
+
+        rec = self._record(
+            files_changed=["a.py", "a.py", ""] + [f"f{i}.py" for i in range(10)],
+            test_files_changed=[],
+        )
+        keys = _snippet_keys(rec)
+        assert len(keys) == 5  # SNIPPET_MAX_FILES
+        assert [k[2] for k in keys] == ["a.py", "f0.py", "f1.py", "f2.py", "f3.py"]
+
+    def test_keys_match_paths_actually_fetched(
+        self, sample_record: dict[str, Any], prompt_loader: PromptLoader, monkeypatch: Any
+    ) -> None:
+        from data_engineering.tokenize import _format_parts, _snippet_keys
+        from evaluation import inference as inf
+
+        rec = self._record(files_changed=["src/app.py", "src/util.py"])
+        fetched: list[tuple[str, str, str]] = []
+
+        def _fake_fetch(repo: str, base_sha: str, path: str) -> str:
+            fetched.append((repo, base_sha, path))
+            return "def f():\n    return 1\n"
+
+        monkeypatch.setattr(inf, "_fetch_raw_file", _fake_fetch)
+        _format_parts(rec, prompt_loader)
+        assert _snippet_keys(rec) == fetched
+
+    def test_prefetch_snippets_dedups_across_records(self, monkeypatch: Any) -> None:
+        from data_engineering import tokenize as tok
+
+        calls: list[list[tuple[str, str, str]]] = []
+
+        def _record_prefetch(requests, **_kwargs):
+            calls.append(list(requests))
+            return len(requests)
+
+        monkeypatch.setattr(tok, "prefetch_raw_files", _record_prefetch)
+        records = [self._record(), self._record(issue_id="x#2")]
+        tok._prefetch_snippets(records)
+        assert len(calls) == 1
+        assert len(calls[0]) == len(set(calls[0]))  # deduped
+        assert len(calls[0]) == 3  # two context files + one test file
+
+    def test_prefetch_snippets_swallows_failures(self, monkeypatch: Any) -> None:
+        from data_engineering import tokenize as tok
+
+        def _boom(requests, **_kwargs):
+            raise RuntimeError("prefetch pool failed")
+
+        monkeypatch.setattr(tok, "prefetch_raw_files", _boom)
+        assert tok._prefetch_snippets([self._record()]) == 0
+
+    def test_tokenize_split_prefetches_per_chunk(
+        self, sample_record: dict[str, Any], prompt_loader: PromptLoader, monkeypatch: Any
+    ) -> None:
+        from data_engineering import tokenize as tok
+
+        chunks: list[int] = []
+
+        def _record_prefetch(requests, **_kwargs):
+            chunks.append(len(requests))
+            return len(requests)
+
+        monkeypatch.setattr(tok, "prefetch_raw_files", _record_prefetch)
+        monkeypatch.setattr(tok, "_PREFETCH_CHUNK", 2)
+        monkeypatch.setattr(tok, "_format_parts", lambda rec, loader: ("hello", "hello"))
+
+        class _Tokenizer:
+            pad_token = "<pad>"
+            eos_token = "<eos>"
+            padding_side = "right"
+
+            def __call__(self, texts: Any, **_kwargs: Any) -> dict[str, list[list[int]]]:
+                rows = [texts] if isinstance(texts, str) else texts
+                return {
+                    "input_ids": [[1, 2, 3] for _ in rows],
+                    "attention_mask": [[1, 1, 1] for _ in rows],
+                }
+
+        records = [self._record(issue_id=f"x#{i}") for i in range(5)]
+        ds = tok.tokenize_split(records, _Tokenizer(), prompt_loader, max_length=16)
+        assert len(ds) == 5
+        assert len(chunks) == 3  # ceil(5 / 2)
+        # Every prefetch batch is bounded by the chunk size (3 keys per record).
+        assert chunks == [3, 3, 3]
+
+
 # ── P0-2 tokenize↔trainer alignment contract ─────────────────────────────────
 
 

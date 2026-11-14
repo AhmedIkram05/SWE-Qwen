@@ -233,6 +233,87 @@ class TestFileSnippets:
         assert out[2]["content"].endswith("(file truncated)")
 
 
+class TestPrefetchRawFiles:
+    """Concurrent warming of the snippet cache before prompt rendering."""
+
+    def test_dedups_and_returns_unique_count(self, mocker):
+        calls: list[tuple[str, str, str]] = []
+
+        def fake_fetch(repo, base_sha, path):
+            calls.append((repo, base_sha, path))
+            return "x"
+
+        mocker.patch.object(prompt_builder, "_fetch_raw_file", side_effect=fake_fetch)
+        reqs = [("r", "s", "a.py"), ("r", "s", "b.py"), ("r", "s", "a.py")]
+        assert prompt_builder.prefetch_raw_files(reqs) == 2
+        assert sorted(calls) == [("r", "s", "a.py"), ("r", "s", "b.py")]
+
+    def test_empty_requests_is_noop(self, mocker):
+        fetch = mocker.patch.object(prompt_builder, "_fetch_raw_file")
+        assert prompt_builder.prefetch_raw_files([]) == 0
+        fetch.assert_not_called()
+
+    def test_failure_does_not_abort_other_fetches(self, mocker):
+        calls: list[str] = []
+
+        def fake_fetch(repo, base_sha, path):
+            calls.append(path)
+            if path == "boom.py":
+                raise RuntimeError("network exploded")
+            return "ok"
+
+        mocker.patch.object(prompt_builder, "_fetch_raw_file", side_effect=fake_fetch)
+        assert prompt_builder.prefetch_raw_files([("r", "s", "boom.py"), ("r", "s", "ok.py")]) == 2
+        assert sorted(calls) == ["boom.py", "ok.py"]
+
+    def test_runs_with_bounded_concurrency(self, mocker):
+        import threading
+        import time
+
+        lock = threading.Lock()
+        active = 0
+        peak = 0
+
+        def fake_fetch(repo, base_sha, path):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.01)
+            with lock:
+                active -= 1
+            return "x"
+
+        mocker.patch.object(prompt_builder, "_fetch_raw_file", side_effect=fake_fetch)
+        reqs = [("r", "s", f"f{i}.py") for i in range(8)]
+        assert prompt_builder.prefetch_raw_files(reqs, max_workers=2) == 8
+        assert 1 < peak <= 2
+
+    def test_warms_cache_for_later_snippet_reads(self, mocker):
+        class _Resp:
+            def read(self):
+                return b"def f():\n    return 1\n"
+
+        class _Ctx:
+            def __enter__(self):
+                return _Resp()
+
+            def __exit__(self, *args):
+                return None
+
+        urlopen = mocker.patch(
+            "inference.prompt_builder.urllib.request.urlopen", return_value=_Ctx()
+        )
+        prompt_builder.fetch_raw_file.cache_clear()
+        reqs = [("r", "s", "a.py"), ("r", "s", "b.py"), ("r", "s", "a.py")]
+        assert prompt_builder.prefetch_raw_files(reqs) == 2
+        assert urlopen.call_count == 2
+
+        snippets = prompt_builder.file_snippets("r", "s", ["a.py", "b.py"], max_files=2)
+        assert [s["path"] for s in snippets] == ["a.py", "b.py"]
+        assert urlopen.call_count == 2  # served from the warmed cache
+
+
 class TestEnsureGolden:
     def test_existing_file_returned(self, monkeypatch, tmp_path):
         dst = tmp_path / "data" / "d1" / "swebench" / "golden.jsonl"
