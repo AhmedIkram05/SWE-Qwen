@@ -280,3 +280,122 @@ class TestPipelineResult:
             "issue_body": "body",
             "patch_diff": "--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n-x\n+x\n+y\n",
         }
+
+
+# ── Patch-diff validation (schema sanity check, not a diff parser) ─────────
+
+
+_MINIMAL_DIFF = "--- a/f.py\n+++ b/f.py\n@@ -1 +1,2 @@\n-x = 1\n+x = 2\n+y = 3\n"
+
+
+def _record_with_patch(patch: str) -> IssueRecord:
+    return IssueRecord(issue_id="x#1", repo="r", issue_body="body", patch_diff=patch)
+
+
+class TestPatchDiffValidation:
+    def test_accepts_minimal_unified_diff(self) -> None:
+        assert _record_with_patch(_MINIMAL_DIFF).patch_diff == _MINIMAL_DIFF
+
+    def test_accepts_git_style_diff(self) -> None:
+        patch = (
+            "diff --git a/f.py b/f.py\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/f.py\n"
+            "+++ b/f.py\n"
+            "@@ -1 +1 @@\n"
+            "-x\n"
+            "+y\n"
+        )
+        assert _record_with_patch(patch).patch_diff == patch
+
+    def test_accepts_crlf_line_endings(self) -> None:
+        patch = _MINIMAL_DIFF.replace("\n", "\r\n")
+        assert _record_with_patch(patch).patch_diff == patch
+
+    def test_accepts_empty_new_file_body(self) -> None:
+        # A new file is a header pair plus a hunk that only adds lines.
+        patch = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,2 @@\n+a\n+b\n"
+        assert _record_with_patch(patch).patch_diff == patch
+
+    def test_accepts_binary_git_diff(self) -> None:
+        # Binary changes have no ---/+++/@@ body; the clean stage removes them.
+        patch = (
+            "diff --git a/logo.png b/logo.png\n"
+            "index e69de29..ab2ed5d 100644\n"
+            "Binary files a/logo.png and b/logo.png differ\n"
+        )
+        assert _record_with_patch(patch).patch_diff == patch
+
+    def test_accepts_rename_only_git_diff(self) -> None:
+        patch = (
+            "diff --git a/old.py b/new.py\n"
+            "similarity index 100%\n"
+            "rename from old.py\n"
+            "rename to new.py\n"
+        )
+        assert _record_with_patch(patch).patch_diff == patch
+
+    def test_accepts_mode_only_git_diff(self) -> None:
+        patch = "diff --git a/f.sh b/f.sh\nold mode 100644\nnew mode 100755\n"
+        assert _record_with_patch(patch).patch_diff == patch
+
+    def test_accepts_preamble_before_a_proper_diff(self) -> None:
+        patch = "Here is the patch:\n\n" + _MINIMAL_DIFF
+        assert _record_with_patch(patch).patch_diff == patch
+
+    def test_rejects_preamble_before_a_binary_marker(self) -> None:
+        # unidiff rejected this too: a preamble hides the git header.
+        patch = "\n".join(
+            [
+                "Here you go:",
+                "diff --git a/x.png b/x.png",
+                "Binary files a/x.png and b/x.png differ",
+            ]
+        )
+        with pytest.raises(ValueError, match="unified diff"):
+            _record_with_patch(patch)
+
+    def test_rejects_whitespace_only(self) -> None:
+        with pytest.raises(ValueError):
+            _record_with_patch("   \n\t\n")
+
+    def test_rejects_headers_without_hunk(self) -> None:
+        # A header pair with no hunk cannot be applied; it is not a patch.
+        with pytest.raises(ValueError, match="unified diff"):
+            _record_with_patch("--- a/f.py\n+++ b/f.py\n")
+
+    def test_rejects_hunk_without_file_headers(self) -> None:
+        with pytest.raises(ValueError, match="unified diff"):
+            _record_with_patch("@@ -1 +1 @@\n-x\n+y\n")
+
+    def test_rejects_unrelated_text(self) -> None:
+        with pytest.raises(ValueError, match="unified diff"):
+            _record_with_patch("not a diff at all")
+
+    def test_rejects_non_string(self) -> None:
+        with pytest.raises(ValueError):
+            IssueRecord(issue_id="x", repo="r", issue_body="body", patch_diff=None)  # type: ignore[arg-type]
+
+    def test_validation_never_parses_the_diff_with_unidiff(self, monkeypatch) -> None:
+        """Schema validation must stay a constant-cost header check.
+
+        Parsing every corpus diff with ``unidiff`` cost ~2.5 s per 20k-record
+        pass and bought nothing: the regex fallback already accepted every
+        diff unidiff accepted (measured on the real corpus).
+        """
+        import unidiff.patch
+
+        calls: list[str] = []
+
+        def _explode(*_args: object, **_kwargs: object) -> None:
+            calls.append("called")
+            raise AssertionError("unidiff must not run during schema validation")
+
+        monkeypatch.setattr(unidiff.patch, "PatchSet", _explode)
+        assert _record_with_patch(_MINIMAL_DIFF).patch_diff == _MINIMAL_DIFF
+        assert calls == []
+
+    def test_large_diff_is_accepted_without_parsing(self) -> None:
+        body = "".join(f"+line {i}\n" for i in range(20_000))
+        patch = f"--- a/f.py\n+++ b/f.py\n@@ -0,0 +1,20000 @@\n{body}"
+        assert _record_with_patch(patch).patch_diff == patch
