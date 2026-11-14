@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from pydantic import BaseModel
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -73,14 +74,7 @@ def _save_stage_gcs(
         prefix = f"datasets/{run_id}/{repo_id}"
         key = f"{prefix}/{stage}.jsonl"
         blob = bucket.blob(key)
-        lines = []
-        for r in records:
-            if hasattr(r, "model_dump"):
-                line = json.dumps(r.model_dump(), default=str)
-            else:
-                line = json.dumps(r, default=str)
-            lines.append(line + "\n")
-        content = "".join(lines)
+        content = "".join(_jsonl_line(r) + "\n" for r in records)
         blob.upload_from_string(content, content_type="application/jsonl")
         logging.info(
             f"Uploaded {len(records)} records to gs://{config.gcs_bucket}/datasets/{run_id}/{repo_id}/{stage}.jsonl"
@@ -124,6 +118,19 @@ def _load_stage_gcs(
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+
+def _jsonl_line(rec: Any) -> str:
+    """One JSONL line for a Pydantic record or a plain dict.
+
+    ``model_dump_json`` serialises straight from the model (Rust core) and
+    skips the intermediate dict that ``json.dumps(model_dump())`` builds.
+    """
+    if isinstance(rec, BaseModel):
+        return rec.model_dump_json()
+    if hasattr(rec, "model_dump"):
+        return json.dumps(rec.model_dump(), default=str)
+    return json.dumps(rec, default=str)
 
 
 def _manifest_hash(manifest: dict[str, Any]) -> str:
@@ -235,13 +242,9 @@ def _save_stage(
     out_dir = _checkpoint_dir(config, run_id, repo_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{stage}.jsonl"
-    with path.open("w") as f:
+    with path.open("w", encoding="utf-8") as f:
         for rec in records:
-            if isinstance(rec, IssueRecord):
-                line = json.dumps(rec.model_dump(), default=str)
-            else:
-                line = json.dumps(rec, default=str)
-            f.write(line + "\n")
+            f.write(_jsonl_line(rec) + "\n")
 
     # GCS save (async-style, non-blocking)
     if config.gcs_bucket:
@@ -519,12 +522,9 @@ def _save_splits_jsonl(
     # Helper to save records
     def save_records(records, filename):
         path = out_dir / filename
-        with path.open("w") as f:
+        with path.open("w", encoding="utf-8") as f:
             for rec in records:
-                if hasattr(rec, "model_dump"):
-                    f.write(json.dumps(rec.model_dump(), default=str) + "\n")
-                else:
-                    f.write(json.dumps(rec, default=str) + "\n")
+                f.write(_jsonl_line(rec) + "\n")
         logger.info("Saved %d records to %s", len(records), path)
 
     save_records(splits.train, "train.jsonl")

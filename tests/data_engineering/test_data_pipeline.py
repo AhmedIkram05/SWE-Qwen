@@ -139,6 +139,45 @@ class TestCheckpoint:
         assert loaded[0]["issue_id"] == "test#2"
         assert "patch_diff" in loaded[0]
 
+    def test_save_stage_non_ascii_round_trip(self, tmp_path) -> None:
+        """Stage files are UTF-8; non-ASCII bodies survive unchanged."""
+        rec = _make_record("test#utf8").model_copy(update={"issue_body": "naïve café 日本語 🚀"})
+        config = DataPipelineConfig(output_dir=tmp_path)
+        _save_stage([rec], config, "runU", "swebench", "raw")
+
+        path = _checkpoint_dir(config, "runU", "swebench") / "raw.jsonl"
+        assert "naïve café 日本語 🚀".encode() in path.read_bytes()
+        assert _load_stage(config, "runU", "swebench", "raw")[0]["issue_body"] == (
+            "naïve café 日本語 🚀"
+        )
+
+    def test_save_stage_empty_list_writes_empty_file(self, tmp_path) -> None:
+        config = DataPipelineConfig(output_dir=tmp_path)
+        _save_stage([], config, "runE", "swebench", "raw")
+        path = _checkpoint_dir(config, "runE", "swebench") / "raw.jsonl"
+        assert path.read_text() == ""
+        assert _load_stage(config, "runE", "swebench", "raw") == []
+
+    def test_save_stage_serialises_without_an_intermediate_dict(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """model_dump_json() is ~2.4x faster than model_dump()+json.dumps."""
+        rec = _make_record("test#fast")
+        config = DataPipelineConfig(output_dir=tmp_path)
+
+        def _boom(*_args, **_kwargs):
+            raise AssertionError("model_dump() reintroduced in the stage writer")
+
+        monkeypatch.setattr(IssueRecord, "model_dump", _boom)
+        _save_stage([rec], config, "runF", "swebench", "raw")
+        assert _load_stage(config, "runF", "swebench", "raw")[0]["issue_id"] == "test#fast"
+
+    def test_save_stage_accepts_plain_dicts(self, tmp_path) -> None:
+        """Resume/augment paths may hand the writer plain dicts."""
+        config = DataPipelineConfig(output_dir=tmp_path)
+        _save_stage([{"issue_id": "dict#1"}], config, "runD", "swebench", "raw")
+        assert _load_stage(config, "runD", "swebench", "raw") == [{"issue_id": "dict#1"}]
+
 
 class TestRunPipelineSWEBench:
     @patch("data_engineering.run_pipeline.swebench_ingest.ingest_swebench")

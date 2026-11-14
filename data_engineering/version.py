@@ -23,15 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 def _records_to_jsonl(records: list[IssueRecord], path: Path) -> None:
-    """Write a list of records as JSONL."""
-    with path.open("w") as f:
+    """Write a list of records as UTF-8 JSONL."""
+    with path.open("w", encoding="utf-8") as f:
         for rec in records:
-            f.write(json.dumps(rec.model_dump(), default=str) + "\n")
+            f.write(rec.model_dump_json() + "\n")
 
 
 def _errors_to_jsonl(errors: list[ValidationError], path: Path) -> None:
     """Write validation errors as JSONL."""
-    with path.open("w") as f:
+    with path.open("w", encoding="utf-8") as f:
         for err in errors:
             f.write(json.dumps(err.model_dump(), default=str) + "\n")
 

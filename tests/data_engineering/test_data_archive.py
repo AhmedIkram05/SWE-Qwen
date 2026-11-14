@@ -9,7 +9,7 @@ from __future__ import annotations
 from unittest import mock
 from unittest.mock import patch
 
-from data_engineering.archive import upload_text_to_gcs, upload_to_gcs
+from data_engineering.archive import _upload_jsonl, upload_text_to_gcs, upload_to_gcs
 from data_engineering.config import DataPipelineConfig
 from data_engineering.schema import IssueRecord
 
@@ -149,6 +149,35 @@ class TestUploadToGcs:
             # Manifest + dataset card blobs should always be created
             assert "dataset_card.md" in str(result.get("dataset_card", ""))
             assert "manifest.json" in str(result.get("manifest", ""))
+
+
+class TestUploadJsonl:
+    def _content(self, records: list) -> str:
+        bucket = mock.MagicMock()
+        bucket.name = "bucket"
+        _upload_jsonl(bucket, "prefix", "train", records)
+        return bucket.blob.return_value.upload_from_string.call_args.args[0]
+
+    def test_non_ascii_is_uploaded_as_utf8(self) -> None:
+        rec = _rec("r#u").model_copy(update={"issue_body": "naïve café 日本語 🚀"})
+        content = self._content([rec])
+        assert "naïve café 日本語 🚀" in content
+
+    def test_serialises_without_an_intermediate_dict(self) -> None:
+        rec = _rec("r#fast")
+        with mock.patch.object(
+            IssueRecord,
+            "model_dump",
+            side_effect=AssertionError("model_dump() reintroduced in the archive writer"),
+        ):
+            content = self._content([rec])
+        assert '"issue_id":"r#fast"' in content
+
+    def test_plain_dict_records_still_serialise(self) -> None:
+        assert '{"issue_id": "dict#1"}' in self._content([{"issue_id": "dict#1"}])
+
+    def test_empty_records_upload_empty_content(self) -> None:
+        assert self._content([]) == ""
 
 
 class TestUploadTextToGcs:

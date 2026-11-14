@@ -10,6 +10,8 @@ import json
 import logging
 from typing import Any
 
+from pydantic import BaseModel
+
 from data_engineering.config import DataPipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -39,16 +41,17 @@ def _upload_jsonl(
     key = f"{prefix}/swebench/{name}.jsonl"
     blob = bucket.blob(key)
 
-    def to_dict(r: Any) -> Any:
-        """Convert record to dict, handling both Pydantic models and dicts."""
+    def to_json(r: Any) -> str:
+        """Serialise a record: Pydantic's Rust serializer when available."""
+        if isinstance(r, BaseModel):
+            return r.model_dump_json()
         if hasattr(r, "model_dump"):
-            return r.model_dump()
+            return json.dumps(r.model_dump(), default=str)
         if hasattr(r, "dict"):
-            return r.dict()
-        return r
+            return json.dumps(r.dict(), default=str)
+        return json.dumps(r, default=str)
 
-    lines = [json.dumps(to_dict(r), default=str) + "\n" for r in records]
-    content = "".join(lines)
+    content = "".join(to_json(r) + "\n" for r in records)
 
     blob.upload_from_string(content, content_type="application/jsonl")
 
