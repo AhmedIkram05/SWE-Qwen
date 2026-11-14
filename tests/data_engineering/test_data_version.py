@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import call, patch
 
 from data_engineering.config import DataPipelineConfig
@@ -9,6 +10,7 @@ from data_engineering.schema import IssueRecord, ValidationError
 from data_engineering.version import (
     _build_artifact_metadata,
     _errors_to_jsonl,
+    _records_to_jsonl,
     log_dataset_artifacts,
     log_validation_errors,
 )
@@ -33,6 +35,38 @@ class TestErrorsToJsonl:
         assert "r1" in content
         assert "body" in content
         assert "empty" in content
+
+
+class TestRecordsToJsonl:
+    def test_one_line_per_record(self, tmp_path) -> None:
+        p = tmp_path / "records.jsonl"
+        _records_to_jsonl([_rec("r#1"), _rec("r#2")], p)
+        lines = p.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        assert [json.loads(line)["issue_id"] for line in lines] == ["r#1", "r#2"]
+
+    def test_non_ascii_is_written_as_utf8(self, tmp_path) -> None:
+        rec = _rec("r#u").model_copy(update={"issue_body": "naïve café 日本語 🚀"})
+        p = tmp_path / "records.jsonl"
+        _records_to_jsonl([rec], p)
+        assert "naïve café 日本語 🚀".encode() in p.read_bytes()
+        assert json.loads(p.read_text(encoding="utf-8"))["issue_body"] == ("naïve café 日本語 🚀")
+
+    def test_empty_list_writes_empty_file(self, tmp_path) -> None:
+        p = tmp_path / "records.jsonl"
+        _records_to_jsonl([], p)
+        assert p.read_text() == ""
+
+    def test_serialises_without_an_intermediate_dict(self, tmp_path, monkeypatch) -> None:
+        rec = _rec("r#fast")
+        p = tmp_path / "records.jsonl"
+
+        def _boom(*_args, **_kwargs):
+            raise AssertionError("model_dump() reintroduced in the artifact writer")
+
+        monkeypatch.setattr(IssueRecord, "model_dump", _boom)
+        _records_to_jsonl([rec], p)
+        assert json.loads(p.read_text(encoding="utf-8"))["issue_id"] == "r#fast"
 
 
 class TestBuildArtifactMetadata:

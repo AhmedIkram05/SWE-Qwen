@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from pydantic import BaseModel
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -47,6 +48,7 @@ from data_engineering.schema import (
     PipelineStats,
     RepoResult,
     Splits,
+    ValidationError,
 )
 from observability.metrics import log_metrics
 
@@ -73,14 +75,7 @@ def _save_stage_gcs(
         prefix = f"datasets/{run_id}/{repo_id}"
         key = f"{prefix}/{stage}.jsonl"
         blob = bucket.blob(key)
-        lines = []
-        for r in records:
-            if hasattr(r, "model_dump"):
-                line = json.dumps(r.model_dump(), default=str)
-            else:
-                line = json.dumps(r, default=str)
-            lines.append(line + "\n")
-        content = "".join(lines)
+        content = "".join(_jsonl_line(r) + "\n" for r in records)
         blob.upload_from_string(content, content_type="application/jsonl")
         logging.info(
             f"Uploaded {len(records)} records to gs://{config.gcs_bucket}/datasets/{run_id}/{repo_id}/{stage}.jsonl"
@@ -124,6 +119,19 @@ def _load_stage_gcs(
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+
+def _jsonl_line(rec: Any) -> str:
+    """One JSONL line for a Pydantic record or a plain dict.
+
+    ``model_dump_json`` serialises straight from the model (Rust core) and
+    skips the intermediate dict that ``json.dumps(model_dump())`` builds.
+    """
+    if isinstance(rec, BaseModel):
+        return rec.model_dump_json()
+    if hasattr(rec, "model_dump"):
+        return json.dumps(rec.model_dump(), default=str)
+    return json.dumps(rec, default=str)
 
 
 def _manifest_hash(manifest: dict[str, Any]) -> str:
@@ -235,13 +243,9 @@ def _save_stage(
     out_dir = _checkpoint_dir(config, run_id, repo_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{stage}.jsonl"
-    with path.open("w") as f:
+    with path.open("w", encoding="utf-8") as f:
         for rec in records:
-            if isinstance(rec, IssueRecord):
-                line = json.dumps(rec.model_dump(), default=str)
-            else:
-                line = json.dumps(rec, default=str)
-            f.write(line + "\n")
+            f.write(_jsonl_line(rec) + "\n")
 
     # GCS save (async-style, non-blocking)
     if config.gcs_bucket:
@@ -273,6 +277,41 @@ def _load_stage(
 
 
 # SWE-bench pipeline
+
+# Records converted to dicts per validation batch. Bounds the transient dict
+# copy to one batch instead of the whole corpus (~1.2 GB at 20k records).
+_VALIDATE_CHUNK = 1000
+
+
+def _validate_in_chunks(
+    raw_records: list[IssueRecord],
+) -> tuple[list[IssueRecord], list[ValidationError]]:
+    """Validate records in bounded batches, preserving input order.
+
+    ``validate_batch`` needs dicts, so one call would materialise a dict copy
+    of the whole corpus alongside the raw and validated record lists. Chunking
+    keeps only one batch's dicts alive at a time.
+    """
+    validated: list[IssueRecord] = []
+    errors: list[ValidationError] = []
+    for start in range(0, len(raw_records), _VALIDATE_CHUNK):
+        chunk = raw_records[start : start + _VALIDATE_CHUNK]
+        batch_dicts = [r.model_dump() for r in chunk]
+        try:
+            valid, batch_errors = validate.validate_batch(batch_dicts, log_summary=False)
+        finally:
+            del batch_dicts
+        validated.extend(valid)
+        errors.extend(batch_errors)
+
+    if errors:
+        logger.warning(
+            "Validation: %d valid, %d errors across %d records",
+            len(validated),
+            len(errors),
+            len(raw_records),
+        )
+    return validated, errors
 
 
 class SwebenchPhaseResult(NamedTuple):
@@ -345,24 +384,17 @@ def run_pipeline_swebench(
 
             if resume_from and resume_from in ("validated", "cleaned"):
                 logger.info("Resuming from '%s' -- skipping SWE-bench ingest", resume_from)
-                raw_dicts = _load_stage(config, run_id, "swebench", "raw")
-                raw_records = [IssueRecord(**r) for r in raw_dicts]
+                raw_records = [
+                    IssueRecord(**r) for r in _load_stage(config, run_id, "swebench", "raw")
+                ]
             elif not ingest_enabled:
                 raw_records = []
             else:
                 progress.update(task, description="Ingesting SWE-bench dataset...")
                 logger.info("Ingesting SWE-bench dataset...")
                 raw_records = swebench_ingest.ingest_swebench(config)
-                _save_stage(
-                    [r.model_dump() for r in raw_records],
-                    config,
-                    run_id,
-                    "swebench",
-                    "raw",
-                )
-
-            # Convert to dicts for validation (validate_batch expects dicts)
-            raw_dicts = [r.model_dump() for r in raw_records]
+                # _save_stage serialises records directly; no temporary dump list.
+                _save_stage(raw_records, config, run_id, "swebench", "raw")
 
             logger.info("SWE-bench raw records: %d", len(raw_records))
             progress.update(task, advance=1, description=f"Raw: {len(raw_records)} records")
@@ -382,13 +414,7 @@ def run_pipeline_swebench(
             if config.bigquery_enabled:
                 progress.update(task, description="Augmenting with BigQuery...")
                 raw_records = swebench_ingest.augment_with_bigquery(raw_records, config)
-                _save_stage(
-                    [r.model_dump() for r in raw_records],
-                    config,
-                    run_id,
-                    "swebench",
-                    "bigquery_augmented",
-                )
+                _save_stage(raw_records, config, run_id, "swebench", "bigquery_augmented")
                 wandb_run.log({"stage_bigquery_augmented": len(raw_records)})
 
             # Stage 2: Validate
@@ -400,19 +426,11 @@ def run_pipeline_swebench(
                 validated = []
             else:
                 progress.update(task, description="Validating records...")
-                # Use augmented records if BigQuery enabled, otherwise use raw
-                validation_dicts = (
-                    [r.model_dump() for r in raw_records] if config.bigquery_enabled else raw_dicts
-                )
-                validated, validation_errors = validate.validate_batch(validation_dicts)
-                _save_stage(
-                    [r.model_dump() for r in validated],
-                    config,
-                    run_id,
-                    "swebench",
-                    "validated",
-                )
+                validated, validation_errors = _validate_in_chunks(raw_records)
+                _save_stage(validated, config, run_id, "swebench", "validated")
                 if validation_errors:
+                    # ValidationError.raw_value is arbitrary Any; keep the
+                    # dict path so default=str can serialise it.
                     _save_stage(
                         [e.model_dump() for e in validation_errors],
                         config,
@@ -519,12 +537,9 @@ def _save_splits_jsonl(
     # Helper to save records
     def save_records(records, filename):
         path = out_dir / filename
-        with path.open("w") as f:
+        with path.open("w", encoding="utf-8") as f:
             for rec in records:
-                if hasattr(rec, "model_dump"):
-                    f.write(json.dumps(rec.model_dump(), default=str) + "\n")
-                else:
-                    f.write(json.dumps(rec, default=str) + "\n")
+                f.write(_jsonl_line(rec) + "\n")
         logger.info("Saved %d records to %s", len(records), path)
 
     save_records(splits.train, "train.jsonl")
@@ -608,8 +623,6 @@ def run_pipeline(config: DataPipelineConfig) -> PipelineResult:
     _save_splits_jsonl(splits, golden_set, config, run_id)
 
     # Collect validation errors
-    from data_engineering.schema import ValidationError
-
     all_validation_errors: list[ValidationError] = []
     for d in _load_stage(config, run_id, "swebench", "validation_errors"):
         try:

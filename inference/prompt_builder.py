@@ -21,6 +21,8 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from functools import cache, lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -358,6 +360,41 @@ def file_snippets(
 
 
 _file_snippets = file_snippets  # backward-compat alias
+
+
+def prefetch_raw_files(
+    requests: Iterable[tuple[str, str, str]],
+    *,
+    max_workers: int = 8,
+) -> int:
+    """Warm ``fetch_raw_file``'s LRU cache for ``(repo, base_sha, path)`` keys.
+
+    Prompt rendering fetches one file at a time. A tokenization pass issues
+    millions of such round-trips sequentially; warming the cache with a
+    bounded pool first turns that into a handful of parallel requests per
+    chunk. Best-effort: a failed fetch is already a cache miss that rendering
+    degrades to a path-only prompt, so failures are logged and skipped.
+
+    Returns:
+        The number of unique requests attempted.
+    """
+    unique = list(dict.fromkeys(requests))
+    if not unique:
+        return 0
+    fetch = _eval()._fetch_raw_file
+    workers = max(1, min(max_workers, len(unique)))
+
+    def _one(key: tuple[str, str, str]) -> None:
+        try:
+            fetch(*key)
+        except Exception as exc:
+            # Rendering treats an unreachable file as a missing snippet, so a
+            # prefetch failure must never abort tokenization.
+            logger.debug("snippet prefetch failed for %s: %s", key, exc)
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="snippet-prefetch") as pool:
+        list(pool.map(_one, unique))
+    return len(unique)
 
 
 # ── Few-shot golden examples ──────────────────────────────────────────────
